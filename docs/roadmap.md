@@ -37,13 +37,14 @@
 - Eight inspectable restoration presets
 - Clear language distinguishing restoration from reconstructed content
 
-## Phase 3 — Guided editing (planned)
+## Phase 3 — Guided local editing (complete)
 
-- Deterministic rule-based natural-language interpreter
-- Strict JSON edit-plan schema and proposal review UI
-- Approval before applying a plan
-- Optional adapters for local runtimes without coupling core code to Ollama
-- Perspective correction, auto-crop, and deterministic batch workflows remain candidates before or alongside guided editing
+- Deterministic `RuleBasedPlanner` informed by cached image-analysis heuristics
+- Strict typed edit-plan schema, safe ordering/conflict validation, and proposal review UI
+- Human explanations, heuristic confidence, warnings, operation removal/reordering/strength editing, and approval before applying
+- Suggested requests, optional 25-entry local prompt history, and local display/history settings
+- `EditPlanner` trait isolates any future optional local planner adapter without coupling the restoration engine to Ollama
+- Perspective correction, auto-crop, and deterministic batch workflows remain later candidates
 
 ## Later, optional AI work
 
@@ -51,4 +52,4 @@
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No neural restoration, OCR, perspective correction, batch processing, or LLM integration is implemented in the current deliverable.
+No Ollama integration, neural restoration, OCR, perspective correction, batch processing, chatbot, cloud API, or LLM integration is implemented in the current deliverable.

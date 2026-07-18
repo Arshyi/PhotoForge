@@ -130,6 +130,14 @@ Analysis calculates normalized average luminance, 5th–95th percentile spread, 
 
 Interactive previews are generated from a decoded source copy whose longest dimension is at most 1600 pixels. Full-resolution export reruns the same validated operation sequence against the cached original. There are no preview-only algorithm substitutions. Pixel-domain radii cover a physically smaller portion of a full-resolution image, but their mathematical meaning and operation ordering do not change. The source file is not decoded for each adjustment.
 
+## Phase 3 guided planning
+
+Guided Edit is not an image-processing algorithm. `RuleBasedPlanner` normalizes a bounded request, matches documented phrase groups, consults the already cached quality analysis, and proposes an `EditPlan`. The proposal contains only operations implemented by PhotoForge; no operation can contain generated pixels, executable code, a path, or a model instruction.
+
+The planner can propose bounded brightness/contrast adjustments and existing Phase 2 restoration operations for color casts, weak local contrast, noise, JPEG blocks, slight softness, uneven illumination, and documents. It sorts proposals into a safe cleanup-to-detail order, deduplicates operation types, caps plans at eight operations, and adds limitations where restoration may amplify noise or cannot recover discarded information. Unknown intent is rejected instead of being guessed.
+
+The user may remove, reorder, or adjust proposed operations. Every edited plan then crosses the Rust `validate_guided_plan` boundary again. Only validated `Vec<EditOperation>` enters the same preview and full-resolution export pipeline documented above. Guided planning therefore adds no new pixel semantics, approximation, encoder behavior, or alpha policy.
+
 ## Export policy
 
 - PNG: lossless RGBA; alpha is preserved.

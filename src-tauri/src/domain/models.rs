@@ -200,6 +200,26 @@ pub struct AnalysisResult {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPlan {
+    pub summary: String,
+    pub confidence: f32,
+    pub warnings: Vec<String>,
+    pub operations: Vec<EditOperation>,
+    pub operation_explanations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanResult {
+    pub plan: Option<EditPlan>,
+    pub document_id: u64,
+    pub request_id: u64,
+    pub processing_time_ms: f64,
+    pub is_current: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

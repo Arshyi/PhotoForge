@@ -15,8 +15,10 @@ pub struct AppState {
     pub pending_open_request: AtomicU64,
     pub latest_preview_request: AtomicU64,
     pub latest_analysis_request: AtomicU64,
+    pub latest_plan_request: AtomicU64,
     pub preview_gate: tokio::sync::Mutex<()>,
     pub analysis_gate: tokio::sync::Mutex<()>,
+    pub plan_gate: tokio::sync::Mutex<()>,
     pub export_gate: tokio::sync::Mutex<()>,
 }
 
@@ -28,8 +30,10 @@ impl Default for AppState {
             pending_open_request: AtomicU64::new(0),
             latest_preview_request: AtomicU64::new(0),
             latest_analysis_request: AtomicU64::new(0),
+            latest_plan_request: AtomicU64::new(0),
             preview_gate: tokio::sync::Mutex::new(()),
             analysis_gate: tokio::sync::Mutex::new(()),
+            plan_gate: tokio::sync::Mutex::new(()),
             export_gate: tokio::sync::Mutex::new(()),
         }
     }

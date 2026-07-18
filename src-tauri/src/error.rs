@@ -15,6 +15,12 @@ pub enum AppError {
     ProcessingFailure(String),
     #[error("PhotoForge could not analyze this image. Try reopening it.")]
     AnalysisFailure,
+    #[error("Image analysis is still being prepared. Try the guided request again in a moment.")]
+    AnalysisUnavailable,
+    #[error("PhotoForge could not match that request to supported deterministic edits. Try a suggested request or name the lighting, color, noise, sharpness, JPEG, or document problem.")]
+    PlannerNoMatch,
+    #[error("Invalid guided edit plan: {0}")]
+    InvalidPlan(String),
     #[error("This restoration setting requires too many resources. Choose a smaller radius or tile size.")]
     RestorationResourceLimit,
     #[error("PhotoForge could not export the edited image.")]
@@ -40,6 +46,9 @@ impl AppError {
             Self::DecodeFailure => "decode_failure",
             Self::ProcessingFailure(_) => "processing_failure",
             Self::AnalysisFailure => "analysis_failure",
+            Self::AnalysisUnavailable => "analysis_unavailable",
+            Self::PlannerNoMatch => "planner_no_match",
+            Self::InvalidPlan(_) => "invalid_plan",
             Self::RestorationResourceLimit => "restoration_resource_limit",
             Self::ExportFailure => "export_failure",
             Self::InvalidOperation(_) => "invalid_operation",

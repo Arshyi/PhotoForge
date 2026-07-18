@@ -5,6 +5,7 @@
   import { open, save } from '@tauri-apps/plugin-dialog';
   import ImageStage from './lib/components/ImageStage.svelte';
   import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
+  import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
@@ -14,6 +15,7 @@
     EditOperation,
     AnalysisResult,
     ExportResult,
+    GuidedSettings,
     ImageQualityAnalysis,
     ImageMetadata,
     OpenImageResult,
@@ -21,6 +23,11 @@
     PreviewResult
   } from './lib/types/editor';
   import { errorMessage, formatBytes } from './lib/utils/format';
+  import {
+    defaultGuidedSettings,
+    loadGuidedSettings,
+    saveGuidedSettings
+  } from './lib/utils/guided';
   import { operationLabels, presets, replaceOperation, valueFor } from './lib/utils/operations';
 
   const history = new EditHistory();
@@ -46,16 +53,19 @@
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
+  let guidedSettings: GuidedSettings = { ...defaultGuidedSettings };
   let toast = '';
   let toastKind: 'error' | 'success' = 'success';
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsCloseButton: HTMLButtonElement;
+  let settingsDialog: HTMLDialogElement;
 
   $: canUndo = history.canUndo;
   $: canRedo = history.canRedo;
   $: comparisonUsesSplitView = valueFor(operations, 'rotate', 0) % 360 !== 0;
 
   onMount(() => {
+    guidedSettings = loadGuidedSettings();
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -303,6 +313,10 @@
     commit(presetOperations);
   }
 
+  function applyGuidedPlan(planOperations: EditOperation[]) {
+    commit(planOperations);
+  }
+
   async function exportImage() {
     if (!metadata || exporting || opening) return;
     try {
@@ -349,8 +363,27 @@
     document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
   }
 
+  function updateGuidedSetting(key: keyof GuidedSettings, value: boolean) {
+    guidedSettings = { ...guidedSettings, [key]: value };
+    saveGuidedSettings(guidedSettings);
+  }
+
   function trapSettingsFocus(event: KeyboardEvent) {
-    if (event.key === 'Tab') event.preventDefault();
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(
+      settingsDialog.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
   }
 </script>
 
@@ -427,6 +460,15 @@
         inert={!metadata || opening}
         aria-disabled={!metadata || opening}
       >
+        <GuidedEditPanel
+          {documentId}
+          ready={Boolean(metadata && analysis)}
+          disabled={opening}
+          settings={guidedSettings}
+          onapply={applyGuidedPlan}
+          onmessage={notify}
+        />
+
         <section class="tool-section">
           <h2><span>☀</span> Light</h2>
           <SliderControl
@@ -590,7 +632,7 @@
     role="presentation"
     on:click={(event) => event.target === event.currentTarget && closeSettings()}
   >
-    <dialog open class="modal" aria-labelledby="settings-title" on:keydown={trapSettingsFocus}>
+    <dialog bind:this={settingsDialog} open class="modal" aria-labelledby="settings-title" on:keydown={trapSettingsFocus}>
       <div class="modal-heading">
         <div><span>Settings</span><h1 id="settings-title">Local by design</h1></div>
         <button bind:this={settingsCloseButton} type="button" aria-label="Close settings" on:click={closeSettings}>×</button>
@@ -609,6 +651,41 @@
         <span class="setting-icon">◎</span>
         <div><strong>Analytics and telemetry</strong><p>PhotoForge includes no analytics, crash reporting, or remote logs.</p></div>
         <em>Off</em>
+      </div>
+      <div class="guided-settings" aria-labelledby="guided-settings-title">
+        <h2 id="guided-settings-title">Guided Edit preferences</h2>
+        <label>
+          <span><strong>Show warnings</strong><small>Display conservative limitations in each proposed plan.</small></span>
+          <input
+            type="checkbox"
+            checked={guidedSettings.showWarnings}
+            on:change={(event) => updateGuidedSetting('showWarnings', event.currentTarget.checked)}
+          />
+        </label>
+        <label>
+          <span><strong>Show confidence</strong><small>Display heuristic rule-match strength.</small></span>
+          <input
+            type="checkbox"
+            checked={guidedSettings.showConfidence}
+            on:change={(event) => updateGuidedSetting('showConfidence', event.currentTarget.checked)}
+          />
+        </label>
+        <label>
+          <span><strong>Automatically open plan inspector</strong><small>Open operation editing immediately after planning.</small></span>
+          <input
+            type="checkbox"
+            checked={guidedSettings.autoOpenPlanInspector}
+            on:change={(event) => updateGuidedSetting('autoOpenPlanInspector', event.currentTarget.checked)}
+          />
+        </label>
+        <label>
+          <span><strong>Remember prompt history</strong><small>Keep up to 25 requests in local browser storage.</small></span>
+          <input
+            type="checkbox"
+            checked={guidedSettings.rememberPromptHistory}
+            on:change={(event) => updateGuidedSetting('rememberPromptHistory', event.currentTarget.checked)}
+          />
+        </label>
       </div>
       <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
     </dialog>

@@ -79,6 +79,29 @@ export interface AnalysisResult {
   isCurrent: boolean;
 }
 
+export interface EditPlan {
+  summary: string;
+  confidence: number;
+  warnings: string[];
+  operations: EditOperation[];
+  operationExplanations: string[];
+}
+
+export interface PlanResult {
+  plan: EditPlan | null;
+  documentId: number;
+  requestId: number;
+  processingTimeMs: number;
+  isCurrent: boolean;
+}
+
+export interface GuidedSettings {
+  showWarnings: boolean;
+  showConfidence: boolean;
+  autoOpenPlanInspector: boolean;
+  rememberPromptHistory: boolean;
+}
+
 export interface AppErrorPayload {
   code?: string;
   message?: string;
