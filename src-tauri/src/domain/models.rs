@@ -56,6 +56,8 @@ pub struct OpenImageResult {
     pub original_preview_data_url: String,
     pub preview_data_url: String,
     pub processing_time_ms: f64,
+    pub document_id: u64,
+    pub is_current: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

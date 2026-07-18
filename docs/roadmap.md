@@ -16,6 +16,16 @@
 - Undo, redo, reset, comparison, zoom, progress, and current-preview status
 - Path, format, parameter, image-size, and stale-result safeguards
 
+## Phase 1.1 — Audit and release hardening (complete)
+
+- Document-generation protection for competing opens and previews
+- Bounded/coalesced preview work and serialized export work
+- Explicit PNG, JPEG, and WebP export policies
+- 40 MP memory ceiling and decoder allocation limits
+- Slider history coalescing and 200-entry history cap
+- Correct rotated comparison layout and modal/disabled-control keyboard hardening
+- Expanded format, corruption, alpha, transform, validation, and packaging verification
+
 ## Phase 2 — Restoration tools (planned)
 
 - Automatic white balance

@@ -1,6 +1,6 @@
 # Image processing
 
-PhotoForge applies operations in the exact order shown by the pipeline. Every operation returns a new RGBA image and preserves the source alpha channel unless geometry changes pixel placement.
+PhotoForge applies operations in the exact order shown by the pipeline. The source is converted to 8-bit RGBA once, then every operation returns a new RGBA buffer and preserves alpha unless geometry changes pixel placement.
 
 ## Implemented operations
 
@@ -42,6 +42,15 @@ Sharpening increases local edge contrast. It does not reconstruct information ab
 
 Interactive previews are generated from a decoded source copy whose longest dimension is at most 1600 pixels. Full-resolution export reruns the same validated operation sequence against the cached original. The source file is not decoded for each adjustment.
 
+## Export policy
+
+- PNG: lossless RGBA; alpha is preserved.
+- WebP: lossless RGBA; alpha is preserved.
+- JPEG: quality 90; transparency is explicitly composited onto white before encoding.
+- Output dimensions and operation order match the full-resolution pipeline. The original input bytes are never rewritten.
+
+PhotoForge detects the output format from the selected `.png`, `.jpg`/`.jpeg`, or `.webp` extension. It does not silently choose an encoder default.
+
 ## Color limitations
 
-Phase 1 processes 8-bit RGBA values and does not yet preserve embedded ICC profiles, EXIF metadata, HDR depth, or animation. JPEG export is lossy; PNG should be chosen when lossless output or alpha matters. These constraints are candidates for later phases.
+Phase 1 processes 8-bit channel values in the decoded image crate representation. Most arithmetic is performed directly on those encoded channel values rather than in linear light, so it is deterministic but not a color-managed photographic workflow. Embedded ICC profiles, EXIF metadata, HDR depth, and animation are not preserved. These constraints are candidates for later phases.

@@ -6,7 +6,7 @@
   export let isCurrent = true;
 </script>
 
-<footer>
+<footer aria-live="polite" aria-atomic="true">
   <span>{dimensions}</span>
   <i></i>
   <span>{zoom}%</span>

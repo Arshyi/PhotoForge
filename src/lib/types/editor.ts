@@ -25,6 +25,8 @@ export interface OpenImageResult {
   originalPreviewDataUrl: string;
   previewDataUrl: string;
   processingTimeMs: number;
+  documentId: number;
+  isCurrent: boolean;
 }
 
 export interface PreviewResult {

@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "photoforge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -2195,6 +2195,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open, save } from '@tauri-apps/plugin-dialog';
@@ -31,16 +31,22 @@
   let previewCurrent = true;
   let processingTime = 0;
   let requestId = 0;
+  let documentId = 0;
+  let activeOpenRequest = 0;
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
+  let renderInFlight = false;
+  let previewQueued = false;
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
   let toast = '';
   let toastKind: 'error' | 'success' = 'success';
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let settingsCloseButton: HTMLButtonElement;
 
   $: canUndo = history.canUndo;
   $: canRedo = history.canRedo;
+  $: comparisonUsesSplitView = valueFor(operations, 'rotate', 0) % 360 !== 0;
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
@@ -54,6 +60,11 @@
       .catch(() => undefined);
 
     const handleKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && settingsOpen) {
+        event.preventDefault();
+        closeSettings();
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === 'o') {
         event.preventDefault();
@@ -79,6 +90,7 @@
       window.removeEventListener('keydown', handleKeys);
       if (renderTimer) clearTimeout(renderTimer);
       if (toastTimer) clearTimeout(toastTimer);
+      previewQueued = false;
     };
   });
 
@@ -105,16 +117,23 @@
   }
 
   async function loadPath(path: string) {
+    const ownOpenRequest = ++requestId;
+    activeOpenRequest = ownOpenRequest;
     opening = true;
     processing = true;
     previewCurrent = false;
-    requestId += 1;
+    previewQueued = false;
     if (renderTimer) clearTimeout(renderTimer);
     try {
-      const result = await invoke<OpenImageResult>('open_image', { path });
+      const result = await invoke<OpenImageResult>('open_image', {
+        path,
+        requestId: ownOpenRequest
+      });
+      if (!result.isCurrent || activeOpenRequest !== ownOpenRequest) return;
       history.clear();
       operations = [];
       metadata = result.metadata;
+      documentId = result.documentId;
       originalUrl = result.originalPreviewDataUrl;
       previewUrl = result.previewDataUrl;
       processingTime = result.processingTimeMs;
@@ -123,47 +142,75 @@
       previewCurrent = true;
       notify(`${result.metadata.filename} opened locally`);
     } catch (error) {
-      notify(errorMessage(error), 'error');
+      if (activeOpenRequest === ownOpenRequest) {
+        previewCurrent = true;
+        notify(errorMessage(error), 'error');
+      }
     } finally {
-      opening = false;
-      processing = false;
+      if (activeOpenRequest === ownOpenRequest) {
+        opening = false;
+        processing = renderInFlight;
+      }
     }
   }
 
   function schedulePreview() {
     if (!metadata) return;
+    requestId += 1;
     previewCurrent = false;
+    previewQueued = true;
     if (renderTimer) clearTimeout(renderTimer);
-    renderTimer = setTimeout(() => void renderPreview(), 120);
+    if (operations.length === 0) {
+      previewQueued = false;
+      previewUrl = originalUrl;
+      processingTime = 0;
+      previewCurrent = true;
+      return;
+    }
+    renderTimer = setTimeout(() => void drainPreviewQueue(), 120);
   }
 
-  async function renderPreview() {
-    if (!metadata) return;
-    const ownRequest = ++requestId;
-    const pipeline = operations.map((operation) => ({ ...operation })) as EditOperation[];
-    processing = true;
+  async function drainPreviewQueue() {
+    if (renderInFlight || !metadata || opening) return;
+    renderInFlight = true;
     try {
-      const result = await invoke<PreviewResult>('render_preview', {
-        operations: pipeline,
-        requestId: ownRequest
-      });
-      if (result.isCurrent && result.requestId === requestId) {
-        previewUrl = result.previewDataUrl;
-        processingTime = result.processingTimeMs;
-        previewCurrent = true;
-      }
-    } catch (error) {
-      if (ownRequest === requestId) {
-        previewCurrent = true;
-        notify(errorMessage(error), 'error');
+      while (previewQueued && metadata && !opening) {
+        previewQueued = false;
+        const ownRequest = requestId;
+        const ownDocument = documentId;
+        const pipeline = operations.map((operation) => ({ ...operation })) as EditOperation[];
+        processing = true;
+        try {
+          const result = await invoke<PreviewResult>('render_preview', {
+            operations: pipeline,
+            documentId: ownDocument,
+            requestId: ownRequest
+          });
+          if (
+            result.isCurrent &&
+            result.requestId === requestId &&
+            ownDocument === documentId
+          ) {
+            previewUrl = result.previewDataUrl;
+            processingTime = result.processingTimeMs;
+            previewCurrent = true;
+          }
+        } catch (error) {
+          if (ownRequest === requestId && ownDocument === documentId) {
+            previewCurrent = true;
+            notify(errorMessage(error), 'error');
+          }
+        }
       }
     } finally {
-      if (ownRequest === requestId) processing = false;
+      renderInFlight = false;
+      if (!opening) processing = false;
+      if (previewQueued && !opening) void drainPreviewQueue();
     }
   }
 
-  function commit(next: EditOperation[]) {
-    operations = history.commit(next);
+  function commit(next: EditOperation[], coalesceKey?: string) {
+    operations = history.commit(next, coalesceKey);
     schedulePreview();
   }
 
@@ -173,7 +220,10 @@
     defaultValue: number,
     build: (input: number) => EditOperation
   ) {
-    commit(replaceOperation(operations, build(value), Math.abs(value - defaultValue) > 0.0001));
+    commit(
+      replaceOperation(operations, build(value), Math.abs(value - defaultValue) > 0.0001),
+      type
+    );
   }
 
   function toggle(operation: EditOperation) {
@@ -211,7 +261,7 @@
   }
 
   async function exportImage() {
-    if (!metadata || exporting) return;
+    if (!metadata || exporting || opening) return;
     try {
       const stem = metadata.filename.replace(/\.[^.]+$/, '');
       const outputPath = await save({
@@ -243,13 +293,29 @@
   }
 
   const percent = (value: number) => `${Math.round(value * 100)}%`;
+
+  async function openSettings() {
+    settingsOpen = true;
+    await tick();
+    settingsCloseButton?.focus();
+  }
+
+  async function closeSettings() {
+    settingsOpen = false;
+    await tick();
+    document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+  }
+
+  function trapSettingsFocus(event: KeyboardEvent) {
+    if (event.key === 'Tab') event.preventDefault();
+  }
 </script>
 
 <svelte:head>
   <title>{metadata ? `${metadata.filename} — PhotoForge` : 'PhotoForge'}</title>
 </svelte:head>
 
-<div class="app-shell">
+<div class="app-shell" inert={settingsOpen} aria-hidden={settingsOpen}>
   <header class="topbar">
     <div class="brand" aria-label="PhotoForge">
       <span class="brand-mark" aria-hidden="true"><b></b><i></i></span>
@@ -258,11 +324,11 @@
     </div>
 
     <nav class="primary-actions" aria-label="File actions">
-      <ToolButton label="Open" icon="＋" primary onclick={chooseImage} />
+      <ToolButton label="Open" icon="＋" primary disabled={opening} onclick={chooseImage} />
       <ToolButton
         label={exporting ? 'Exporting' : 'Export'}
         icon="⇩"
-        disabled={!metadata || exporting}
+        disabled={!metadata || exporting || opening}
         onclick={exportImage}
       />
     </nav>
@@ -275,7 +341,7 @@
 
     <div class="top-spacer"></div>
     <div class="privacy-chip" title="No cloud uploads"><span></span> Offline</div>
-    <ToolButton label="Settings" icon="⚙" onclick={() => (settingsOpen = true)} />
+    <ToolButton label="Settings" icon="⚙" onclick={openSettings} />
   </header>
 
   <main>
@@ -285,6 +351,7 @@
       filename={metadata?.filename ?? ''}
       {comparison}
       {comparisonPosition}
+      splitComparison={comparisonUsesSplitView}
       {zoom}
       {processing}
       stale={!previewCurrent}
@@ -311,7 +378,12 @@
         </div>
       {/if}
 
-      <div class="scroll-panel" class:disabled={!metadata}>
+      <div
+        class="scroll-panel"
+        class:disabled={!metadata || opening}
+        inert={!metadata || opening}
+        aria-disabled={!metadata || opening}
+      >
         <section class="tool-section">
           <h2><span>☀</span> Light</h2>
           <SliderControl
@@ -428,14 +500,14 @@
   </main>
 
   <div class="viewbar" aria-label="Preview controls">
-    <button type="button" class:active={comparison} disabled={!metadata} on:click={() => (comparison = !comparison)}>
+    <button type="button" class:active={comparison} disabled={!metadata || opening} on:click={() => (comparison = !comparison)}>
       ◫ <span>Compare</span>
     </button>
     <i></i>
-    <button type="button" disabled={!metadata} aria-label="Zoom out" on:click={() => (zoom = Math.max(25, zoom - 25))}>−</button>
+    <button type="button" disabled={!metadata || opening} aria-label="Zoom out" on:click={() => (zoom = Math.max(25, zoom - 25))}>−</button>
     <span class="zoom-value">{zoom}%</span>
-    <button type="button" disabled={!metadata} aria-label="Zoom in" on:click={() => (zoom = Math.min(400, zoom + 25))}>＋</button>
-    <button type="button" disabled={!metadata} on:click={() => (zoom = 100)}>Fit</button>
+    <button type="button" disabled={!metadata || opening} aria-label="Zoom in" on:click={() => (zoom = Math.min(400, zoom + 25))}>＋</button>
+    <button type="button" disabled={!metadata || opening} on:click={() => (zoom = 100)}>Fit</button>
   </div>
 
   <StatusBar
@@ -458,12 +530,12 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    on:click={(event) => event.target === event.currentTarget && (settingsOpen = false)}
+    on:click={(event) => event.target === event.currentTarget && closeSettings()}
   >
-    <dialog open class="modal" aria-labelledby="settings-title">
+    <dialog open class="modal" aria-labelledby="settings-title" on:keydown={trapSettingsFocus}>
       <div class="modal-heading">
         <div><span>Settings</span><h1 id="settings-title">Local by design</h1></div>
-        <button type="button" aria-label="Close settings" on:click={() => (settingsOpen = false)}>×</button>
+        <button bind:this={settingsCloseButton} type="button" aria-label="Close settings" on:click={closeSettings}>×</button>
       </div>
       <div class="setting-row">
         <span class="setting-icon">⌂</span>

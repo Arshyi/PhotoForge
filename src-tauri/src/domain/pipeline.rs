@@ -1,6 +1,8 @@
 use super::EditOperation;
 use crate::error::AppError;
 
+const MAX_HISTORY_ENTRIES: usize = 200;
+
 #[derive(Debug, Default)]
 pub struct EditPipeline {
     operations: Vec<EditOperation>,
@@ -19,6 +21,9 @@ impl EditPipeline {
         }
         if operations != self.operations {
             self.undo_stack.push(self.operations.clone());
+            if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
+                self.undo_stack.remove(0);
+            }
             self.operations = operations;
             self.redo_stack.clear();
         }
@@ -48,6 +53,9 @@ impl EditPipeline {
             return false;
         }
         self.undo_stack.push(self.operations.clone());
+        if self.undo_stack.len() > MAX_HISTORY_ENTRIES {
+            self.undo_stack.remove(0);
+        }
         self.operations.clear();
         self.redo_stack.clear();
         true
@@ -92,5 +100,22 @@ mod tests {
         assert!(pipeline
             .replace(vec![EditOperation::Gamma { value: 0.0 }])
             .is_err());
+    }
+
+    #[test]
+    fn bounds_retained_history_snapshots() {
+        let mut pipeline = EditPipeline::default();
+        for index in 0..205 {
+            pipeline
+                .replace(vec![EditOperation::Brightness {
+                    amount: index as f32 / 1_000.0,
+                }])
+                .unwrap();
+        }
+        let mut undo_count = 0;
+        while pipeline.undo() {
+            undo_count += 1;
+        }
+        assert_eq!(undo_count, MAX_HISTORY_ENTRIES);
     }
 }

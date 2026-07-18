@@ -4,10 +4,27 @@ use std::sync::Mutex;
 
 pub struct EditorSession {
     pub source: LoadedImage,
+    pub document_id: u64,
 }
 
-#[derive(Default)]
 pub struct AppState {
     pub session: Mutex<Option<EditorSession>>,
-    pub latest_request: AtomicU64,
+    pub latest_open_request: AtomicU64,
+    pub pending_open_request: AtomicU64,
+    pub latest_preview_request: AtomicU64,
+    pub preview_gate: tokio::sync::Mutex<()>,
+    pub export_gate: tokio::sync::Mutex<()>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            session: Mutex::new(None),
+            latest_open_request: AtomicU64::new(0),
+            pending_open_request: AtomicU64::new(0),
+            latest_preview_request: AtomicU64::new(0),
+            preview_gate: tokio::sync::Mutex::new(()),
+            export_gate: tokio::sync::Mutex::new(()),
+        }
+    }
 }

@@ -4,6 +4,7 @@
   export let filename = '';
   export let comparison = false;
   export let comparisonPosition = 50;
+  export let splitComparison = false;
   export let zoom = 100;
   export let processing = false;
   export let stale = false;
@@ -14,23 +15,36 @@
 <section class="stage" aria-label="Image preview">
   {#if previewUrl}
     <div class="canvas-shell" class:processing class:stale>
-      <div class="canvas" style={`--zoom: ${zoom / 100}`}>
-        <img class="processed" src={previewUrl} alt={`Edited preview of ${filename}`} draggable="false" />
-        {#if comparison && originalUrl}
-          <div class="before" style={`width: ${comparisonPosition}%`}>
+      {#if comparison && originalUrl && splitComparison}
+        <div class="split-canvas" style={`--zoom: ${zoom / 100}`}>
+          <figure>
             <img src={originalUrl} alt={`Original preview of ${filename}`} draggable="false" />
-          </div>
-          <div class="divider" style={`left: ${comparisonPosition}%`} aria-hidden="true">
-            <span>↔</span>
-          </div>
-          <span class="badge before-badge">Before</span>
-          <span class="badge after-badge">After</span>
-        {/if}
-      </div>
+            <figcaption>Before · original orientation</figcaption>
+          </figure>
+          <figure>
+            <img src={previewUrl} alt={`Edited preview of ${filename}`} draggable="false" />
+            <figcaption>After · transformed</figcaption>
+          </figure>
+        </div>
+      {:else}
+        <div class="canvas" style={`--zoom: ${zoom / 100}`}>
+          <img class="processed" src={previewUrl} alt={`Edited preview of ${filename}`} draggable="false" />
+          {#if comparison && originalUrl}
+            <div class="before" style={`width: ${comparisonPosition}%`}>
+              <img src={originalUrl} alt={`Original preview of ${filename}`} draggable="false" />
+            </div>
+            <div class="divider" style={`left: ${comparisonPosition}%`} aria-hidden="true">
+              <span>↔</span>
+            </div>
+            <span class="badge before-badge">Before</span>
+            <span class="badge after-badge">After</span>
+          {/if}
+        </div>
+      {/if}
       {#if processing}
         <div class="processing-pill"><span></span> Forging preview</div>
       {/if}
-      {#if comparison}
+      {#if comparison && !splitComparison}
         <label class="comparison-slider">
           <span class="sr-only">Before and after divider</span>
           <input
@@ -100,6 +114,48 @@
     transition: transform 120ms ease;
     box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(255,255,255,0.08);
     background: repeating-conic-gradient(#20221e 0 25%, #292c27 0 50%) 50% / 18px 18px;
+  }
+
+  .split-canvas {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: center;
+    transform: scale(var(--zoom));
+    transform-origin: center;
+    transition: transform 120ms ease;
+  }
+
+  .split-canvas figure {
+    min-width: 0;
+    position: relative;
+    display: grid;
+    place-items: center;
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    background: repeating-conic-gradient(#20221e 0 25%, #292c27 0 50%) 50% / 18px 18px;
+    box-shadow: 0 20px 55px rgba(0, 0, 0, 0.4);
+  }
+
+  .split-canvas img {
+    max-width: min(34vw, 520px);
+    max-height: calc(100vh - 245px);
+  }
+
+  .split-canvas figcaption {
+    position: absolute;
+    left: 9px;
+    bottom: 9px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    color: white;
+    background: rgba(16, 18, 15, 0.78);
+    font: 700 0.58rem/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    backdrop-filter: blur(8px);
   }
 
   img {
@@ -306,5 +362,7 @@
   @media (max-width: 760px) {
     .stage { padding: 16px; }
     img { max-width: 88vw; max-height: calc(100vh - 240px); }
+    .split-canvas { grid-template-columns: 1fr; }
+    .split-canvas img { max-width: 78vw; max-height: calc((100vh - 280px) / 2); }
   }
 </style>

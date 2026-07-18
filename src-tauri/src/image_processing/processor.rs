@@ -6,21 +6,21 @@ pub fn apply_pipeline(
     source: &DynamicImage,
     operations: &[EditOperation],
 ) -> Result<DynamicImage, AppError> {
-    let mut current = source.clone();
+    if operations.is_empty() {
+        return Ok(source.clone());
+    }
+
+    let mut current = source.to_rgba8();
     for operation in operations {
         operation.validate()?;
         current = apply_operation(&current, operation)?;
     }
-    Ok(current)
+    Ok(DynamicImage::ImageRgba8(current))
 }
 
-fn apply_operation(
-    image: &DynamicImage,
-    operation: &EditOperation,
-) -> Result<DynamicImage, AppError> {
-    let rgba = image.to_rgba8();
+fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaImage, AppError> {
     let output = match operation {
-        EditOperation::Brightness { amount } => map_rgb(&rgba, |red, green, blue| {
+        EditOperation::Brightness { amount } => map_rgb(image, |red, green, blue| {
             let offset = amount * 255.0;
             (
                 clamp(red as f32 + offset),
@@ -30,7 +30,7 @@ fn apply_operation(
         }),
         EditOperation::Contrast { amount } => {
             let factor = 1.0 + amount;
-            map_rgb(&rgba, |red, green, blue| {
+            map_rgb(image, |red, green, blue| {
                 (
                     clamp((red as f32 - 127.5) * factor + 127.5),
                     clamp((green as f32 - 127.5) * factor + 127.5),
@@ -40,7 +40,7 @@ fn apply_operation(
         }
         EditOperation::Saturation { amount } => {
             let factor = 1.0 + amount;
-            map_rgb(&rgba, |red, green, blue| {
+            map_rgb(image, |red, green, blue| {
                 let luminance = 0.2126 * red as f32 + 0.7152 * green as f32 + 0.0722 * blue as f32;
                 (
                     clamp(luminance + (red as f32 - luminance) * factor),
@@ -51,7 +51,7 @@ fn apply_operation(
         }
         EditOperation::Gamma { value } => {
             let inverse = 1.0 / value;
-            map_rgb(&rgba, |red, green, blue| {
+            map_rgb(image, |red, green, blue| {
                 (
                     clamp(255.0 * (red as f32 / 255.0).powf(inverse)),
                     clamp(255.0 * (green as f32 / 255.0).powf(inverse)),
@@ -59,12 +59,12 @@ fn apply_operation(
                 )
             })
         }
-        EditOperation::Grayscale => map_rgb(&rgba, |red, green, blue| {
+        EditOperation::Grayscale => map_rgb(image, |red, green, blue| {
             let luminance =
                 clamp(0.2126 * red as f32 + 0.7152 * green as f32 + 0.0722 * blue as f32);
             (luminance, luminance, luminance)
         }),
-        EditOperation::Sepia => map_rgb(&rgba, |red, green, blue| {
+        EditOperation::Sepia => map_rgb(image, |red, green, blue| {
             let red = red as f32;
             let green = green as f32;
             let blue = blue as f32;
@@ -74,12 +74,12 @@ fn apply_operation(
                 clamp(0.272 * red + 0.534 * green + 0.131 * blue),
             )
         }),
-        EditOperation::ReflectHorizontal => imageops::flip_horizontal(&rgba),
+        EditOperation::ReflectHorizontal => imageops::flip_horizontal(image),
         EditOperation::Rotate { degrees } => match degrees.rem_euclid(360) {
-            0 => rgba,
-            90 => imageops::rotate90(&rgba),
-            180 => imageops::rotate180(&rgba),
-            270 => imageops::rotate270(&rgba),
+            0 => image.clone(),
+            90 => imageops::rotate90(image),
+            180 => imageops::rotate180(image),
+            270 => imageops::rotate270(image),
             _ => {
                 return Err(AppError::InvalidOperation(
                     "rotation must be a multiple of 90 degrees".into(),
@@ -88,15 +88,15 @@ fn apply_operation(
         },
         EditOperation::GaussianBlur { radius } => {
             if *radius == 0.0 {
-                rgba
+                image.clone()
             } else {
-                imageops::blur(&rgba, *radius)
+                imageops::blur(image, *radius)
             }
         }
-        EditOperation::Sharpen { strength } => unsharp_mask(&rgba, *strength),
+        EditOperation::Sharpen { strength } => unsharp_mask(image, *strength),
     };
 
-    Ok(DynamicImage::ImageRgba8(output))
+    Ok(output)
 }
 
 fn map_rgb<F>(source: &RgbaImage, mut transform: F) -> RgbaImage
@@ -216,5 +216,89 @@ mod tests {
         )
         .unwrap();
         assert_ne!(first.to_rgba8(), reversed.to_rgba8());
+    }
+
+    #[test]
+    fn neutral_operations_are_pixel_exact() {
+        let source = image(2, 1, &[[12, 34, 56, 78], [210, 180, 140, 99]]);
+        for operation in [
+            EditOperation::Brightness { amount: 0.0 },
+            EditOperation::Contrast { amount: 0.0 },
+            EditOperation::Saturation { amount: 0.0 },
+            EditOperation::Gamma { value: 1.0 },
+            EditOperation::GaussianBlur { radius: 0.0 },
+            EditOperation::Sharpen { strength: 0.0 },
+        ] {
+            assert_eq!(
+                apply_pipeline(&source, &[operation]).unwrap().to_rgba8(),
+                source.to_rgba8()
+            );
+        }
+    }
+
+    #[test]
+    fn saturation_minimum_matches_grayscale_luminance() {
+        let source = image(1, 1, &[[200, 100, 25, 41]]);
+        let desaturated = apply_pipeline(&source, &[EditOperation::Saturation { amount: -1.0 }])
+            .unwrap()
+            .to_rgba8();
+        let grayscale = apply_pipeline(&source, &[EditOperation::Grayscale])
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(desaturated, grayscale);
+        assert_eq!(desaturated.get_pixel(0, 0)[3], 41);
+    }
+
+    #[test]
+    fn sepia_uses_documented_coefficients_and_preserves_alpha() {
+        let source = image(1, 1, &[[100, 150, 200, 37]]);
+        let result = apply_pipeline(&source, &[EditOperation::Sepia])
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(result.get_pixel(0, 0).0, [192, 171, 134, 37]);
+    }
+
+    #[test]
+    fn sharpening_preserves_alpha() {
+        let source = image(3, 1, &[[0, 0, 0, 10], [255, 128, 64, 20], [0, 0, 0, 30]]);
+        let result = apply_pipeline(&source, &[EditOperation::Sharpen { strength: 1.5 }])
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(
+            result.pixels().map(|pixel| pixel[3]).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn validates_non_finite_parameters() {
+        let source = image(1, 1, &[[0, 0, 0, 255]]);
+        assert!(
+            apply_pipeline(&source, &[EditOperation::Brightness { amount: f32::NAN }]).is_err()
+        );
+        assert!(apply_pipeline(
+            &source,
+            &[EditOperation::GaussianBlur {
+                radius: f32::INFINITY,
+            }]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn transform_then_pixel_operation_keeps_rotated_dimensions() {
+        let source = image(2, 1, &[[10, 20, 30, 1], [40, 50, 60, 2]]);
+        let result = apply_pipeline(
+            &source,
+            &[
+                EditOperation::Rotate { degrees: 270 },
+                EditOperation::Brightness { amount: 0.1 },
+            ],
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(result.dimensions(), (1, 2));
+        assert_eq!(result.get_pixel(0, 0).0, [66, 76, 86, 2]);
+        assert_eq!(result.get_pixel(0, 1).0, [36, 46, 56, 1]);
     }
 }

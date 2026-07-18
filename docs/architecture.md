@@ -19,7 +19,7 @@ Svelte presentation
 
 `src-tauri/src/domain` owns `EditOperation`, `EditPipeline`, image metadata, and command result types. Operations use Serde's tagged representation, so TypeScript and Rust exchange JSON such as `{ "type": "brightness", "amount": 0.12 }`. Every operation validates its parameter range before processing.
 
-`EditPipeline` maintains the current ordered operations plus undo and redo snapshots. The presentation has a matching tested history model so interactions remain immediate; Rust still validates every pipeline at the trust boundary.
+`EditPipeline` maintains the current ordered operations plus undo and redo snapshots. Both Rust and TypeScript cap history at 200 snapshots. The presentation coalesces rapid events from one slider gesture into a single undo step; Rust still validates every pipeline at the trust boundary.
 
 ### Application
 
@@ -29,6 +29,7 @@ Svelte presentation
 - decoded full-resolution image behind `Arc`;
 - decoded preview capped at 1600 pixels;
 - immutable image metadata.
+- a monotonically increasing document identifier.
 
 The source is decoded once. Tauri commands clone only reference-counted handles before moving CPU work to a blocking worker, keeping the UI and async runtime responsive.
 
@@ -48,16 +49,21 @@ Svelte components under `src/lib/components` implement the toolbar, editor contr
 
 The Rust session retains decoded pixels. Interactive operations run against the cached downscaled image, which is PNG-encoded and returned as a data URL. This avoids sending uncompressed RGBA buffers over IPC while keeping the preview entirely local.
 
-Each preview request records a monotonically increasing generation. Rust suppresses encoding when a completed result is no longer current, and the frontend independently checks the request ID before replacing the visible preview. Export always rebuilds the pipeline from the cached full-resolution source.
+Open and preview requests record separate monotonically increasing generations. A new open invalidates pending preview work immediately. The frontend keeps at most one preview IPC request in flight and retains only the newest queued state. Rust independently serializes preview CPU work, discards superseded queued requests before processing, and rechecks both document and request identifiers before encoding. This two-sided protocol prevents a stale open, the debounce window, or a slow old preview from replacing newer state.
+
+Export uses a separate single-job gate and always rebuilds the pipeline from the cached full-resolution source. An empty pipeline exports the shared source without an unnecessary full-image clone.
 
 ## Security boundaries
 
 - Only native open/save dialogs choose paths.
 - File formats are detected from content and restricted to PNG, JPEG, and WebP.
 - Dimensions and encoded file size are checked before full decode.
+- Inputs are limited to 40 million pixels, 20,000 pixels per dimension, 256 MiB decoder allocation, and 750 MiB encoded size.
 - Output paths must be absolute, have an allowed image extension, and differ from the canonical input path.
 - Commands accept typed operations, never command strings.
 - No shell, arbitrary filesystem API, remote endpoint, or model tool is exposed.
+
+The settings dialog makes the application shell inert while open, traps keyboard focus, returns focus to the settings button on close, and supports Escape. Controls that require a document are removed from keyboard interaction while unavailable.
 
 ## Extension points
 
