@@ -118,4 +118,31 @@ mod tests {
         }
         assert_eq!(undo_count, MAX_HISTORY_ENTRIES);
     }
+
+    #[test]
+    fn restoration_operations_support_undo_and_redo() {
+        let mut pipeline = EditPipeline::default();
+        pipeline
+            .replace(vec![EditOperation::Denoise {
+                strength: 0.5,
+                preserve_edges: 0.8,
+            }])
+            .unwrap();
+        pipeline
+            .replace(vec![EditOperation::DocumentEnhance {
+                strength: 0.7,
+                grayscale: false,
+            }])
+            .unwrap();
+        assert!(pipeline.undo());
+        assert!(matches!(
+            pipeline.operations()[0],
+            EditOperation::Denoise { .. }
+        ));
+        assert!(pipeline.redo());
+        assert!(matches!(
+            pipeline.operations()[0],
+            EditOperation::DocumentEnhance { .. }
+        ));
+    }
 }

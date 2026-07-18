@@ -34,4 +34,12 @@ describe('ImageStage comparison layout', () => {
     expect(view.getByLabelText('Before and after divider')).toBeTruthy();
     expect(view.container.querySelector('.split-canvas')).toBeNull();
   });
+
+  it('announces the processing indicator while retaining the current image', () => {
+    const view = render(ImageStage, {
+      props: { ...baseProps, splitComparison: false, comparison: false, processing: true }
+    });
+    expect(view.getByText('Forging preview')).toBeTruthy();
+    expect(view.getByAltText('Edited preview of fixture.png')).toBeTruthy();
+  });
 });

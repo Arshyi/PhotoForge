@@ -201,6 +201,9 @@ aside {
 .preset-list strong { color: inherit; font-size: 0.67rem; }
 .preset-list small { color: var(--ink-faint); font-size: 0.56rem; }
 .preset-list b { font-size: 1rem; }
+.pipeline-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.pipeline-list li { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 0.62rem; }
+.pipeline-list li span { width: 19px; height: 19px; display: grid; place-items: center; border-radius: 5px; color: var(--accent); background: var(--accent-dim); font: 0.55rem/1 var(--font-mono); }
 
 .viewbar {
   display: flex;

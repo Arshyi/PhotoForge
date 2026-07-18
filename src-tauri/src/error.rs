@@ -13,6 +13,10 @@ pub enum AppError {
     DecodeFailure,
     #[error("PhotoForge could not process this edit pipeline: {0}")]
     ProcessingFailure(String),
+    #[error("PhotoForge could not analyze this image. Try reopening it.")]
+    AnalysisFailure,
+    #[error("This restoration setting requires too many resources. Choose a smaller radius or tile size.")]
+    RestorationResourceLimit,
     #[error("PhotoForge could not export the edited image.")]
     ExportFailure,
     #[error("Invalid edit: {0}")]
@@ -35,6 +39,8 @@ impl AppError {
             Self::ImageTooLarge { .. } => "image_too_large",
             Self::DecodeFailure => "decode_failure",
             Self::ProcessingFailure(_) => "processing_failure",
+            Self::AnalysisFailure => "analysis_failure",
+            Self::RestorationResourceLimit => "restoration_resource_limit",
             Self::ExportFailure => "export_failure",
             Self::InvalidOperation(_) => "invalid_operation",
             Self::InvalidOutputPath => "invalid_output_path",

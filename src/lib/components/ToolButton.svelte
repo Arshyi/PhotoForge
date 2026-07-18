@@ -15,7 +15,7 @@
   {disabled}
   {title}
   aria-label={label}
-  on:click={onclick}
+  on:click={() => !disabled && onclick()}
 >
   <span class="icon" aria-hidden="true">{icon}</span>
   <span class="label">{label}</span>

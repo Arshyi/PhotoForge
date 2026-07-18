@@ -8,7 +8,15 @@ export type EditOperation =
   | { type: 'reflect_horizontal' }
   | { type: 'rotate'; degrees: number }
   | { type: 'gaussian_blur'; radius: number }
-  | { type: 'sharpen'; strength: number };
+  | { type: 'sharpen'; strength: number }
+  | { type: 'auto_white_balance'; strength: number }
+  | { type: 'local_contrast'; strength: number; tile_size: number; clip_limit: number }
+  | { type: 'denoise'; strength: number; preserve_edges: number }
+  | { type: 'deblock'; strength: number }
+  | { type: 'edge_aware_sharpen'; strength: number; radius: number; threshold: number }
+  | { type: 'mild_deblur'; strength: number; radius: number }
+  | { type: 'document_enhance'; strength: number; grayscale: boolean }
+  | { type: 'uneven_lighting_correction'; strength: number; radius: number };
 
 export type OperationType = EditOperation['type'];
 
@@ -42,6 +50,33 @@ export interface ExportResult {
   width: number;
   height: number;
   processingTimeMs: number;
+}
+
+export interface ColorCastEstimate {
+  dominant: 'neutral' | 'warm' | 'cool' | 'green' | 'mixed';
+  redBias: number;
+  greenBias: number;
+  blueBias: number;
+}
+
+export interface ImageQualityAnalysis {
+  averageLuminance: number;
+  luminanceSpread: number;
+  estimatedColorCast: ColorCastEstimate;
+  estimatedNoise: number;
+  estimatedSharpness: number;
+  estimatedLocalContrast: number;
+  edgeDensity: number;
+  whiteBackgroundRatio: number;
+  likelyDocument: boolean;
+}
+
+export interface AnalysisResult {
+  analysis: ImageQualityAnalysis | null;
+  documentId: number;
+  requestId: number;
+  processingTimeMs: number;
+  isCurrent: boolean;
 }
 
 export interface AppErrorPayload {

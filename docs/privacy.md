@@ -11,10 +11,14 @@ PhotoForge is designed to work fully offline.
 - Preview data is not written to a temporary file.
 - The webview has no shell or unrestricted filesystem capability; user-selected paths cross only three typed commands.
 - Paths are canonicalized at the Rust boundary, supported formats are detected from content, and exports require an absolute user-selected image path.
-- No AI model is loaded or downloaded by Phase 1.
+- Restoration algorithms and quality analysis run locally on decoded pixels and validated numeric parameters.
+- Analysis results remain in process memory, do not identify people or content, and are discarded when the document is replaced or the app exits.
+- No AI model is loaded or downloaded by Phase 2.
 
 The packaged application was observed with zero TCP connections during the Phase 1.1 startup/idle smoke test. That observation supports the source and CSP review; it is not a claim that Windows or WebView2 itself can never perform unrelated operating-system activity.
 
 Development builds can print technical failures to local development tooling. User-facing errors contain concise messages rather than stack traces.
+
+Phase 2 introduces no networking dependency, telemetry, remote resource, runtime download, or new filesystem capability. `analyze_image` is the only added Tauri command and reads only the already decoded active image.
 
 Any future cloud integration must be visibly identified, disabled by default, and explicitly opted into. Any future local model download must show its source, size, resource requirements, and obtain approval before downloading.

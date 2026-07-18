@@ -6,7 +6,7 @@ mod image_processing;
 pub mod infrastructure;
 
 use application::AppState;
-use commands::{export_image, open_image, render_preview};
+use commands::{analyze_image, export_image, open_image, render_preview};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,6 +16,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_image,
             render_preview,
+            analyze_image,
             export_image
         ])
         .run(tauri::generate_context!())

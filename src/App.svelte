@@ -4,20 +4,24 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import ImageStage from './lib/components/ImageStage.svelte';
+  import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
+  import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToolButton from './lib/components/ToolButton.svelte';
   import { EditHistory } from './lib/stores/history';
   import type {
     EditOperation,
+    AnalysisResult,
     ExportResult,
+    ImageQualityAnalysis,
     ImageMetadata,
     OpenImageResult,
     OperationType,
     PreviewResult
   } from './lib/types/editor';
   import { errorMessage, formatBytes } from './lib/utils/format';
-  import { presets, replaceOperation, valueFor } from './lib/utils/operations';
+  import { operationLabels, presets, replaceOperation, valueFor } from './lib/utils/operations';
 
   const history = new EditHistory();
   let operations: EditOperation[] = [];
@@ -32,6 +36,9 @@
   let processingTime = 0;
   let requestId = 0;
   let documentId = 0;
+  let analysisRequestId = 0;
+  let analysis: ImageQualityAnalysis | null = null;
+  let analyzing = false;
   let activeOpenRequest = 0;
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
   let renderInFlight = false;
@@ -91,6 +98,7 @@
       if (renderTimer) clearTimeout(renderTimer);
       if (toastTimer) clearTimeout(toastTimer);
       previewQueued = false;
+      analysisRequestId += 1;
     };
   });
 
@@ -134,6 +142,7 @@
       operations = [];
       metadata = result.metadata;
       documentId = result.documentId;
+      analysis = null;
       originalUrl = result.originalPreviewDataUrl;
       previewUrl = result.previewDataUrl;
       processingTime = result.processingTimeMs;
@@ -141,6 +150,7 @@
       comparison = false;
       previewCurrent = true;
       notify(`${result.metadata.filename} opened locally`);
+      void requestAnalysis(result.documentId);
     } catch (error) {
       if (activeOpenRequest === ownOpenRequest) {
         previewCurrent = true;
@@ -151,6 +161,31 @@
         opening = false;
         processing = renderInFlight;
       }
+    }
+  }
+
+  async function requestAnalysis(ownDocument: number) {
+    const ownRequest = ++analysisRequestId;
+    analyzing = true;
+    try {
+      const result = await invoke<AnalysisResult>('analyze_image', {
+        documentId: ownDocument,
+        requestId: ownRequest
+      });
+      if (
+        result.isCurrent &&
+        result.requestId === analysisRequestId &&
+        result.documentId === documentId &&
+        result.analysis
+      ) {
+        analysis = result.analysis;
+      }
+    } catch (error) {
+      if (ownRequest === analysisRequestId && ownDocument === documentId) {
+        notify(errorMessage(error), 'error');
+      }
+    } finally {
+      if (ownRequest === analysisRequestId) analyzing = false;
     }
   }
 
@@ -229,6 +264,14 @@
   function toggle(operation: EditOperation) {
     const enabled = !operations.some((candidate) => candidate.type === operation.type);
     commit(replaceOperation(operations, operation, enabled));
+  }
+
+  function setRestoration(
+    operation: EditOperation,
+    enabled: boolean,
+    coalesceKey?: string
+  ) {
+    commit(replaceOperation(operations, operation, enabled), coalesceKey);
   }
 
   function rotate(delta: number) {
@@ -420,6 +463,10 @@
           />
         </section>
 
+        <AnalysisPanel {analysis} {analyzing} />
+
+        <RestorationPanel {operations} onset={setRestoration} />
+
         <section class="tool-section">
           <h2><span>◒</span> Color</h2>
           <SliderControl
@@ -495,6 +542,17 @@
             {/each}
           </div>
         </section>
+
+        {#if operations.length}
+          <section class="tool-section pipeline-section" aria-labelledby="pipeline-heading">
+            <h2 id="pipeline-heading"><span>≡</span> Active Pipeline</h2>
+            <ol class="pipeline-list">
+              {#each operations as operation, index}
+                <li><span>{index + 1}</span>{operationLabels[operation.type]}</li>
+              {/each}
+            </ol>
+          </section>
+        {/if}
       </div>
     </aside>
   </main>

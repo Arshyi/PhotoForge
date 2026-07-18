@@ -2,7 +2,7 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation, Phase 1 editor, and Phase 1.1 release-hardening fixes. The current version is **0.1.1**.
+This repository contains the Phase 0 foundation, Phase 1 editor, Phase 1.1 hardening, and Phase 2 deterministic restoration tools. The current version is **0.2.0**.
 
 ## What works
 
@@ -15,6 +15,9 @@ This repository contains the Phase 0 foundation, Phase 1 editor, and Phase 1.1 r
 - Protection against overwriting the original image
 - Document and request-generation checks that prevent stale opens or previews from replacing newer results
 - Bounded preview/export work and a 200-entry history ceiling
+- Auto white balance, local contrast, edge-preserving denoise, JPEG cleanup, edge-aware sharpening, mild deblur, uneven-lighting correction, and document enhancement
+- Eight conservative restoration presets made from inspectable typed operations
+- Local heuristic image analysis that observes luminance, color cast, noise, sharpness, contrast, edges, and document-like structure without auto-applying edits
 - No telemetry, analytics, remote logging, Python runtime, cloud service, or mandatory AI model
 
 ## Requirements
@@ -58,9 +61,11 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 
 1. Select **Open**, press `Ctrl+O`, or drop a supported image into the workspace.
 2. Adjust controls or choose a preset. Slider gestures are coalesced into useful undo steps, and previews are generated from a cached copy capped at 1600 pixels.
-3. Use **Compare** to drag between images. Rotated comparisons switch to side-by-side views so neither image is distorted.
-4. Undo with `Ctrl+Z`, redo with `Ctrl+Y` or `Ctrl+Shift+Z`, or reset the pipeline.
-5. Select **Export** or press `Ctrl+S`. PhotoForge processes the original at full resolution and requires a destination different from the source file.
+3. Use the **Restoration** section for captured color, lighting, noise, compression, softness, or document-readability problems. Advanced controls are optional.
+4. Review **Image Analysis** as a cautious heuristic summary; it never applies edits automatically.
+5. Use **Compare** to drag between images. Rotated comparisons switch to side-by-side views so neither image is distorted.
+6. Undo with `Ctrl+Z`, redo with `Ctrl+Y` or `Ctrl+Shift+Z`, or reset the pipeline.
+7. Select **Export** or press `Ctrl+S`. PhotoForge processes the original at full resolution and requires a destination different from the source file.
 
 ## Architecture and project notes
 
@@ -72,10 +77,12 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Phase checklist](docs/checklist.md)
 - [Phase 1.1 audit](docs/phase-1-1-audit.md)
 - [Phase 1.1 results](docs/phase-1-1-results.md)
+- [Phase 2 plan](docs/phase-2-plan.md)
+- [Phase 2 results](docs/phase-2-results.md)
 
 ## Honest scope
 
-PhotoForge's sharpening and filters are deterministic image-processing operations. They can improve appearance and edge contrast, but they cannot recreate genuinely missing detail. Neural restoration and natural-language editing are intentionally outside Phase 1.
+PhotoForge Phase 2 uses deterministic image processing. It does not generate missing image content or reconstruct factual details that were never captured. Neural restoration, OCR, perspective correction, and natural-language editing are intentionally outside this release.
 
 ## License
 

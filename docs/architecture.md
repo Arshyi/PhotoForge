@@ -8,7 +8,7 @@ PhotoForge is local-first, non-destructive, modular, and conservative with memor
 
 ```text
 Svelte presentation
-  └─ typed Tauri commands: open_image, render_preview, export_image
+  └─ typed Tauri commands: open_image, render_preview, analyze_image, export_image
        └─ application state and use-case orchestration
             ├─ domain: operations, pipeline, metadata, results, errors
             ├─ image_processing: deterministic pixel algorithms
@@ -17,7 +17,7 @@ Svelte presentation
 
 ### Domain
 
-`src-tauri/src/domain` owns `EditOperation`, `EditPipeline`, image metadata, and command result types. Operations use Serde's tagged representation, so TypeScript and Rust exchange JSON such as `{ "type": "brightness", "amount": 0.12 }`. Every operation validates its parameter range before processing.
+`src-tauri/src/domain` owns `EditOperation`, `EditPipeline`, image metadata, analysis heuristics, and command result types. Operations use Serde's tagged representation, so TypeScript and Rust exchange JSON such as `{ "type": "auto_white_balance", "strength": 0.7 }`. Ordinary and restoration operations share one ordered pipeline and validate every parameter before processing.
 
 `EditPipeline` maintains the current ordered operations plus undo and redo snapshots. Both Rust and TypeScript cap history at 200 snapshots. The presentation coalesces rapid events from one slider gesture into a single undo step; Rust still validates every pipeline at the trust boundary.
 
@@ -30,12 +30,13 @@ Svelte presentation
 - decoded preview capped at 1600 pixels;
 - immutable image metadata.
 - a monotonically increasing document identifier.
+- an optional cached quality analysis for that document.
 
 The source is decoded once. Tauri commands clone only reference-counted handles before moving CPU work to a blocking worker, keeping the UI and async runtime responsive.
 
 ### Image processing
 
-`src-tauri/src/image_processing` is independent of Tauri and filesystem code. It accepts an image and ordered operations and returns a new image. This makes algorithms unit-testable and replaceable.
+`src-tauri/src/image_processing` is independent of Tauri and filesystem code. `processor` applies ordered operations, `restoration` contains deterministic restoration algorithms, and `analysis` calculates lightweight heuristics. This keeps algorithms unit-testable without changing the application boundary.
 
 ### Infrastructure
 
@@ -43,7 +44,7 @@ The source is decoded once. Tauri commands clone only reference-counted handles 
 
 ### Presentation
 
-Svelte components under `src/lib/components` implement the toolbar, editor controls, image stage, and status bar. TypeScript types mirror the Rust operation schema. The frontend debounces controls and attaches increasing request IDs to preview work.
+Svelte components under `src/lib/components` implement the toolbar, ordinary controls, Restoration panel, Analysis panel, image stage, and status bar. TypeScript types mirror the Rust operation schema. The active pipeline list makes preset expansion and operation ordering visible.
 
 ## Preview transport and stale-result protection
 
@@ -53,6 +54,12 @@ Open and preview requests record separate monotonically increasing generations. 
 
 Export uses a separate single-job gate and always rebuilds the pipeline from the cached full-resolution source. An empty pipeline exports the shared source without an unnecessary full-image clone.
 
+## Analysis lifecycle
+
+Analysis runs once per open document against the cached preview on a blocking worker. An analysis gate bounds CPU work independently from preview/export, and request/document generations prevent stale observations from appearing after a new open. A completed result is cached in the editor session so UI rerenders do not recalculate it. Analysis never changes the edit pipeline.
+
+The metrics are deterministic heuristics—not definitive diagnoses—and the frontend uses cautious language such as “appears” and “possible.”
+
 ## Security boundaries
 
 - Only native open/save dialogs choose paths.
@@ -61,13 +68,13 @@ Export uses a separate single-job gate and always rebuilds the pipeline from the
 - Inputs are limited to 40 million pixels, 20,000 pixels per dimension, 256 MiB decoder allocation, and 750 MiB encoded size.
 - Output paths must be absolute, have an allowed image extension, and differ from the canonical input path.
 - Commands accept typed operations, never command strings.
-- No shell, arbitrary filesystem API, remote endpoint, or model tool is exposed.
+- No shell, arbitrary filesystem API, remote endpoint, model tool, or auto-apply analysis action is exposed.
 
 The settings dialog makes the application shell inert while open, traps keyboard focus, returns focus to the settings button on close, and supports Escape. Controls that require a document are removed from keyboard interaction while unavailable.
 
 ## Extension points
 
 - New deterministic edits: add a domain variant, validation, processor implementation, TypeScript mirror, and tests.
-- Restoration: introduce a separate tagged `RestorationOperation` handled by a restoration processor.
+- Restoration: add another validated tagged operation and implement it inside the focused restoration processor.
 - Guided edits: implement `EditPlanProvider`; validate returned operations before presenting a proposal for user approval.
 - Storage: move preferences serialization behind an application-directory repository without changing the domain or UI.

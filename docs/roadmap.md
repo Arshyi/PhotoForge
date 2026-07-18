@@ -26,13 +26,15 @@
 - Correct rotated comparison layout and modal/disabled-control keyboard hardening
 - Expanded format, corruption, alpha, transform, validation, and packaging verification
 
-## Phase 2 — Restoration tools (planned)
+## Phase 2 — Deterministic restoration tools (complete)
 
 - Automatic white balance
-- Adaptive local contrast / CLAHE
+- Conservative local-luminance contrast normalization
 - Denoising and JPEG artifact reduction
-- Edge-aware sharpening and conservative motion-blur restoration
-- Document enhancement, perspective correction, auto-crop, and readability mode
+- Edge-aware sharpening and conservative mild-clarity restoration
+- Color/grayscale document enhancement and uneven-lighting correction
+- Lightweight cached image-quality heuristics with no automatic edits
+- Eight inspectable restoration presets
 - Clear language distinguishing restoration from reconstructed content
 
 ## Phase 3 — Guided editing (planned)
@@ -41,6 +43,7 @@
 - Strict JSON edit-plan schema and proposal review UI
 - Approval before applying a plan
 - Optional adapters for local runtimes without coupling core code to Ollama
+- Perspective correction, auto-crop, and deterministic batch workflows remain candidates before or alongside guided editing
 
 ## Later, optional AI work
 
@@ -48,4 +51,4 @@
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No neural restoration or LLM integration is implemented in the current deliverable.
+No neural restoration, OCR, perspective correction, batch processing, or LLM integration is implemented in the current deliverable.

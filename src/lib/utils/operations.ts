@@ -45,6 +45,72 @@ export const presets: Preset[] = [
     name: 'Black and white',
     description: 'Neutral grayscale conversion.',
     operations: [{ type: 'grayscale' }]
+  },
+  {
+    id: 'indoor-lighting',
+    name: 'Fix Indoor Lighting',
+    description: 'Balance a warm cast and lift local contrast.',
+    operations: [
+      { type: 'auto_white_balance', strength: 0.72 },
+      { type: 'local_contrast', strength: 0.32, tile_size: 32, clip_limit: 1.4 }
+    ]
+  },
+  {
+    id: 'old-scan',
+    name: 'Improve Old Scan',
+    description: 'Even lighting, reduce noise, and restore restrained clarity.',
+    operations: [
+      { type: 'uneven_lighting_correction', strength: 0.62, radius: 40 },
+      { type: 'denoise', strength: 0.28, preserve_edges: 0.82 },
+      { type: 'edge_aware_sharpen', strength: 0.46, radius: 1.2, threshold: 0.035 }
+    ]
+  },
+  {
+    id: 'jpeg-cleanup',
+    name: 'Clean Up JPEG',
+    description: 'Soften block boundaries without blurring major edges.',
+    operations: [
+      { type: 'deblock', strength: 0.58 },
+      { type: 'denoise', strength: 0.18, preserve_edges: 0.88 }
+    ]
+  },
+  {
+    id: 'mild-detail',
+    name: 'Mild Detail Recovery',
+    description: 'Conservative clarity for slight softness.',
+    operations: [
+      { type: 'mild_deblur', strength: 0.38, radius: 1.2 },
+      { type: 'edge_aware_sharpen', strength: 0.22, radius: 0.9, threshold: 0.045 }
+    ]
+  },
+  {
+    id: 'document-color',
+    name: 'Enhance Document — Color',
+    description: 'Even a photographed page while retaining colored marks.',
+    operations: [{ type: 'document_enhance', strength: 0.72, grayscale: false }]
+  },
+  {
+    id: 'document-grayscale',
+    name: 'Enhance Document — Grayscale',
+    description: 'Improve page readability in neutral grayscale.',
+    operations: [{ type: 'document_enhance', strength: 0.76, grayscale: true }]
+  },
+  {
+    id: 'uneven-lighting',
+    name: 'Fix Uneven Lighting',
+    description: 'Normalize broad illumination gradients.',
+    operations: [{ type: 'uneven_lighting_correction', strength: 0.7, radius: 48 }]
+  },
+  {
+    id: 'conservative-restore',
+    name: 'Conservative Photo Restore',
+    description: 'Balanced color, noise, contrast, and clarity corrections.',
+    operations: [
+      { type: 'auto_white_balance', strength: 0.42 },
+      { type: 'local_contrast', strength: 0.26, tile_size: 40, clip_limit: 1.25 },
+      { type: 'denoise', strength: 0.22, preserve_edges: 0.86 },
+      { type: 'edge_aware_sharpen', strength: 0.3, radius: 1.1, threshold: 0.04 }
+    ]
   }
 ];
 
@@ -88,3 +154,24 @@ export function valueFor(
 export function cloneOperations(operations: EditOperation[]): EditOperation[] {
   return operations.map((operation) => ({ ...operation })) as EditOperation[];
 }
+
+export const operationLabels: Record<OperationType, string> = {
+  brightness: 'Brightness',
+  contrast: 'Contrast',
+  saturation: 'Saturation',
+  gamma: 'Gamma',
+  grayscale: 'Grayscale',
+  sepia: 'Sepia',
+  reflect_horizontal: 'Reflect',
+  rotate: 'Rotate',
+  gaussian_blur: 'Blur',
+  sharpen: 'Sharpen',
+  auto_white_balance: 'Auto White Balance',
+  local_contrast: 'Local Contrast',
+  denoise: 'Denoise',
+  deblock: 'JPEG Cleanup',
+  edge_aware_sharpen: 'Edge-Aware Sharpen',
+  mild_deblur: 'Mild Deblur',
+  document_enhance: 'Document Enhance',
+  uneven_lighting_correction: 'Uneven Lighting'
+};

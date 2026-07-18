@@ -14,7 +14,7 @@ export function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error && typeof error === 'object') {
     const candidate = error as { message?: unknown };
-    if (typeof candidate.message === 'string') return candidate.message;
+    if (typeof candidate.message === 'string' && candidate.message.trim()) return candidate.message;
   }
   return 'PhotoForge could not complete that action.';
 }

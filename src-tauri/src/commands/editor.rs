@@ -1,7 +1,9 @@
 use crate::application::AppState;
-use crate::domain::{EditOperation, EditPipeline, ExportResult, OpenImageResult, PreviewResult};
+use crate::domain::{
+    AnalysisResult, EditOperation, EditPipeline, ExportResult, OpenImageResult, PreviewResult,
+};
 use crate::error::AppError;
-use crate::image_processing::apply_pipeline;
+use crate::image_processing::{analyze_image_quality, apply_pipeline};
 use crate::infrastructure::{encode_preview, load_image, save_image};
 use image::GenericImageView;
 use std::path::PathBuf;
@@ -23,6 +25,7 @@ pub async fn open_image(
         .pending_open_request
         .store(request_id, Ordering::Release);
     state.latest_preview_request.store(0, Ordering::Release);
+    state.latest_analysis_request.store(0, Ordering::Release);
 
     let input_path = PathBuf::from(path);
     let loaded = match tauri::async_runtime::spawn_blocking(move || load_image(&input_path)).await {
@@ -71,10 +74,88 @@ pub async fn open_image(
     *session = Some(crate::application::EditorSession {
         source: loaded,
         document_id: request_id,
+        analysis: None,
     });
     drop(session);
     clear_pending_open(&state, request_id);
     Ok(result)
+}
+
+fn stale_analysis(document_id: u64, request_id: u64) -> AnalysisResult {
+    AnalysisResult {
+        analysis: None,
+        document_id,
+        request_id,
+        processing_time_ms: 0.0,
+        is_current: false,
+    }
+}
+
+#[tauri::command]
+pub async fn analyze_image(
+    document_id: u64,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<AnalysisResult, AppError> {
+    state
+        .latest_analysis_request
+        .store(request_id, Ordering::Release);
+    let _analysis_permit = state.analysis_gate.lock().await;
+
+    if state.latest_analysis_request.load(Ordering::Acquire) != request_id
+        || state.pending_open_request.load(Ordering::Acquire) != 0
+    {
+        return Ok(stale_analysis(document_id, request_id));
+    }
+
+    let (source, cached) = {
+        let session = state
+            .session
+            .lock()
+            .map_err(|_| AppError::AnalysisFailure)?;
+        let session = session.as_ref().ok_or(AppError::NoImageOpen)?;
+        if session.document_id != document_id {
+            return Ok(stale_analysis(document_id, request_id));
+        }
+        (session.source.preview.clone(), session.analysis.clone())
+    };
+
+    if let Some(analysis) = cached {
+        return Ok(AnalysisResult {
+            analysis: Some(analysis),
+            document_id,
+            request_id,
+            processing_time_ms: 0.0,
+            is_current: true,
+        });
+    }
+
+    let started = Instant::now();
+    let analysis = tauri::async_runtime::spawn_blocking(move || analyze_image_quality(&source))
+        .await
+        .map_err(|_| AppError::AnalysisFailure)?;
+    let is_current = state.latest_analysis_request.load(Ordering::Acquire) == request_id
+        && state.pending_open_request.load(Ordering::Acquire) == 0;
+    if !is_current {
+        return Ok(stale_analysis(document_id, request_id));
+    }
+
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|_| AppError::AnalysisFailure)?;
+    let session = session.as_mut().ok_or(AppError::NoImageOpen)?;
+    if session.document_id != document_id {
+        return Ok(stale_analysis(document_id, request_id));
+    }
+    session.analysis = Some(analysis.clone());
+    Ok(AnalysisResult {
+        analysis: Some(analysis),
+        document_id,
+        request_id,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        is_current: true,
+    })
 }
 
 fn stale_open_result(

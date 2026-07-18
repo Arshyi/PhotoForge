@@ -2,6 +2,8 @@ use crate::domain::EditOperation;
 use crate::error::AppError;
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 
+use super::restoration;
+
 pub fn apply_pipeline(
     source: &DynamicImage,
     operations: &[EditOperation],
@@ -94,6 +96,34 @@ fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaI
             }
         }
         EditOperation::Sharpen { strength } => unsharp_mask(image, *strength),
+        EditOperation::AutoWhiteBalance { strength } => {
+            restoration::auto_white_balance(image, *strength)
+        }
+        EditOperation::LocalContrast {
+            strength,
+            tile_size,
+            clip_limit,
+        } => restoration::local_contrast(image, *strength, *tile_size, *clip_limit),
+        EditOperation::Denoise {
+            strength,
+            preserve_edges,
+        } => restoration::denoise(image, *strength, *preserve_edges),
+        EditOperation::Deblock { strength } => restoration::deblock(image, *strength),
+        EditOperation::EdgeAwareSharpen {
+            strength,
+            radius,
+            threshold,
+        } => restoration::edge_aware_sharpen(image, *strength, *radius, *threshold),
+        EditOperation::MildDeblur { strength, radius } => {
+            restoration::mild_deblur(image, *strength, *radius)
+        }
+        EditOperation::DocumentEnhance {
+            strength,
+            grayscale,
+        } => restoration::document_enhance(image, *strength, *grayscale),
+        EditOperation::UnevenLightingCorrection { strength, radius } => {
+            restoration::uneven_lighting(image, *strength, *radius)
+        }
     };
 
     Ok(output)
@@ -228,6 +258,34 @@ mod tests {
             EditOperation::Gamma { value: 1.0 },
             EditOperation::GaussianBlur { radius: 0.0 },
             EditOperation::Sharpen { strength: 0.0 },
+            EditOperation::AutoWhiteBalance { strength: 0.0 },
+            EditOperation::LocalContrast {
+                strength: 0.0,
+                tile_size: 8,
+                clip_limit: 0.5,
+            },
+            EditOperation::Denoise {
+                strength: 0.0,
+                preserve_edges: 0.0,
+            },
+            EditOperation::Deblock { strength: 0.0 },
+            EditOperation::EdgeAwareSharpen {
+                strength: 0.0,
+                radius: 0.5,
+                threshold: 0.0,
+            },
+            EditOperation::MildDeblur {
+                strength: 0.0,
+                radius: 0.5,
+            },
+            EditOperation::DocumentEnhance {
+                strength: 0.0,
+                grayscale: true,
+            },
+            EditOperation::UnevenLightingCorrection {
+                strength: 0.0,
+                radius: 4.0,
+            },
         ] {
             assert_eq!(
                 apply_pipeline(&source, &[operation]).unwrap().to_rgba8(),
@@ -300,5 +358,97 @@ mod tests {
         assert_eq!(result.dimensions(), (1, 2));
         assert_eq!(result.get_pixel(0, 0).0, [66, 76, 86, 2]);
         assert_eq!(result.get_pixel(0, 1).0, [36, 46, 56, 1]);
+    }
+
+    #[test]
+    fn restoration_operations_participate_in_pipeline_ordering() {
+        let source = image(8, 8, &vec![[160, 100, 70, 255]; 64]);
+        let first = apply_pipeline(
+            &source,
+            &[
+                EditOperation::AutoWhiteBalance { strength: 1.0 },
+                EditOperation::Brightness { amount: 0.1 },
+            ],
+        )
+        .unwrap();
+        let reversed = apply_pipeline(
+            &source,
+            &[
+                EditOperation::Brightness { amount: 0.1 },
+                EditOperation::AutoWhiteBalance { strength: 1.0 },
+            ],
+        )
+        .unwrap();
+        assert_ne!(first.to_rgba8(), reversed.to_rgba8());
+    }
+
+    #[test]
+    fn rejects_invalid_restoration_parameters_and_non_finite_values() {
+        let source = image(1, 1, &[[10, 20, 30, 255]]);
+        for operation in [
+            EditOperation::AutoWhiteBalance { strength: f32::NAN },
+            EditOperation::LocalContrast {
+                strength: 0.5,
+                tile_size: 1,
+                clip_limit: 1.0,
+            },
+            EditOperation::Denoise {
+                strength: f32::INFINITY,
+                preserve_edges: 0.5,
+            },
+            EditOperation::EdgeAwareSharpen {
+                strength: 1.0,
+                radius: 99.0,
+                threshold: 0.0,
+            },
+            EditOperation::MildDeblur {
+                strength: 0.5,
+                radius: 0.0,
+            },
+            EditOperation::UnevenLightingCorrection {
+                strength: 0.5,
+                radius: f32::INFINITY,
+            },
+        ] {
+            assert!(apply_pipeline(&source, &[operation]).is_err());
+        }
+    }
+
+    #[test]
+    fn restoration_pipeline_is_deterministic_for_export_consistency() {
+        let source = image(
+            4,
+            3,
+            &[
+                [20, 40, 80, 10],
+                [60, 90, 120, 20],
+                [140, 100, 60, 30],
+                [200, 180, 160, 40],
+                [22, 44, 82, 50],
+                [62, 92, 122, 60],
+                [142, 102, 62, 70],
+                [202, 182, 162, 80],
+                [24, 48, 84, 90],
+                [64, 94, 124, 100],
+                [144, 104, 64, 110],
+                [204, 184, 164, 120],
+            ],
+        );
+        let operations = [
+            EditOperation::AutoWhiteBalance { strength: 0.4 },
+            EditOperation::LocalContrast {
+                strength: 0.3,
+                tile_size: 16,
+                clip_limit: 1.2,
+            },
+            EditOperation::EdgeAwareSharpen {
+                strength: 0.25,
+                radius: 1.0,
+                threshold: 0.04,
+            },
+        ];
+        let preview = apply_pipeline(&source, &operations).unwrap().to_rgba8();
+        let export = apply_pipeline(&source, &operations).unwrap().to_rgba8();
+        assert_eq!(preview, export);
     }
 }
