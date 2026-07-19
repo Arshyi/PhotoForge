@@ -80,3 +80,28 @@ No npm or Cargo dependency was added for Phase 3. The production frontend is 116
 - Edge-preserving denoise and document enhancement are the most expensive Phase 2 previews because they sample bounded neighborhoods or run several passes.
 - Pixel-domain restoration radii retain identical preview/export semantics, but cover a different physical portion of downscaled previews and full-resolution images.
 - Planner timings are extremely small because Phase 3 deliberately performs bounded string matching against cached scalar analysis; initial image decode and analysis remain separate work.
+
+## Phase 4 measurements
+
+These observations were taken from the final packaged 0.4.0 application on the same Windows machine on July 18, 2026. The untouched Phase 3 portable executable was verified by its published SHA-256 before comparison.
+
+The explicit local component diagnostic used 250 samples. Registry lookup averaged below the timer's per-sample display resolution (`<1 ns`), Rule Planner trait dispatch including plan construction and validation averaged 4.25 µs, and built-in factory/loading bookkeeping averaged 3 ns. These are same-machine diagnostic observations, not portable microbenchmark guarantees. No optional component, model, plugin entry, or network connection was loaded.
+
+Three alternating warm startup samples produced these medians:
+
+| Version | Responsive-window time | Main working set | Private memory |
+| --- | ---: | ---: | ---: |
+| 0.3.0 | 76 ms | 22.2 MiB | 3.5 MiB |
+| 0.4.0 | 66 ms | 22.1 MiB | 3.5 MiB |
+
+Separate clean-session observations were 422 ms for 0.3.0 and 484 ms for 0.4.0; WebView2 process reuse makes individual startup observations variable. After ten seconds idle, 0.4.0's main process used 26.5 MiB working set / 4.9 MiB private memory and accumulated 78.1 ms CPU. The seven-process application/WebView tree used 410.5 MiB working set / 251.7 MiB private memory and held zero TCP connections. The main-process comparison and identical production dependency set show no mandatory-model memory penalty.
+
+### Phase 4 size and dependency impact
+
+| Artifact | 0.3.0 | 0.4.0 | Change |
+| --- | ---: | ---: | ---: |
+| Portable executable | 10,548,224 bytes | 10,895,872 bytes | +347,648 bytes (+3.30%) |
+| NSIS setup | 2,407,396 bytes | 2,482,549 bytes | +75,153 bytes (+3.12%) |
+| MSI | 3,547,136 bytes | 3,641,344 bytes | +94,208 bytes (+2.66%) |
+
+The production frontend is 131.04 kB JavaScript / 32.20 kB CSS, with gzip sizes of 42.15 kB and 6.74 kB. No npm package or Cargo package was added; only the existing Tokio dependency's lightweight `time` feature was enabled. The release includes no model weights, inference runtime, server, Python component, GPU requirement, or networking library.

@@ -8,17 +8,17 @@ PhotoForge is local-first, non-destructive, modular, and conservative with memor
 
 ```text
 Svelte presentation
-  └─ typed Tauri commands: open_image, analyze_image, generate_edit_plan,
-       validate_guided_plan, render_preview, export_image
+  └─ typed Tauri commands: editor, planner, component registry, diagnostics
        └─ application state and use-case orchestration
-            ├─ domain: operations, plans, rule-based planner, validation, pipeline, results
+            ├─ components: registries, factories, planners, restoration engines, timeout
+            ├─ domain: operations, plans, component capabilities, manifests, validation
             ├─ image_processing: deterministic pixel algorithms
-            └─ infrastructure: decoding, preview encoding, export safety
+            └─ infrastructure: decoding, export safety, manifest/model metadata discovery
 ```
 
 ### Domain
 
-`src-tauri/src/domain` owns `EditOperation`, `EditPlan`, `EditPlanner`, `RuleBasedPlanner`, plan validation, `EditPipeline`, image metadata, analysis heuristics, and command result types. Operations use Serde's tagged representation, so TypeScript and Rust exchange JSON such as `{ "type": "auto_white_balance", "strength": 0.7 }`. Ordinary and restoration operations share one ordered pipeline and validate every parameter before processing.
+`src-tauri/src/domain` owns `EditOperation`, `EditPlan`, `EditPlanner`, `RestorationEngine`, typed component capabilities/providers/configuration/diagnostics, plugin manifests, plan validation, `EditPipeline`, image metadata, analysis heuristics, and command result types. Operations use Serde's tagged representation, so TypeScript and Rust exchange JSON such as `{ "type": "auto_white_balance", "strength": 0.7 }`. Ordinary and restoration operations share one ordered pipeline and validate every parameter before processing.
 
 `EditPlan` contains a summary, bounded heuristic confidence, concise warnings, `Vec<EditOperation>`, and one human explanation per operation. Plan validation rejects empty/oversized plans, non-finite confidence or operation values, unknown/unsupported operations, duplicates, grayscale/saturation conflicts, and unsupported cleanup/detail ordering. The plan schema contains no code, command, path, plugin, model prompt, or pixel payload.
 
@@ -34,6 +34,7 @@ Svelte presentation
 - immutable image metadata.
 - a monotonically increasing document identifier.
 - an optional cached quality analysis for that document.
+- the component registry and its persisted local configuration.
 
 Preview, analysis, planning, and export use independent bounded gates and request generations. Planning reads only the cached analysis and user request; it never receives decoded pixels or paths.
 
@@ -45,11 +46,15 @@ The source is decoded once. Tauri commands clone only reference-counted handles 
 
 ### Infrastructure
 
-`src-tauri/src/infrastructure` handles canonical paths, format detection, decoding, PNG preview encoding, and safe full-resolution export. It also contains a JSON preferences model. PhotoForge does not depend on Ollama, ONNX, or any model runtime.
+`src-tauri/src/infrastructure` handles canonical paths, format detection, decoding, PNG preview encoding, safe full-resolution export, bounded plugin-manifest scans, and local model metadata discovery. PhotoForge does not depend on Ollama, ONNX, or any model runtime.
 
 ### Presentation
 
-Svelte components under `src/lib/components` implement the toolbar, Guided Edit panel, ordinary controls, Restoration panel, Analysis panel, image stage, and status bar. TypeScript types mirror the Rust operation and plan schemas. The guided inspector exposes summary, confidence, warnings, operations, explanations, removal, ordering, strength controls, Apply, and Cancel. Applying a validated plan is one undoable history commit and replaces the visible pipeline with exactly the reviewed operations.
+Svelte components under `src/lib/components` implement the toolbar, Guided Edit panel, ordinary controls, Restoration panel, Analysis panel, image stage, status bar, Components settings, and Diagnostics settings. TypeScript types mirror the Rust operation, plan, registration, configuration, model, plugin, and diagnostic schemas. The guided inspector exposes summary, confidence, warnings, operations, explanations, removal, ordering, strength controls, Apply, and Cancel. Applying a validated plan is one undoable history commit and replaces the visible pipeline with exactly the reviewed operations.
+
+### Optional components
+
+`src-tauri/src/components` contains the registry, factories, timeout helper, performance diagnostic, planner implementations, and restoration-engine implementations. `RulePlanner` and `DeterministicEngine` preserve the Phase 3 paths. Ollama/OpenAI and ONNX/Real-ESRGAN/future types compile as safe placeholders that return not-installed errors. The real Guided Edit and preview/export commands resolve trait objects through the registry and factories. See [component-architecture.md](component-architecture.md).
 
 ## Preview transport and stale-result protection
 
@@ -80,7 +85,9 @@ The result is a proposal only. The frontend ignores stale generations, optionall
 - Output paths must be absolute, have an allowed image extension, and differ from the canonical input path.
 - Pixel-processing commands accept typed operations, never command strings. Guided text is accepted only by the bounded rule matcher and can produce only the typed plan schema.
 - Edited plans are revalidated in Rust before they can enter history or preview processing.
-- No shell, arbitrary filesystem API, remote endpoint, model tool, or auto-apply analysis action is exposed.
+- No shell, arbitrary filesystem API, model tool, or auto-apply analysis action is exposed. Component settings accept bounded local paths and loopback-only endpoint text; no command connects automatically.
+- Plugin scanning validates bounded JSON metadata only and always reports execution disabled.
+- Model discovery reads local directory entries and file metadata only; it never loads model contents or inference code.
 
 The settings dialog makes the application shell inert while open, traps keyboard focus, returns focus to the settings button on close, and supports Escape. Controls that require a document are removed from keyboard interaction while unavailable.
 
@@ -88,5 +95,6 @@ The settings dialog makes the application shell inert while open, traps keyboard
 
 - New deterministic edits: add a domain variant, validation, processor implementation, TypeScript mirror, and tests.
 - Restoration: add another validated tagged operation and implement it inside the focused restoration processor.
-- Guided planners: implement the domain `EditPlanner` trait and return the same validated `EditPlan`; an optional future local adapter would not change the restoration engine or approval boundary.
-- Storage: move preferences serialization behind an application-directory repository without changing the domain or UI.
+- Guided planners: implement `EditPlanner` and return the same validated `EditPlan`; the approval boundary remains unchanged.
+- Restoration engines: implement `RestorationEngine` while preserving typed operation validation and export safety.
+- Provider registration: extend the factory and truthful typed registry metadata, then add bounded initialization/unload/failure tests.

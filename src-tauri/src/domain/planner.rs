@@ -1,4 +1,4 @@
-use super::{EditOperation, EditPlan, ImageQualityAnalysis};
+use super::{EditOperation, EditPlan, ImageAnalysis, PlannerCapabilities, PlannerProvider};
 use crate::error::AppError;
 use std::collections::HashSet;
 
@@ -6,15 +6,41 @@ pub const MAX_PLAN_OPERATIONS: usize = 8;
 const MAX_REQUEST_CHARS: usize = 1_000;
 const MAX_WARNINGS: usize = 8;
 
-pub trait EditPlanner {
-    fn plan(&self, request: &str, analysis: &ImageQualityAnalysis) -> Result<EditPlan, AppError>;
+pub trait EditPlanner: Send + Sync {
+    fn provider(&self) -> PlannerProvider;
+
+    fn capabilities(&self) -> PlannerCapabilities;
+
+    fn create_plan(&self, request: &str, analysis: &ImageAnalysis) -> Result<EditPlan, AppError>;
+
+    fn plan(&self, request: &str, analysis: &ImageAnalysis) -> Result<EditPlan, AppError> {
+        self.create_plan(request, analysis)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RuleBasedPlanner;
+pub struct RulePlanner;
 
-impl EditPlanner for RuleBasedPlanner {
-    fn plan(&self, request: &str, analysis: &ImageQualityAnalysis) -> Result<EditPlan, AppError> {
+pub type RuleBasedPlanner = RulePlanner;
+
+#[allow(non_upper_case_globals)]
+pub const RuleBasedPlanner: RulePlanner = RulePlanner;
+
+impl EditPlanner for RulePlanner {
+    fn provider(&self) -> PlannerProvider {
+        PlannerProvider::Rule
+    }
+
+    fn capabilities(&self) -> PlannerCapabilities {
+        PlannerCapabilities {
+            supports_guided_editing: true,
+            supports_reasoning: false,
+            requires_model: false,
+            offline: true,
+        }
+    }
+
+    fn create_plan(&self, request: &str, analysis: &ImageAnalysis) -> Result<EditPlan, AppError> {
         let normalized = normalize_request(request)?;
         let wants_lighter = has_any(
             &normalized,
@@ -669,6 +695,7 @@ fn plan_summary(operations: &[EditOperation], document_request: bool) -> String 
 mod tests {
     use super::*;
     use crate::domain::ColorCastEstimate;
+    use crate::domain::ImageQualityAnalysis;
 
     fn analysis() -> ImageQualityAnalysis {
         ImageQualityAnalysis {

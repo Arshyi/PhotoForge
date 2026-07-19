@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "name": "Example Planner Manifest",
+  "version": "1.0.0",
+  "type": "planner",
+  "provider": "example-local",
+  "entry": "adapters/example-planner.disabled",
+  "memoryEstimateMb": 128,
+  "capabilities": ["guided_editing", "offline"]
+}

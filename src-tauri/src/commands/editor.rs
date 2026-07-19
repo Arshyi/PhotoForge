@@ -1,9 +1,10 @@
 use crate::application::AppState;
+use crate::components::RestorationEngineFactory;
 use crate::domain::{
     AnalysisResult, EditOperation, EditPipeline, ExportResult, OpenImageResult, PreviewResult,
 };
 use crate::error::AppError;
-use crate::image_processing::{analyze_image_quality, apply_pipeline};
+use crate::image_processing::analyze_image_quality;
 use crate::infrastructure::{encode_preview, load_image, save_image};
 use image::GenericImageView;
 use std::path::PathBuf;
@@ -231,10 +232,16 @@ pub async fn render_preview(
         }
         session.source.preview.clone()
     };
+    let engine = {
+        let registry = state.components.lock().map_err(|_| {
+            AppError::ComponentInitializationFailure("registry is unavailable".into())
+        })?;
+        RestorationEngineFactory::create(registry.active_engine())
+    };
 
     let started = Instant::now();
     let processed = tauri::async_runtime::spawn_blocking(move || {
-        apply_pipeline(source.as_ref(), &validated_operations)
+        engine.process(source.as_ref(), &validated_operations)
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("preview worker stopped".into()))??;
@@ -282,15 +289,16 @@ pub async fn export_image(
         let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
         (source.original.clone(), source.path.clone())
     };
+    let engine = {
+        let registry = state.components.lock().map_err(|_| {
+            AppError::ComponentInitializationFailure("registry is unavailable".into())
+        })?;
+        RestorationEngineFactory::create(registry.active_engine())
+    };
 
     let started = Instant::now();
     let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
-        if validated_operations.is_empty() {
-            let (width, height) = source.dimensions();
-            let saved_path = save_image(source.as_ref(), &original_path, &output_path)?;
-            return Ok::<_, AppError>((saved_path, width, height));
-        }
-        let processed = apply_pipeline(source.as_ref(), &validated_operations)?;
+        let processed = engine.process(source.as_ref(), &validated_operations)?;
         let (width, height) = processed.dimensions();
         let saved_path = save_image(&processed, &original_path, &output_path)?;
         Ok::<_, AppError>((saved_path, width, height))

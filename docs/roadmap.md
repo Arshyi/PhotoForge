@@ -46,10 +46,21 @@
 - `EditPlanner` trait isolates any future optional local planner adapter without coupling the restoration engine to Ollama
 - Perspective correction, auto-crop, and deterministic batch workflows remain later candidates
 
+## Phase 4 — Extensible AI and restoration platform (complete)
+
+- `EditPlanner` and `RestorationEngine` interfaces used by the real guided and image-processing paths
+- Typed capabilities, providers, registrations, local configuration, registry, and factories
+- Built-in Rule Planner and Deterministic Engine remain active by default with Phase 3 behavior
+- Compiling Ollama, OpenAI, ONNX, Real-ESRGAN, and future placeholders with safe not-installed failures
+- Lazy optional initialization, bounded timeout, failure diagnostics, and inactive-component unload bookkeeping
+- Components and Diagnostics settings pages with unavailable providers visible but disabled
+- Local model metadata discovery with no download, content loading, or inference
+- Versioned plugin manifest validation with no arbitrary plugin execution
+
 ## Later, optional AI work
 
 - Lazy-loaded quality assessment, blur/noise estimation, OCR cleanup, super-resolution, and old-photo restoration
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No Ollama integration, neural restoration, OCR, perspective correction, batch processing, chatbot, cloud API, or LLM integration is implemented in the current deliverable.
+No actual Ollama connection, OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, perspective correction, batch processing, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable.

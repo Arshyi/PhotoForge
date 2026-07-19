@@ -11,6 +11,7 @@ pub struct EditorSession {
 
 pub struct AppState {
     pub session: Mutex<Option<EditorSession>>,
+    pub components: Mutex<ComponentRegistry>,
     pub latest_open_request: AtomicU64,
     pub pending_open_request: AtomicU64,
     pub latest_preview_request: AtomicU64,
@@ -24,8 +25,11 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        let mut components = ComponentRegistry::default();
+        components.load_persisted_configuration();
         Self {
             session: Mutex::new(None),
+            components: Mutex::new(components),
             latest_open_request: AtomicU64::new(0),
             pending_open_request: AtomicU64::new(0),
             latest_preview_request: AtomicU64::new(0),
@@ -38,3 +42,4 @@ impl Default for AppState {
         }
     }
 }
+use crate::components::ComponentRegistry;

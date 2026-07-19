@@ -5,6 +5,8 @@
   import { open, save } from '@tauri-apps/plugin-dialog';
   import ImageStage from './lib/components/ImageStage.svelte';
   import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
+  import ComponentsSettings from './lib/components/ComponentsSettings.svelte';
+  import DiagnosticsSettings from './lib/components/DiagnosticsSettings.svelte';
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
@@ -53,15 +55,16 @@
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
+  let settingsPage: 'general' | 'components' | 'diagnostics' = 'general';
   let guidedSettings: GuidedSettings = { ...defaultGuidedSettings };
   let toast = '';
   let toastKind: 'error' | 'success' = 'success';
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsCloseButton: HTMLButtonElement;
   let settingsDialog: HTMLDialogElement;
+  let canUndo = false;
+  let canRedo = false;
 
-  $: canUndo = history.canUndo;
-  $: canRedo = history.canRedo;
   $: comparisonUsesSplitView = valueFor(operations, 'rotate', 0) % 360 !== 0;
 
   onMount(() => {
@@ -149,6 +152,7 @@
       });
       if (!result.isCurrent || activeOpenRequest !== ownOpenRequest) return;
       history.clear();
+      syncHistoryActions();
       operations = [];
       metadata = result.metadata;
       documentId = result.documentId;
@@ -256,7 +260,13 @@
 
   function commit(next: EditOperation[], coalesceKey?: string) {
     operations = history.commit(next, coalesceKey);
+    syncHistoryActions();
     schedulePreview();
+  }
+
+  function syncHistoryActions() {
+    canUndo = history.canUndo;
+    canRedo = history.canRedo;
   }
 
   function setNumeric(
@@ -294,18 +304,21 @@
   function undo() {
     if (!history.canUndo) return;
     operations = history.undo();
+    syncHistoryActions();
     schedulePreview();
   }
 
   function redo() {
     if (!history.canRedo) return;
     operations = history.redo();
+    syncHistoryActions();
     schedulePreview();
   }
 
   function reset() {
     if (!metadata || operations.length === 0) return;
     operations = history.reset();
+    syncHistoryActions();
     schedulePreview();
   }
 
@@ -352,6 +365,7 @@
   const percent = (value: number) => `${Math.round(value * 100)}%`;
 
   async function openSettings() {
+    settingsPage = 'general';
     settingsOpen = true;
     await tick();
     settingsCloseButton?.focus();
@@ -372,7 +386,7 @@
     if (event.key !== 'Tab') return;
     const focusable = Array.from(
       settingsDialog.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
       )
     );
     const first = focusable[0];
@@ -637,57 +651,68 @@
         <div><span>Settings</span><h1 id="settings-title">Local by design</h1></div>
         <button bind:this={settingsCloseButton} type="button" aria-label="Close settings" on:click={closeSettings}>×</button>
       </div>
-      <div class="setting-row">
-        <span class="setting-icon">⌂</span>
-        <div><strong>On-device processing</strong><p>Images and edits never leave this computer.</p></div>
-        <em>Always on</em>
-      </div>
-      <div class="setting-row">
-        <span class="setting-icon">⌁</span>
-        <div><strong>Interactive preview</strong><p>Uses a copy capped at 1600 pixels. Exports use full resolution.</p></div>
-        <em>Balanced</em>
-      </div>
-      <div class="setting-row">
-        <span class="setting-icon">◎</span>
-        <div><strong>Analytics and telemetry</strong><p>PhotoForge includes no analytics, crash reporting, or remote logs.</p></div>
-        <em>Off</em>
-      </div>
-      <div class="guided-settings" aria-labelledby="guided-settings-title">
-        <h2 id="guided-settings-title">Guided Edit preferences</h2>
-        <label>
-          <span><strong>Show warnings</strong><small>Display conservative limitations in each proposed plan.</small></span>
-          <input
-            type="checkbox"
-            checked={guidedSettings.showWarnings}
-            on:change={(event) => updateGuidedSetting('showWarnings', event.currentTarget.checked)}
-          />
-        </label>
-        <label>
-          <span><strong>Show confidence</strong><small>Display heuristic rule-match strength.</small></span>
-          <input
-            type="checkbox"
-            checked={guidedSettings.showConfidence}
-            on:change={(event) => updateGuidedSetting('showConfidence', event.currentTarget.checked)}
-          />
-        </label>
-        <label>
-          <span><strong>Automatically open plan inspector</strong><small>Open operation editing immediately after planning.</small></span>
-          <input
-            type="checkbox"
-            checked={guidedSettings.autoOpenPlanInspector}
-            on:change={(event) => updateGuidedSetting('autoOpenPlanInspector', event.currentTarget.checked)}
-          />
-        </label>
-        <label>
-          <span><strong>Remember prompt history</strong><small>Keep up to 25 requests in local browser storage.</small></span>
-          <input
-            type="checkbox"
-            checked={guidedSettings.rememberPromptHistory}
-            on:change={(event) => updateGuidedSetting('rememberPromptHistory', event.currentTarget.checked)}
-          />
-        </label>
-      </div>
-      <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
+      <nav class="settings-tabs" aria-label="Settings pages">
+        <button type="button" class:active={settingsPage === 'general'} on:click={() => (settingsPage = 'general')}>General</button>
+        <button type="button" class:active={settingsPage === 'components'} on:click={() => (settingsPage = 'components')}>Components</button>
+        <button type="button" class:active={settingsPage === 'diagnostics'} on:click={() => (settingsPage = 'diagnostics')}>Diagnostics</button>
+      </nav>
+      {#if settingsPage === 'general'}
+        <div class="setting-row">
+          <span class="setting-icon">⌂</span>
+          <div><strong>On-device processing</strong><p>Images and edits never leave this computer.</p></div>
+          <em>Always on</em>
+        </div>
+        <div class="setting-row">
+          <span class="setting-icon">⌁</span>
+          <div><strong>Interactive preview</strong><p>Uses a copy capped at 1600 pixels. Exports use full resolution.</p></div>
+          <em>Balanced</em>
+        </div>
+        <div class="setting-row">
+          <span class="setting-icon">◎</span>
+          <div><strong>Analytics and telemetry</strong><p>PhotoForge includes no analytics, crash reporting, or remote logs.</p></div>
+          <em>Off</em>
+        </div>
+        <div class="guided-settings" aria-labelledby="guided-settings-title">
+          <h2 id="guided-settings-title">Guided Edit preferences</h2>
+          <label>
+            <span><strong>Show warnings</strong><small>Display conservative limitations in each proposed plan.</small></span>
+            <input
+              type="checkbox"
+              checked={guidedSettings.showWarnings}
+              on:change={(event) => updateGuidedSetting('showWarnings', event.currentTarget.checked)}
+            />
+          </label>
+          <label>
+            <span><strong>Show confidence</strong><small>Display heuristic rule-match strength.</small></span>
+            <input
+              type="checkbox"
+              checked={guidedSettings.showConfidence}
+              on:change={(event) => updateGuidedSetting('showConfidence', event.currentTarget.checked)}
+            />
+          </label>
+          <label>
+            <span><strong>Automatically open plan inspector</strong><small>Open operation editing immediately after planning.</small></span>
+            <input
+              type="checkbox"
+              checked={guidedSettings.autoOpenPlanInspector}
+              on:change={(event) => updateGuidedSetting('autoOpenPlanInspector', event.currentTarget.checked)}
+            />
+          </label>
+          <label>
+            <span><strong>Remember prompt history</strong><small>Keep up to 25 requests in local browser storage.</small></span>
+            <input
+              type="checkbox"
+              checked={guidedSettings.rememberPromptHistory}
+              on:change={(event) => updateGuidedSetting('rememberPromptHistory', event.currentTarget.checked)}
+            />
+          </label>
+        </div>
+        <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
+      {:else if settingsPage === 'components'}
+        <ComponentsSettings />
+      {:else}
+        <DiagnosticsSettings />
+      {/if}
     </dialog>
   </div>
 {/if}

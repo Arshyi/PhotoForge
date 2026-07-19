@@ -1,5 +1,5 @@
 use crate::application::AppState;
-use crate::domain::{validate_edit_plan, EditPlan, EditPlanner, PlanResult, RuleBasedPlanner};
+use crate::domain::{validate_edit_plan, EditPlan, PlanResult};
 use crate::error::AppError;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -49,7 +49,13 @@ pub async fn generate_edit_plan(
     };
 
     let started = Instant::now();
-    let plan = RuleBasedPlanner.plan(&request, &analysis)?;
+    let provider = state
+        .components
+        .lock()
+        .map_err(|_| AppError::ComponentInitializationFailure("registry is unavailable".into()))?
+        .active_planner();
+    let planner = PlannerFactory::create(provider);
+    let plan = planner.create_plan(&request, &analysis)?;
     let is_current = state.latest_plan_request.load(Ordering::Acquire) == request_id
         && state.pending_open_request.load(Ordering::Acquire) == 0
         && state
@@ -77,3 +83,4 @@ pub fn validate_guided_plan(plan: EditPlan) -> Result<EditPlan, AppError> {
     validate_edit_plan(&plan)?;
     Ok(plan)
 }
+use crate::components::PlannerFactory;

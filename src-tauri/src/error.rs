@@ -21,6 +21,20 @@ pub enum AppError {
     PlannerNoMatch,
     #[error("Invalid guided edit plan: {0}")]
     InvalidPlan(String),
+    #[error("Planner not installed.")]
+    PlannerNotInstalled,
+    #[error("Restoration engine not installed.")]
+    RestorationEngineNotInstalled,
+    #[error("Invalid component configuration: {0}")]
+    InvalidComponentConfiguration(String),
+    #[error("Component initialization timed out.")]
+    ComponentInitializationTimeout,
+    #[error("Component initialization failed: {0}")]
+    ComponentInitializationFailure(String),
+    #[error("Invalid plugin manifest: {0}")]
+    InvalidPluginManifest(String),
+    #[error("Local model discovery failed: {0}")]
+    ModelDiscoveryFailure(String),
     #[error("This restoration setting requires too many resources. Choose a smaller radius or tile size.")]
     RestorationResourceLimit,
     #[error("PhotoForge could not export the edited image.")]
@@ -49,6 +63,13 @@ impl AppError {
             Self::AnalysisUnavailable => "analysis_unavailable",
             Self::PlannerNoMatch => "planner_no_match",
             Self::InvalidPlan(_) => "invalid_plan",
+            Self::PlannerNotInstalled => "planner_not_installed",
+            Self::RestorationEngineNotInstalled => "restoration_engine_not_installed",
+            Self::InvalidComponentConfiguration(_) => "invalid_component_configuration",
+            Self::ComponentInitializationTimeout => "component_initialization_timeout",
+            Self::ComponentInitializationFailure(_) => "component_initialization_failure",
+            Self::InvalidPluginManifest(_) => "invalid_plugin_manifest",
+            Self::ModelDiscoveryFailure(_) => "model_discovery_failure",
             Self::RestorationResourceLimit => "restoration_resource_limit",
             Self::ExportFailure => "export_failure",
             Self::InvalidOperation(_) => "invalid_operation",

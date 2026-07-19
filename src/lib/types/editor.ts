@@ -113,3 +113,134 @@ export interface Preset {
   description: string;
   operations: EditOperation[];
 }
+
+export type PlannerProvider = 'rule' | 'ollama' | 'open_ai' | 'future';
+export type EngineProvider = 'deterministic' | 'onnx' | 'real_esrgan' | 'future';
+
+export interface PlannerCapabilities {
+  supportsGuidedEditing: boolean;
+  supportsReasoning: boolean;
+  requiresModel: boolean;
+  offline: boolean;
+}
+
+export interface RestorationCapabilities {
+  supportsRestoration: boolean;
+  supportsNeuralModels: boolean;
+  requiresModel: boolean;
+  offline: boolean;
+  preservesAlpha: boolean;
+  maxInputMegapixels: number;
+}
+
+export interface PlannerRegistration {
+  id: PlannerProvider;
+  name: string;
+  version: string;
+  provider: string;
+  memoryEstimateMb: number;
+  installed: boolean;
+  loaded: boolean;
+  active: boolean;
+  unavailableReason: string | null;
+  capabilities: PlannerCapabilities;
+}
+
+export interface EngineRegistration {
+  id: EngineProvider;
+  name: string;
+  version: string;
+  provider: string;
+  memoryEstimateMb: number;
+  installed: boolean;
+  loaded: boolean;
+  active: boolean;
+  unavailableReason: string | null;
+  capabilities: RestorationCapabilities;
+}
+
+export interface ComponentConfiguration {
+  activePlanner: PlannerProvider;
+  activeEngine: EngineProvider;
+  plannerEndpoint: string;
+  initializationTimeoutMs: number;
+  modelDirectories: string[];
+  pluginDirectory: string;
+}
+
+export interface ComponentSnapshot {
+  applicationVersion: string;
+  planners: PlannerRegistration[];
+  engines: EngineRegistration[];
+  configuration: ComponentConfiguration;
+}
+
+export interface ComponentDiagnostics {
+  applicationVersion: string;
+  registeredPlanners: string[];
+  registeredEngines: string[];
+  loadedComponents: string[];
+  unavailableComponents: string[];
+  initializationFailures: string[];
+  pluginValidationErrors: string[];
+  configurationPath: string;
+}
+
+export interface ComponentPerformanceMetrics {
+  samples: number;
+  registryLookupAverageNs: number;
+  plannerDispatchAverageNs: number;
+  componentFactoryAverageNs: number;
+  note: string;
+}
+
+export interface ComponentActionResult {
+  success: boolean;
+  message: string;
+}
+
+export interface ModelMetadata {
+  name: string;
+  path: string;
+  format: string;
+  fileSizeBytes: number;
+  memoryEstimateMb: number;
+  supportedTasks: string[];
+  expectedInput: string;
+  expectedInputSize: number[] | null;
+  expectedOutput: string;
+  compatible: boolean;
+  unavailableReason: string;
+}
+
+export interface ModelDiscoveryResult {
+  searchedDirectories: string[];
+  models: ModelMetadata[];
+  message: string;
+  processingTimeMs: number;
+}
+
+export interface PluginManifest {
+  schemaVersion: number;
+  name: string;
+  version: string;
+  type: 'planner' | 'restoration_engine';
+  provider: string;
+  entry: string;
+  memoryEstimateMb: number;
+  capabilities: string[];
+}
+
+export interface PluginManifestRecord {
+  manifestPath: string;
+  valid: boolean;
+  manifest: PluginManifest | null;
+  error: string | null;
+  executionAllowed: boolean;
+}
+
+export interface PluginScanResult {
+  directory: string;
+  records: PluginManifestRecord[];
+  message: string;
+}
