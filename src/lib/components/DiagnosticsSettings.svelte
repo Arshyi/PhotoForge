@@ -1,12 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import type { ComponentDiagnostics, ComponentPerformanceMetrics } from '../types/editor';
+  import type {
+    ComponentDiagnostics,
+    ComponentPerformanceMetrics,
+    OllamaDiagnostics
+  } from '../types/editor';
   import { formatNanoseconds } from '../utils/components';
   import { errorMessage } from '../utils/format';
 
   let diagnostics: ComponentDiagnostics | null = null;
   let performance: ComponentPerformanceMetrics | null = null;
+  let ollama: OllamaDiagnostics | null = null;
   let loading = true;
   let measuring = false;
   let error = '';
@@ -17,7 +22,10 @@
     loading = true;
     error = '';
     try {
-      diagnostics = await invoke<ComponentDiagnostics>('get_component_diagnostics');
+      [diagnostics, ollama] = await Promise.all([
+        invoke<ComponentDiagnostics>('get_component_diagnostics'),
+        invoke<OllamaDiagnostics>('get_ollama_diagnostics')
+      ]);
     } catch (reason) {
       error = errorMessage(reason);
     } finally {
@@ -84,6 +92,33 @@
       <h3>Configuration path</h3>
       <p>{diagnostics.configurationPath}</p>
     </div>
+
+    {#if ollama}
+      <div class="ollama-diagnostics" aria-label="Ollama diagnostics">
+        <h3>Ollama Planner</h3>
+        <div class="diagnostic-summary">
+          <div><span>Connection</span><strong>{ollama.connected ? 'Connected' : 'Disconnected'}</strong></div>
+          <div><span>Model selected</span><strong>{ollama.modelSelected ?? 'None'}</strong></div>
+          <div><span>Planner version</span><strong>{ollama.plannerVersion}</strong></div>
+        </div>
+        <div class="diagnostic-section"><h3>Last error</h3><p>{ollama.lastError ?? 'None recorded'}</p></div>
+        <div class="performance-results">
+          <div><span>Connection latency</span><strong>{ollama.connectionLatencyMs?.toFixed(2) ?? '—'} ms</strong></div>
+          <div><span>Generation latency</span><strong>{ollama.generationLatencyMs?.toFixed(2) ?? '—'} ms</strong></div>
+          <div><span>Validation latency</span><strong>{ollama.validationLatencyMs?.toFixed(2) ?? '—'} ms</strong></div>
+          <div><span>Rule planner latency</span><strong>{ollama.rulePlannerLatencyMs?.toFixed(2) ?? '—'} ms</strong></div>
+          <div><span>Comparison latency</span><strong>{ollama.comparisonLatencyMs?.toFixed(2) ?? '—'} ms</strong></div>
+          <div><span>Last response</span><strong>{ollama.lastResponseTimeMs?.toFixed(2) ?? '—'} ms</strong></div>
+        </div>
+        <div class="diagnostic-counters">
+          <span>Successful <strong>{ollama.successfulPlans}</strong></span>
+          <span>Rejected <strong>{ollama.rejectedPlans}</strong></span>
+          <span>Validation failures <strong>{ollama.validationFailures}</strong></span>
+          <span>Cancelled <strong>{ollama.cancelledPlans}</strong></span>
+        </div>
+        <p>{ollama.localClientMemoryEstimateMb} MB client estimate. {ollama.memoryNote}</p>
+      </div>
+    {/if}
 
     <div class="performance-panel">
       <div><h3>Local overhead measurement</h3><p>Runs built-in registry, planner, and factory calls only.</p></div>

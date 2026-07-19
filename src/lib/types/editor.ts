@@ -102,6 +102,13 @@ export interface GuidedSettings {
   rememberPromptHistory: boolean;
 }
 
+export type GuidedPlanner = 'rule' | 'ollama';
+
+export interface GuidedHistoryEntry {
+  prompt: string;
+  provider: 'Rule' | 'Ollama';
+}
+
 export interface AppErrorPayload {
   code?: string;
   message?: string;
@@ -164,8 +171,87 @@ export interface ComponentConfiguration {
   activeEngine: EngineProvider;
   plannerEndpoint: string;
   initializationTimeoutMs: number;
+  ollamaTimeoutMs: number;
+  ollamaMaxResponseBytes: number;
+  ollamaSelectedModel: string | null;
+  ollamaMaxOperations: number;
   modelDirectories: string[];
   pluginDirectory: string;
+}
+
+export interface OllamaModel {
+  name: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  capabilities: string[];
+}
+
+export interface OllamaModelDiscoveryResult {
+  models: OllamaModel[];
+  message: string;
+  responseTimeMs: number;
+}
+
+export interface OllamaConnectionResult {
+  connected: boolean;
+  message: string;
+  version: string;
+  responseTimeMs: number;
+}
+
+export interface PlanValidationReport {
+  valid: boolean;
+  originalResponse: string;
+  validatedResponse: string | null;
+  rejectedFields: string[];
+  errors: string[];
+  validationTimeMs: number;
+}
+
+export interface OllamaPlanResult {
+  plan: EditPlan | null;
+  documentId: number;
+  requestId: number;
+  model: string;
+  generationTimeMs: number;
+  validationTimeMs: number;
+  totalTimeMs: number;
+  isCurrent: boolean;
+  error: string | null;
+  validationReport: PlanValidationReport;
+}
+
+export interface PlannerComparisonEntry {
+  provider: 'Rule' | 'Ollama';
+  plan: EditPlan | null;
+  executionTimeMs: number;
+  error: string | null;
+}
+
+export interface PlannerComparisonResult {
+  rule: PlannerComparisonEntry;
+  ollama: PlannerComparisonEntry;
+  validationReport: PlanValidationReport | null;
+  totalTimeMs: number;
+}
+
+export interface OllamaDiagnostics {
+  connected: boolean;
+  lastError: string | null;
+  lastResponseTimeMs: number | null;
+  connectionLatencyMs: number | null;
+  generationLatencyMs: number | null;
+  validationLatencyMs: number | null;
+  rulePlannerLatencyMs: number | null;
+  comparisonLatencyMs: number | null;
+  modelSelected: string | null;
+  plannerVersion: string;
+  validationFailures: number;
+  rejectedPlans: number;
+  successfulPlans: number;
+  cancelledPlans: number;
+  localClientMemoryEstimateMb: number;
+  memoryNote: string;
 }
 
 export interface ComponentSnapshot {

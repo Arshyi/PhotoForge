@@ -8,6 +8,7 @@
   import ComponentsSettings from './lib/components/ComponentsSettings.svelte';
   import DiagnosticsSettings from './lib/components/DiagnosticsSettings.svelte';
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
+  import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
@@ -55,7 +56,8 @@
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
-  let settingsPage: 'general' | 'components' | 'diagnostics' = 'general';
+  let settingsPage: 'general' | 'components' | 'diagnostics' | 'privacy' = 'general';
+  let componentConfigurationRevision = 0;
   let guidedSettings: GuidedSettings = { ...defaultGuidedSettings };
   let toast = '';
   let toastKind: 'error' | 'success' = 'success';
@@ -372,6 +374,7 @@
   }
 
   async function closeSettings() {
+    if (settingsPage === 'components') componentConfigurationRevision += 1;
     settingsOpen = false;
     await tick();
     document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
@@ -430,7 +433,7 @@
     </div>
 
     <div class="top-spacer"></div>
-    <div class="privacy-chip" title="No cloud uploads"><span></span> Offline</div>
+    <div class="privacy-chip" title="No cloud services"><span></span> Local-first</div>
     <ToolButton label="Settings" icon="⚙" onclick={openSettings} />
   </header>
 
@@ -479,6 +482,7 @@
           ready={Boolean(metadata && analysis)}
           disabled={opening}
           settings={guidedSettings}
+          configurationRevision={componentConfigurationRevision}
           onapply={applyGuidedPlan}
           onmessage={notify}
         />
@@ -655,6 +659,7 @@
         <button type="button" class:active={settingsPage === 'general'} on:click={() => (settingsPage = 'general')}>General</button>
         <button type="button" class:active={settingsPage === 'components'} on:click={() => (settingsPage = 'components')}>Components</button>
         <button type="button" class:active={settingsPage === 'diagnostics'} on:click={() => (settingsPage = 'diagnostics')}>Diagnostics</button>
+        <button type="button" class:active={settingsPage === 'privacy'} on:click={() => (settingsPage = 'privacy')}>Local AI Privacy</button>
       </nav>
       {#if settingsPage === 'general'}
         <div class="setting-row">
@@ -710,8 +715,10 @@
         <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
       {:else if settingsPage === 'components'}
         <ComponentsSettings />
-      {:else}
+      {:else if settingsPage === 'diagnostics'}
         <DiagnosticsSettings />
+      {:else}
+        <LocalAiPrivacy />
       {/if}
     </dialog>
   </div>

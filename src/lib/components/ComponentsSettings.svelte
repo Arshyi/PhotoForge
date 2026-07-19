@@ -2,11 +2,12 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import type {
-    ComponentActionResult,
     ComponentConfiguration,
     ComponentSnapshot,
     EngineProvider,
     ModelDiscoveryResult,
+    OllamaConnectionResult,
+    OllamaModelDiscoveryResult,
     PlannerProvider,
     PluginScanResult
   } from '../types/editor';
@@ -17,6 +18,13 @@
     formatMemoryEstimate,
     splitModelDirectories
   } from '../utils/components';
+  import {
+    formatOllamaModelSize,
+    formatOllamaModifiedDate,
+    modelCapabilitySummary,
+    normalizeOllamaConfiguration,
+    resetOllamaConfiguration
+  } from '../utils/ollama';
 
   let snapshot: ComponentSnapshot | null = null;
   let configuration: ComponentConfiguration | null = null;
@@ -26,6 +34,7 @@
   let message = '';
   let error = '';
   let modelResult: ModelDiscoveryResult | null = null;
+  let ollamaModels: OllamaModelDiscoveryResult | null = null;
   let pluginResult: PluginScanResult | null = null;
 
   onMount(() => void refresh());
@@ -66,10 +75,10 @@
 
   async function saveConfiguration() {
     if (!configuration) return;
-    const next = {
+    const next = normalizeOllamaConfiguration({
       ...configuration,
       modelDirectories: splitModelDirectories(modelDirectories)
-    };
+    });
     await run('save', async () => {
       setSnapshot(
         await invoke<ComponentSnapshot>('update_component_configuration', { configuration: next })
@@ -80,11 +89,28 @@
 
   async function testConnection() {
     await run('connection', async () => {
-      const result = await invoke<ComponentActionResult>('test_planner_connection', {
-        provider: 'ollama'
-      });
-      message = result.message;
+      const result = await invoke<OllamaConnectionResult>('test_ollama_connection');
+      message = `${result.message} ${result.responseTimeMs.toFixed(1)} ms`;
     });
+  }
+
+  async function refreshOllamaModels() {
+    await run('ollama-models', async () => {
+      ollamaModels = await invoke<OllamaModelDiscoveryResult>('refresh_ollama_models');
+      message = ollamaModels.message;
+      if (
+        configuration?.ollamaSelectedModel &&
+        !ollamaModels.models.some((model) => model.name === configuration?.ollamaSelectedModel)
+      ) {
+        configuration.ollamaSelectedModel = null;
+      }
+    });
+  }
+
+  function resetOllamaDefaults() {
+    if (!configuration) return;
+    configuration = resetOllamaConfiguration(configuration);
+    message = 'Ollama settings reset. Save locally to persist them.';
   }
 
   async function discoverModels() {
@@ -119,7 +145,7 @@
   <div class="settings-intro">
     <span>Extensible · optional</span>
     <h2 id="components-heading">Components</h2>
-    <p>The built-in planner and restoration engine remain the defaults. Future adapters are visible, but unavailable components cannot be activated.</p>
+    <p>The built-in Rule Planner remains the default. Ollama is an optional local planning adapter; unavailable future components cannot be activated.</p>
   </div>
 
   {#if loading}
@@ -191,11 +217,34 @@
     <div class="configuration-form">
       <h3>Local configuration</h3>
       <label>
-        <span>Ollama endpoint <small>Placeholder only; never contacted automatically.</small></span>
+        <span>Ollama endpoint <small>Local loopback only; never contacted automatically.</small></span>
         <div class="field-action">
           <input aria-label="Ollama endpoint" bind:value={configuration.plannerEndpoint} />
           <button type="button" disabled={Boolean(busy)} on:click={testConnection}>{busy === 'connection' ? 'Testing…' : 'Test Connection'}</button>
         </div>
+      </label>
+      <label>
+        <span>Request and response timeout <small>250–120,000 milliseconds</small></span>
+        <input aria-label="Ollama timeout" type="number" min="250" max="120000" step="250" bind:value={configuration.ollamaTimeoutMs} />
+      </label>
+      <label>
+        <span>Maximum response size <small>1,024–2,097,152 bytes</small></span>
+        <input aria-label="Maximum response size" type="number" min="1024" max="2097152" step="1024" bind:value={configuration.ollamaMaxResponseBytes} />
+      </label>
+      <label>
+        <span>Maximum generated operations <small>1–8 validated operations</small></span>
+        <input aria-label="Maximum generated operations" type="number" min="1" max="8" step="1" bind:value={configuration.ollamaMaxOperations} />
+      </label>
+      <label>
+        <span>Planner model <small>Only models already installed in Ollama are listed.</small></span>
+        <select aria-label="Planner model" bind:value={configuration.ollamaSelectedModel}>
+          <option value={null}>Choose an installed model</option>
+          {#if ollamaModels}
+            {#each ollamaModels.models as model}<option value={model.name}>{model.name}</option>{/each}
+          {:else if configuration.ollamaSelectedModel}
+            <option value={configuration.ollamaSelectedModel}>{configuration.ollamaSelectedModel}</option>
+          {/if}
+        </select>
       </label>
       <label>
         <span>Model directories <small>One local directory per line; files are inspected as metadata only.</small></span>
@@ -211,10 +260,21 @@
       </label>
       <div class="configuration-actions">
         <button class="primary" type="button" disabled={Boolean(busy)} on:click={saveConfiguration}>{busy === 'save' ? 'Saving…' : 'Save locally'}</button>
+        <button type="button" disabled={Boolean(busy)} on:click={refreshOllamaModels}>{busy === 'ollama-models' ? 'Refreshing…' : 'Refresh Models'}</button>
+        <button type="button" disabled={Boolean(busy)} on:click={resetOllamaDefaults}>Reset Ollama defaults</button>
         <button type="button" disabled={Boolean(busy)} on:click={discoverModels}>{busy === 'models' ? 'Scanning…' : 'Discover Models'}</button>
         <button type="button" disabled={Boolean(busy)} on:click={scanPlugins}>{busy === 'plugins' ? 'Scanning…' : 'Validate Plugins'}</button>
       </div>
     </div>
+
+    {#if ollamaModels}
+      <div class="scan-result" aria-label="Ollama model discovery result">
+        <strong>{ollamaModels.message}</strong>
+        {#each ollamaModels.models as model}
+          <p><span>{model.name} · {formatOllamaModelSize(model.sizeBytes)}</span><small>{formatOllamaModifiedDate(model.modifiedAt)} · {modelCapabilitySummary(model.capabilities)}</small></p>
+        {/each}
+      </div>
+    {/if}
 
     {#if modelResult}
       <div class="scan-result" aria-label="Model discovery result">

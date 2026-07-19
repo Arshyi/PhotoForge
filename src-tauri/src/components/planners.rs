@@ -12,6 +12,27 @@ pub struct OpenAIPlanner;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct FuturePlanner;
 
+impl EditPlanner for OllamaPlanner {
+    fn provider(&self) -> PlannerProvider {
+        PlannerProvider::Ollama
+    }
+
+    fn capabilities(&self) -> PlannerCapabilities {
+        PlannerCapabilities {
+            supports_guided_editing: true,
+            supports_reasoning: true,
+            requires_model: true,
+            offline: true,
+        }
+    }
+
+    fn create_plan(&self, _request: &str, _analysis: &ImageAnalysis) -> Result<EditPlan, AppError> {
+        Err(AppError::ComponentInitializationFailure(
+            "Ollama uses the cancellable asynchronous local-provider command".into(),
+        ))
+    }
+}
+
 macro_rules! unavailable_planner {
     ($planner:ty, $provider:expr, $offline:expr) => {
         impl EditPlanner for $planner {
@@ -39,7 +60,6 @@ macro_rules! unavailable_planner {
     };
 }
 
-unavailable_planner!(OllamaPlanner, PlannerProvider::Ollama, true);
 unavailable_planner!(OpenAIPlanner, PlannerProvider::OpenAi, false);
 unavailable_planner!(FuturePlanner, PlannerProvider::Future, false);
 
@@ -97,11 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn ollama_placeholder_reports_not_installed() {
+    fn ollama_factory_routes_planning_to_async_adapter() {
         let planner = PlannerFactory::create(PlannerProvider::Ollama);
         assert!(matches!(
             planner.create_plan("test", &analysis()),
-            Err(AppError::PlannerNotInstalled)
+            Err(AppError::ComponentInitializationFailure(_))
         ));
     }
 
@@ -151,7 +171,7 @@ mod tests {
         assert!(planner.capabilities().offline);
         assert!(matches!(
             planner.create_plan("test", &analysis()),
-            Err(AppError::PlannerNotInstalled)
+            Err(AppError::ComponentInitializationFailure(_))
         ));
     }
 }

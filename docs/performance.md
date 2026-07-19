@@ -105,3 +105,32 @@ Separate clean-session observations were 422 ms for 0.3.0 and 484 ms for 0.4.0; 
 | MSI | 3,547,136 bytes | 3,641,344 bytes | +94,208 bytes (+2.66%) |
 
 The production frontend is 131.04 kB JavaScript / 32.20 kB CSS, with gzip sizes of 42.15 kB and 6.74 kB. No npm package or Cargo package was added; only the existing Tokio dependency's lightweight `time` feature was enabled. The release includes no model weights, inference runtime, server, Python component, GPU requirement, or networking library.
+
+## Phase 5 measurements
+
+These observations were taken from the final packaged 0.5.0 application on the same Windows machine on July 19, 2026. They are release regression observations, not cross-machine guarantees. Model inference latency depends on the selected Ollama model, its runtime state, and the user's hardware; PhotoForge does not present the deterministic mock-server timings as real inference performance.
+
+The reproducible Rust performance sample used a one-request loopback TCP mock with a fixed valid response. It measures PhotoForge's local HTTP, prompt construction, response parsing, strict validation, and comparison overhead without loading a model:
+
+| Measurement | Time |
+| --- | ---: |
+| Local connection/version round trip | 3.466 ms |
+| Local generation HTTP round trip with fixed response | 2.937 ms |
+| Strict edit-plan validation | 0.155 ms |
+| Rule Planner request | 0.280 ms |
+| Rule/Ollama comparison path | 3.375 ms |
+| Rejection of a 1,001-character request | 0.009 ms |
+
+The packaged app also connected explicitly to an installed Ollama 0.32.1 service in 4.4 ms and discovered two already-installed models. That live check exposed newer optional `context_length` and `embedding_length` metadata; the final decoder accepts forward-compatible API metadata while the generated edit-plan JSON remains strict. No model was pulled, installed, or downloaded.
+
+The final portable build produced a responsive window in approximately 573 ms. After a ten-second idle observation, the main process used 27.6 MiB working set / 5.1 MiB private memory. The nine-process application/WebView tree used 434.4 MiB working set / 322.2 MiB private memory and had zero TCP connections. The tree had accumulated 2,250 ms CPU since startup, so that figure includes WebView startup and is not a steady-state CPU percentage. WebView2 process reuse and the presence of unrelated shared WebView processes make tree measurements variable.
+
+### Phase 5 size and dependency impact
+
+| Artifact | 0.4.0 | 0.5.0 | Change |
+| --- | ---: | ---: | ---: |
+| Portable executable | 10,895,872 bytes | 12,458,496 bytes | +1,562,624 bytes (+14.34%) |
+| NSIS setup | 2,482,549 bytes | 2,861,976 bytes | +379,427 bytes (+15.28%) |
+| MSI | 3,641,344 bytes | 4,186,112 bytes | +544,768 bytes (+14.96%) |
+
+The production frontend is 148.47 kB JavaScript / 36.67 kB CSS, with gzip sizes of 47.52 kB and 7.40 kB. Phase 5 adds `reqwest` without default TLS features for bounded loopback HTTP and enables Tokio's macro, synchronization, and time facilities. The release still includes no model weights, Ollama server, inference runtime, Python component, GPU requirement, or cloud client.

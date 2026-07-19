@@ -1,4 +1,4 @@
-use crate::domain::ImageQualityAnalysis;
+use crate::domain::{ImageQualityAnalysis, OllamaDiagnostics};
 use crate::infrastructure::LoadedImage;
 use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
@@ -12,6 +12,7 @@ pub struct EditorSession {
 pub struct AppState {
     pub session: Mutex<Option<EditorSession>>,
     pub components: Mutex<ComponentRegistry>,
+    pub ollama_diagnostics: Mutex<OllamaDiagnostics>,
     pub latest_open_request: AtomicU64,
     pub pending_open_request: AtomicU64,
     pub latest_preview_request: AtomicU64,
@@ -30,6 +31,7 @@ impl Default for AppState {
         Self {
             session: Mutex::new(None),
             components: Mutex::new(components),
+            ollama_diagnostics: Mutex::new(OllamaDiagnostics::default()),
             latest_open_request: AtomicU64::new(0),
             pending_open_request: AtomicU64::new(0),
             latest_preview_request: AtomicU64::new(0),

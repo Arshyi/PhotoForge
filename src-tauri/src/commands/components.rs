@@ -3,9 +3,8 @@ use crate::components::{
     initialize_with_timeout, measure_component_overhead, PlannerFactory, RestorationEngineFactory,
 };
 use crate::domain::{
-    ComponentActionResult, ComponentConfiguration, ComponentDiagnostics,
-    ComponentPerformanceMetrics, ComponentSnapshot, EngineProvider, ModelDiscoveryResult,
-    PlannerProvider, PluginManifest, PluginScanResult,
+    ComponentConfiguration, ComponentDiagnostics, ComponentPerformanceMetrics, ComponentSnapshot,
+    EngineProvider, ModelDiscoveryResult, PlannerProvider, PluginManifest, PluginScanResult,
 };
 use crate::error::AppError;
 use crate::infrastructure::{discover_local_models, scan_plugin_manifests};
@@ -57,7 +56,7 @@ pub async fn select_planner_provider(
         .map_err(|_| AppError::ComponentInitializationFailure("registry is unavailable".into()))?
         .initialization_timeout_ms();
     let result = initialize_with_timeout(timeout_ms, async move {
-        if provider != PlannerProvider::Rule {
+        if !matches!(provider, PlannerProvider::Rule | PlannerProvider::Ollama) {
             return Err(AppError::PlannerNotInstalled);
         }
         let planner = PlannerFactory::create(provider);
@@ -139,22 +138,6 @@ pub fn update_component_configuration(
     registry.update_configuration(configuration)?;
     registry.persist_configuration()?;
     Ok(registry.snapshot())
-}
-
-#[tauri::command]
-pub fn test_planner_connection(provider: String) -> Result<ComponentActionResult, AppError> {
-    let provider = PlannerProvider::from_str(&provider)?;
-    Ok(if provider == PlannerProvider::Rule {
-        ComponentActionResult {
-            success: true,
-            message: "Rule Planner is local and requires no connection.".into(),
-        }
-    } else {
-        ComponentActionResult {
-            success: false,
-            message: "Planner not installed. No connection attempted.".into(),
-        }
-    })
 }
 
 #[tauri::command]

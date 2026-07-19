@@ -7,6 +7,26 @@ import GuidedEditPanel from './GuidedEditPanel.svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const invokeMock = vi.mocked(invoke);
+let commandResults = new Map<string, Array<Promise<unknown>>>();
+
+let componentState: {
+  configuration: { ollamaSelectedModel: string | null; ollamaMaxOperations: number };
+} = {
+  configuration: { ollamaSelectedModel: null, ollamaMaxOperations: 8 }
+};
+let ollamaState = { connected: false };
+
+function enqueue(command: string, value: unknown, reject = false) {
+  const results = commandResults.get(command) ?? [];
+  results.push(reject ? Promise.reject(value) : Promise.resolve(value));
+  commandResults.set(command, results);
+}
+
+function enqueuePromise(command: string, value: Promise<unknown>) {
+  const results = commandResults.get(command) ?? [];
+  results.push(value);
+  commandResults.set(command, results);
+}
 
 function planned(): EditPlan {
   return {
@@ -19,6 +39,24 @@ function planned(): EditPlan {
     ],
     operationExplanations: ['Reduce small pixel variation.', 'Improve captured edges.']
   };
+}
+
+function report(valid = true) {
+  return {
+    valid,
+    originalResponse: '{"summary":"local"}',
+    validatedResponse: valid ? '{"summary":"validated"}' : null,
+    rejectedFields: valid ? [] : ['operations[0].path'],
+    errors: valid ? [] : ['unknown fields are not allowed'],
+    validationTimeMs: 0.12
+  };
+}
+
+function enableOllama() {
+  componentState = {
+    configuration: { ollamaSelectedModel: 'gemma3:4b', ollamaMaxOperations: 8 }
+  };
+  ollamaState = { connected: true };
 }
 
 function renderPanel(overrides: Record<string, unknown> = {}) {
@@ -38,19 +76,28 @@ function renderPanel(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   localStorage.clear();
   invokeMock.mockReset();
+  commandResults = new Map();
+  componentState = { configuration: { ollamaSelectedModel: null, ollamaMaxOperations: 8 } };
+  ollamaState = { connected: false };
+  invokeMock.mockImplementation((command) => {
+    if (command === 'get_component_snapshot') return Promise.resolve(componentState) as never;
+    if (command === 'get_ollama_diagnostics') return Promise.resolve(ollamaState) as never;
+    const next = commandResults.get(command)?.shift();
+    return (next ?? Promise.reject(new Error(`Unexpected command: ${command}`))) as never;
+  });
 });
 
 describe('GuidedEditPanel', () => {
   it('renders a local rule-based request surface and all suggestions', () => {
     const view = renderPanel();
     expect(view.getByLabelText('Editing request')).toBeTruthy();
-    expect(view.getByText('Rule-based · local')).toBeTruthy();
-    expect(view.getByText(/never edits pixels/)).toBeTruthy();
+    expect(view.getByText('Rule · on-device')).toBeTruthy();
+    expect(view.getByText(/deterministic engine can modify pixels/)).toBeTruthy();
     expect(view.getByText('Suggested prompts')).toBeTruthy();
   });
 
   it('generates a plan with Enter and shows explainable operations', async () => {
-    invokeMock.mockResolvedValueOnce({
+    enqueue('generate_edit_plan', {
       plan: planned(),
       documentId: 7,
       requestId: 1,
@@ -72,17 +119,17 @@ describe('GuidedEditPanel', () => {
   });
 
   it('shows heuristic confidence and warnings when enabled', async () => {
-    invokeMock.mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel();
     await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
     await waitFor(() => expect(view.getByText('High · 81%')).toBeTruthy());
-    expect(view.getByText('Heuristic rule-match strength, not AI certainty.')).toBeTruthy();
+    expect(view.getByText(/never permission to apply automatically/)).toBeTruthy();
     expect(view.getByText('Sharpening may amplify noise.')).toBeTruthy();
   });
 
   it('can hide confidence and warnings through local settings', async () => {
-    invokeMock.mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel({ settings: { ...defaultGuidedSettings, showWarnings: false, showConfidence: false } });
     await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
@@ -92,7 +139,7 @@ describe('GuidedEditPanel', () => {
   });
 
   it('supports deleting and reordering operations in the inspector', async () => {
-    invokeMock.mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel();
     await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
@@ -104,7 +151,7 @@ describe('GuidedEditPanel', () => {
   });
 
   it('lets users adjust operation strength before validation', async () => {
-    invokeMock.mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel();
     await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
@@ -115,23 +162,21 @@ describe('GuidedEditPanel', () => {
 
   it('validates the edited plan before applying it', async () => {
     const apply = vi.fn();
-    invokeMock
-      .mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true })
-      .mockResolvedValueOnce(planned());
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', planned());
     const view = renderPanel({ onapply: apply });
     await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
     await waitFor(() => expect(view.getByRole('button', { name: 'Apply' })).toBeTruthy());
     await fireEvent.click(view.getByRole('button', { name: 'Apply' }));
     await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
-    expect(invokeMock.mock.calls[1][0]).toBe('validate_guided_plan');
+    expect(invokeMock.mock.calls.some(([command]) => command === 'validate_guided_plan')).toBe(true);
   });
 
   it('applies a reviewed plan with Ctrl+Enter', async () => {
     const apply = vi.fn();
-    invokeMock
-      .mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true })
-      .mockResolvedValueOnce(planned());
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', planned());
     const view = renderPanel({ onapply: apply });
     const input = view.getByLabelText('Editing request');
     await fireEvent.input(input, { target: { value: 'Reduce noise' } });
@@ -142,7 +187,7 @@ describe('GuidedEditPanel', () => {
   });
 
   it('cancels a plan with Escape', async () => {
-    invokeMock.mockResolvedValueOnce({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel();
     const input = view.getByLabelText('Editing request');
     await fireEvent.input(input, { target: { value: 'Reduce noise' } });
@@ -155,9 +200,8 @@ describe('GuidedEditPanel', () => {
   it('keeps only the latest rapid plan result', async () => {
     let resolveFirst: (value: unknown) => void = () => undefined;
     const first = new Promise((resolve) => { resolveFirst = resolve; });
-    invokeMock
-      .mockReturnValueOnce(first as Promise<never>)
-      .mockResolvedValueOnce({ plan: { ...planned(), summary: 'Latest plan' }, documentId: 7, requestId: 2, processingTimeMs: 1, isCurrent: true });
+    enqueuePromise('generate_edit_plan', first);
+    enqueue('generate_edit_plan', { plan: { ...planned(), summary: 'Latest plan' }, documentId: 7, requestId: 3, processingTimeMs: 1, isCurrent: true });
     const view = renderPanel();
     const input = view.getByLabelText('Editing request');
     await fireEvent.input(input, { target: { value: 'Reduce noise' } });
@@ -167,5 +211,136 @@ describe('GuidedEditPanel', () => {
     await waitFor(() => expect(view.getByText('Latest plan')).toBeTruthy());
     resolveFirst({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     expect(view.queryByText(/Reduce noise before/)).toBeNull();
+  });
+
+  it('keeps Ollama disabled until a model is configured', async () => {
+    const view = renderPanel();
+    const option = within(view.getByLabelText('Planner')).getByRole('option', { name: 'Ollama Planner' });
+    expect((option as HTMLOptionElement).disabled).toBe(true);
+    expect((view.getByRole('button', { name: 'Compare Planners' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('enables Ollama and identifies the selected local model', async () => {
+    enableOllama();
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    const option = within(view.getByLabelText('Planner')).getByRole('option', { name: 'Ollama Planner' });
+    expect((option as HTMLOptionElement).disabled).toBe(false);
+  });
+
+  it('refreshes Ollama availability after component settings close', async () => {
+    const view = renderPanel({ configurationRevision: 0 });
+    const option = within(view.getByLabelText('Planner')).getByRole('option', {
+      name: 'Ollama Planner'
+    });
+    expect((option as HTMLOptionElement).disabled).toBe(true);
+    enableOllama();
+    await view.rerender({ configurationRevision: 1 });
+    await waitFor(() => expect((option as HTMLOptionElement).disabled).toBe(false));
+    expect(view.getByText('gemma3:4b')).toBeTruthy();
+  });
+
+  it('tests the connection only after an explicit click', async () => {
+    enqueue('test_ollama_connection', { connected: true, message: 'Connected to local Ollama 0.11.0.', version: '0.11.0', responseTimeMs: 2.5 });
+    const view = renderPanel();
+    expect(invokeMock.mock.calls.some(([command]) => command === 'test_ollama_connection')).toBe(false);
+    await fireEvent.click(view.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(view.getByText(/Connected to local Ollama 0.11.0/)).toBeTruthy());
+  });
+
+  it('refreshes installed models without selecting or downloading one', async () => {
+    enqueue('refresh_ollama_models', { models: [], message: 'No compatible local models found.', responseTimeMs: 1 });
+    const view = renderPanel();
+    await fireEvent.click(view.getByRole('button', { name: 'Refresh Models' }));
+    await waitFor(() => expect(view.getByText('No compatible local models found.')).toBeTruthy());
+    expect(invokeMock.mock.calls.some(([command]) => command === 'refresh_ollama_models')).toBe(true);
+  });
+
+  it('generates a validated Ollama plan and exposes inspection controls', async () => {
+    enableOllama();
+    enqueue('generate_ollama_plan', { plan: planned(), documentId: 7, requestId: 1, model: 'gemma3:4b', generationTimeMs: 3, validationTimeMs: 0.12, totalTimeMs: 3.12, isCurrent: true, error: null, validationReport: report() });
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.change(view.getByLabelText('Planner'), { target: { value: 'ollama' } });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await waitFor(() => expect(view.getByText('Validated Ollama plan')).toBeTruthy());
+    expect(view.getByRole('button', { name: 'View Raw JSON' })).toBeTruthy();
+    expect(view.getByRole('button', { name: 'Validate JSON' })).toBeTruthy();
+    expect(view.getByRole('button', { name: 'View Validation Report' })).toBeTruthy();
+  });
+
+  it('shows rejected plans and offers an explicit Rule Planner fallback', async () => {
+    enableOllama();
+    enqueue('generate_ollama_plan', { plan: null, documentId: 7, requestId: 1, model: 'gemma3:4b', generationTimeMs: 3, validationTimeMs: 0.12, totalTimeMs: 3.12, isCurrent: true, error: 'Ollama plan validation failed.', validationReport: report(false) });
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.change(view.getByLabelText('Planner'), { target: { value: 'ollama' } });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await waitFor(() => expect(view.getByRole('button', { name: 'Use Rule Planner Instead' })).toBeTruthy());
+    expect(view.getByLabelText('Validation report').textContent).toContain('operations[0].path');
+  });
+
+  it('renders original Ollama JSON as read-only', async () => {
+    enableOllama();
+    enqueue('generate_ollama_plan', { plan: planned(), documentId: 7, requestId: 1, model: 'gemma3:4b', generationTimeMs: 3, validationTimeMs: 0.12, totalTimeMs: 3.12, isCurrent: true, error: null, validationReport: report() });
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.change(view.getByLabelText('Planner'), { target: { value: 'ollama' } });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'View Raw JSON' }));
+    expect((view.getByLabelText('Original Ollama response') as HTMLTextAreaElement).readOnly).toBe(true);
+  });
+
+  it('revalidates raw JSON through the backend', async () => {
+    enableOllama();
+    enqueue('generate_ollama_plan', { plan: planned(), documentId: 7, requestId: 1, model: 'gemma3:4b', generationTimeMs: 3, validationTimeMs: 0.12, totalTimeMs: 3.12, isCurrent: true, error: null, validationReport: report() });
+    enqueue('validate_ollama_json', report());
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.change(view.getByLabelText('Planner'), { target: { value: 'ollama' } });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'Validate JSON' }));
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'validate_ollama_json')).toBe(true));
+  });
+
+  it('shows Rule and Ollama plans side by side without choosing a winner', async () => {
+    enableOllama();
+    enqueue('compare_planners', { rule: { provider: 'Rule', plan: planned(), executionTimeMs: 0.2, error: null }, ollama: { provider: 'Ollama', plan: { ...planned(), summary: 'Ollama summary' }, executionTimeMs: 4.2, error: null }, validationReport: report(), totalTimeMs: 4.4 });
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Compare Planners' }));
+    const comparison = await view.findByLabelText('Planner comparison');
+    expect(comparison.textContent).toContain('no automatic winner');
+    expect(comparison.textContent).toContain('Ollama summary');
+  });
+
+  it('cancels a running Ollama request when the prompt changes', async () => {
+    enableOllama();
+    enqueuePromise('generate_ollama_plan', new Promise(() => undefined));
+    const view = renderPanel();
+    await waitFor(() => expect(view.getByText('gemma3:4b')).toBeTruthy());
+    await fireEvent.change(view.getByLabelText('Planner'), { target: { value: 'ollama' } });
+    const input = view.getByLabelText('Editing request');
+    await fireEvent.input(input, { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await view.findByRole('button', { name: 'Cancel' });
+    await fireEvent.input(input, { target: { value: 'Sharpen instead' } });
+    await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'cancel_ollama_plan')).toBe(true));
+  });
+
+  it('tags local prompt history entries with their provider', async () => {
+    localStorage.setItem('photoforge.guided-recent.v1', JSON.stringify([
+      { prompt: 'From rules', provider: 'Rule' },
+      { prompt: 'From Ollama', provider: 'Ollama' }
+    ]));
+    const view = renderPanel();
+    expect(await view.findByText('From rules')).toBeTruthy();
+    expect(view.getByText('From Ollama')).toBeTruthy();
+    expect(view.getAllByText(/Rule|Ollama/).length).toBeGreaterThan(1);
   });
 });

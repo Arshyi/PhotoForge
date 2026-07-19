@@ -57,10 +57,22 @@
 - Local model metadata discovery with no download, content loading, or inference
 - Versioned plugin manifest validation with no arbitrary plugin execution
 
+## Phase 5 — Optional Ollama local planner (complete)
+
+- Rule Planner remains the startup default and offline fallback
+- Explicit loopback-only Ollama connection testing and installed-model discovery
+- Proxy-disabled, redirect-disabled, non-retrying HTTP client with timeout, cancellation, UTF-8/status handling, and bounded streamed responses
+- Deterministic text-only prompt containing approved analysis, supported operations, ranges, and strict JSON schema
+- Deny-unknown-fields wire parsing, rejected-field reports, locally generated explanations, and reuse of existing plan validation
+- Planner selector, cancellation on prompt edits, raw/validated JSON inspection, explicit Rule fallback, and no-winner Rule/Ollama comparison
+- Persisted endpoint, timeout, response ceiling, model, and operation-limit settings with visible defaults reset
+- Local AI Privacy page plus connection, timing, validation, rejection, success, cancellation, and memory diagnostics
+- Deterministic mock Ollama server and expanded 277-Rust/146-frontend automated coverage without a real Ollama installation
+
 ## Later, optional AI work
 
 - Lazy-loaded quality assessment, blur/noise estimation, OCR cleanup, super-resolution, and old-photo restoration
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No actual Ollama connection, OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, perspective correction, batch processing, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable.
+No OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, perspective correction, batch processing, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable. Ollama remains a text-to-validated-plan adapter only; it receives no image and has no pixel or tool authority.

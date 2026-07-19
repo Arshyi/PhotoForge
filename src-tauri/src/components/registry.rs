@@ -28,8 +28,12 @@ impl Default for ComponentRegistry {
         let configuration = ComponentConfiguration {
             active_planner: PlannerProvider::Rule,
             active_engine: EngineProvider::Deterministic,
-            planner_endpoint: "http://localhost:11434".into(),
+            planner_endpoint: "http://127.0.0.1:11434".into(),
             initialization_timeout_ms: 5_000,
+            ollama_timeout_ms: 15_000,
+            ollama_max_response_bytes: 256 * 1_024,
+            ollama_selected_model: None,
+            ollama_max_operations: 8,
             model_directories: vec![base.join("models").to_string_lossy().into_owned()],
             plugin_directory: base.join("plugins").to_string_lossy().into_owned(),
         };
@@ -122,7 +126,7 @@ impl ComponentRegistry {
     }
 
     pub fn select_planner(&mut self, provider: PlannerProvider) -> Result<(), AppError> {
-        if provider != PlannerProvider::Rule {
+        if !matches!(provider, PlannerProvider::Rule | PlannerProvider::Ollama) {
             return Err(AppError::PlannerNotInstalled);
         }
         let planner = PlannerFactory::create(provider);
@@ -158,7 +162,10 @@ impl ComponentRegistry {
         configuration: ComponentConfiguration,
     ) -> Result<(), AppError> {
         configuration.validate()?;
-        if configuration.active_planner != PlannerProvider::Rule {
+        if !matches!(
+            configuration.active_planner,
+            PlannerProvider::Rule | PlannerProvider::Ollama
+        ) {
             return Err(AppError::PlannerNotInstalled);
         }
         if configuration.active_engine != EngineProvider::Deterministic {
@@ -248,7 +255,7 @@ impl ComponentRegistry {
 
     pub fn planner_registration(&self, provider: PlannerProvider) -> PlannerRegistration {
         let implementation = PlannerFactory::create(provider);
-        let installed = provider == PlannerProvider::Rule;
+        let installed = matches!(provider, PlannerProvider::Rule | PlannerProvider::Ollama);
         PlannerRegistration {
             id: provider.id().into(),
             name: provider.display_name().into(),
@@ -259,14 +266,14 @@ impl ComponentRegistry {
             },
             provider: match provider {
                 PlannerProvider::Rule => "PhotoForge",
-                PlannerProvider::Ollama => "Ollama (future adapter)",
+                PlannerProvider::Ollama => "Ollama local API",
                 PlannerProvider::OpenAi => "OpenAI (future adapter)",
                 PlannerProvider::Future => "Unassigned",
             }
             .into(),
             memory_estimate_mb: match provider {
                 PlannerProvider::Rule => 1,
-                PlannerProvider::Ollama => 1_024,
+                PlannerProvider::Ollama => 1,
                 PlannerProvider::OpenAi => 32,
                 PlannerProvider::Future => 0,
             },
@@ -356,7 +363,7 @@ mod tests {
                 .iter()
                 .filter(|item| !item.installed)
                 .count(),
-            3
+            2
         );
         assert_eq!(
             snapshot
@@ -404,13 +411,15 @@ mod tests {
     }
 
     #[test]
-    fn selecting_unavailable_planner_fails_without_switching() {
+    fn selecting_ollama_adapter_succeeds_without_connecting() {
         let mut registry = ComponentRegistry::default();
-        assert!(matches!(
-            registry.select_planner(PlannerProvider::Ollama),
-            Err(AppError::PlannerNotInstalled)
-        ));
-        assert_eq!(registry.active_planner(), PlannerProvider::Rule);
+        registry.select_planner(PlannerProvider::Ollama).unwrap();
+        assert_eq!(registry.active_planner(), PlannerProvider::Ollama);
+        assert!(
+            registry
+                .planner_registration(PlannerProvider::Ollama)
+                .loaded
+        );
     }
 
     #[test]
@@ -439,7 +448,7 @@ mod tests {
     fn unavailable_active_provider_is_rejected_in_configuration() {
         let mut registry = ComponentRegistry::default();
         let mut configuration = registry.configuration().clone();
-        configuration.active_planner = PlannerProvider::Ollama;
+        configuration.active_planner = PlannerProvider::OpenAi;
         assert!(matches!(
             registry.update_configuration(configuration),
             Err(AppError::PlannerNotInstalled)
@@ -452,7 +461,7 @@ mod tests {
         assert_eq!(diagnostics.registered_planners.len(), 4);
         assert_eq!(diagnostics.registered_engines.len(), 4);
         assert_eq!(diagnostics.loaded_components.len(), 2);
-        assert_eq!(diagnostics.unavailable_components.len(), 6);
+        assert_eq!(diagnostics.unavailable_components.len(), 5);
         assert!(diagnostics.configuration_path.ends_with("components.json"));
     }
 
@@ -500,7 +509,7 @@ mod tests {
     fn default_configuration_contains_only_local_paths_and_endpoint() {
         let registry = ComponentRegistry::default();
         let configuration = registry.configuration();
-        assert_eq!(configuration.planner_endpoint, "http://localhost:11434");
+        assert_eq!(configuration.planner_endpoint, "http://127.0.0.1:11434");
         assert_eq!(configuration.model_directories.len(), 1);
         assert!(configuration.plugin_directory.ends_with("plugins"));
         assert!(configuration.validate().is_ok());

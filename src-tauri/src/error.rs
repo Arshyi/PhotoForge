@@ -23,6 +23,32 @@ pub enum AppError {
     InvalidPlan(String),
     #[error("Planner not installed.")]
     PlannerNotInstalled,
+    #[error("Ollama refused the local connection. Start Ollama and try Test Connection again.")]
+    OllamaConnectionRefused,
+    #[error("The local Ollama request timed out. Increase the timeout or choose a smaller model.")]
+    OllamaTimeout,
+    #[error("The configured local Ollama host could not be reached. Check the endpoint and local service.")]
+    OllamaHostUnreachable,
+    #[error("The Ollama endpoint is invalid. Use an explicit local address such as http://127.0.0.1:11434.")]
+    InvalidPlannerEndpoint,
+    #[error(
+        "The selected Ollama model is not installed. Refresh Models and choose an installed model."
+    )]
+    OllamaModelMissing,
+    #[error("Ollama returned malformed JSON or non-UTF-8 data.")]
+    OllamaJsonParse,
+    #[error("The local Ollama server returned HTTP status {0}.")]
+    OllamaHttpStatus(u16),
+    #[error("Ollama plan validation failed: {0}")]
+    OllamaSchemaValidation(String),
+    #[error("The Ollama planning request was cancelled.")]
+    PlannerCancellation,
+    #[error("The local planner is already handling another request. Cancel it or wait for it to finish.")]
+    PlannerBusy,
+    #[error("Ollama returned more than the configured {limit} byte response limit.")]
+    OllamaResponseTooLarge { limit: u64 },
+    #[error("The local Ollama server reported an unsupported planner response version.")]
+    UnsupportedPlannerVersion,
     #[error("Restoration engine not installed.")]
     RestorationEngineNotInstalled,
     #[error("Invalid component configuration: {0}")]
@@ -64,6 +90,18 @@ impl AppError {
             Self::PlannerNoMatch => "planner_no_match",
             Self::InvalidPlan(_) => "invalid_plan",
             Self::PlannerNotInstalled => "planner_not_installed",
+            Self::OllamaConnectionRefused => "ollama_connection_refused",
+            Self::OllamaTimeout => "ollama_timeout",
+            Self::OllamaHostUnreachable => "ollama_host_unreachable",
+            Self::InvalidPlannerEndpoint => "invalid_planner_endpoint",
+            Self::OllamaModelMissing => "ollama_model_missing",
+            Self::OllamaJsonParse => "ollama_json_parse_error",
+            Self::OllamaHttpStatus(_) => "ollama_http_status",
+            Self::OllamaSchemaValidation(_) => "ollama_schema_validation_failure",
+            Self::PlannerCancellation => "planner_cancellation",
+            Self::PlannerBusy => "planner_busy",
+            Self::OllamaResponseTooLarge { .. } => "ollama_response_too_large",
+            Self::UnsupportedPlannerVersion => "unsupported_planner_version",
             Self::RestorationEngineNotInstalled => "restoration_engine_not_installed",
             Self::InvalidComponentConfiguration(_) => "invalid_component_configuration",
             Self::ComponentInitializationTimeout => "component_initialization_timeout",

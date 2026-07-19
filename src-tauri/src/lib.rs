@@ -8,10 +8,12 @@ pub mod infrastructure;
 
 use application::AppState;
 use commands::{
-    analyze_image, discover_models, export_image, generate_edit_plan, get_component_diagnostics,
-    get_component_snapshot, measure_component_performance, open_image, render_preview,
-    scan_plugins, select_planner_provider, select_restoration_engine, test_planner_connection,
-    update_component_configuration, validate_guided_plan, validate_plugin_manifest,
+    analyze_image, cancel_ollama_plan, compare_planners, discover_models, export_image,
+    generate_edit_plan, generate_ollama_plan, get_component_diagnostics, get_component_snapshot,
+    get_ollama_diagnostics, measure_component_performance, open_image, refresh_ollama_models,
+    render_preview, scan_plugins, select_planner_provider, select_restoration_engine,
+    test_ollama_connection, update_component_configuration, validate_guided_plan,
+    validate_ollama_json, validate_plugin_manifest,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,12 +31,18 @@ pub fn run() {
             select_planner_provider,
             select_restoration_engine,
             update_component_configuration,
-            test_planner_connection,
             discover_models,
             scan_plugins,
             validate_plugin_manifest,
             generate_edit_plan,
             validate_guided_plan,
+            test_ollama_connection,
+            refresh_ollama_models,
+            generate_ollama_plan,
+            cancel_ollama_plan,
+            validate_ollama_json,
+            compare_planners,
+            get_ollama_diagnostics,
             export_image
         ])
         .run(tauri::generate_context!())

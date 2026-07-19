@@ -1,5 +1,6 @@
 mod components;
 mod models;
+mod ollama;
 mod pipeline;
 mod planner;
 mod plugins;
@@ -15,7 +16,12 @@ pub use models::{
     AnalysisResult, ColorCastEstimate, EditOperation, EditPlan, ExportResult, ImageMetadata,
     ImageQualityAnalysis, OpenImageResult, PlanResult, PreviewResult,
 };
+pub use ollama::{
+    OllamaConnectionResult, OllamaDiagnostics, OllamaModel, OllamaModelDiscoveryResult,
+    OllamaPlanResult, PlanValidationReport, PlannerComparisonEntry, PlannerComparisonResult,
+};
 pub use pipeline::EditPipeline;
+pub(crate) use planner::operation_explanation;
 pub use planner::{
     validate_edit_plan, EditPlanner, RuleBasedPlanner, RulePlanner, MAX_PLAN_OPERATIONS,
 };

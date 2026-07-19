@@ -69,23 +69,34 @@ describe('guided editing utilities', () => {
   });
 
   it('deduplicates recent requests case-insensitively', () => {
-    const next = rememberRecentRequest(['Reduce Noise', 'Fix lighting'], 'reduce noise', null);
-    expect(next).toEqual(['reduce noise', 'Fix lighting']);
+    const next = rememberRecentRequest(
+      [{ prompt: 'Reduce Noise', provider: 'Rule' }, { prompt: 'Fix lighting', provider: 'Rule' }],
+      'reduce noise',
+      'Rule',
+      null
+    );
+    expect(next).toEqual([
+      { prompt: 'reduce noise', provider: 'Rule' },
+      { prompt: 'Fix lighting', provider: 'Rule' }
+    ]);
   });
 
   it('bounds recent requests to 25', () => {
-    let recent: string[] = [];
+    let recent: Array<{ prompt: string; provider: 'Rule' | 'Ollama' }> = [];
     for (let index = 0; index < 30; index += 1) {
-      recent = rememberRecentRequest(recent, `Request ${index}`, null);
+      recent = rememberRecentRequest(recent, `Request ${index}`, 'Rule', null);
     }
     expect(recent).toHaveLength(MAX_RECENT_REQUESTS);
-    expect(recent[0]).toBe('Request 29');
+    expect(recent[0].prompt).toBe('Request 29');
   });
 
   it('loads only valid recent request strings', () => {
     const store = new MemoryStore();
     store.setItem(RECENT_REQUESTS_KEY, JSON.stringify([' Good ', 4, '', 'Also good']));
-    expect(loadRecentRequests(store)).toEqual(['Good', 'Also good']);
+    expect(loadRecentRequests(store)).toEqual([
+      { prompt: 'Good', provider: 'Rule' },
+      { prompt: 'Also good', provider: 'Rule' }
+    ]);
   });
 
   it('labels confidence as low, medium, or high', () => {

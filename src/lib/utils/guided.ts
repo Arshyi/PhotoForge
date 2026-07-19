@@ -1,4 +1,9 @@
-import type { EditOperation, EditPlan, GuidedSettings } from '../types/editor';
+import type {
+  EditOperation,
+  EditPlan,
+  GuidedHistoryEntry,
+  GuidedSettings
+} from '../types/editor';
 
 export const MAX_RECENT_REQUESTS = 25;
 export const GUIDED_SETTINGS_KEY = 'photoforge.guided-settings.v1';
@@ -74,14 +79,27 @@ export function saveGuidedSettings(
   }
 }
 
-export function loadRecentRequests(store: LocalStore | null = browserStorage()): string[] {
+export function loadRecentRequests(
+  store: LocalStore | null = browserStorage()
+): GuidedHistoryEntry[] {
   if (!store) return [];
   try {
     const parsed = JSON.parse(store.getItem(RECENT_REQUESTS_KEY) ?? '[]') as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-      .map((value) => value.trim().slice(0, 1_000))
+      .map((value): GuidedHistoryEntry | null => {
+        if (typeof value === 'string' && value.trim()) {
+          return { prompt: value.trim().slice(0, 1_000), provider: 'Rule' };
+        }
+        if (!value || typeof value !== 'object') return null;
+        const candidate = value as Partial<GuidedHistoryEntry>;
+        if (typeof candidate.prompt !== 'string' || !candidate.prompt.trim()) return null;
+        return {
+          prompt: candidate.prompt.trim().slice(0, 1_000),
+          provider: candidate.provider === 'Ollama' ? 'Ollama' : 'Rule'
+        };
+      })
+      .filter((value): value is GuidedHistoryEntry => value !== null)
       .slice(0, MAX_RECENT_REQUESTS);
   } catch {
     return [];
@@ -89,16 +107,18 @@ export function loadRecentRequests(store: LocalStore | null = browserStorage()):
 }
 
 export function rememberRecentRequest(
-  recent: string[],
+  recent: GuidedHistoryEntry[],
   request: string,
+  provider: GuidedHistoryEntry['provider'] = 'Rule',
   store: LocalStore | null = browserStorage()
-): string[] {
+): GuidedHistoryEntry[] {
   const normalized = request.trim().slice(0, 1_000);
   if (!normalized) return recent.slice(0, MAX_RECENT_REQUESTS);
-  const next = [
-    normalized,
-    ...recent.filter((candidate) => candidate.toLocaleLowerCase() !== normalized.toLocaleLowerCase())
-  ].slice(0, MAX_RECENT_REQUESTS);
+  const next = [{ prompt: normalized, provider }, ...recent.filter(
+    (candidate) =>
+      candidate.prompt.toLocaleLowerCase() !== normalized.toLocaleLowerCase() ||
+      candidate.provider !== provider
+  )].slice(0, MAX_RECENT_REQUESTS);
   try {
     store?.setItem(RECENT_REQUESTS_KEY, JSON.stringify(next));
   } catch {

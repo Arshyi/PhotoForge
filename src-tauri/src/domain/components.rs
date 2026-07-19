@@ -185,6 +185,14 @@ pub struct ComponentConfiguration {
     pub active_engine: EngineProvider,
     pub planner_endpoint: String,
     pub initialization_timeout_ms: u64,
+    #[serde(default = "default_ollama_timeout_ms")]
+    pub ollama_timeout_ms: u64,
+    #[serde(default = "default_ollama_max_response_bytes")]
+    pub ollama_max_response_bytes: u64,
+    #[serde(default)]
+    pub ollama_selected_model: Option<String>,
+    #[serde(default = "default_ollama_max_operations")]
+    pub ollama_max_operations: usize,
     pub model_directories: Vec<String>,
     pub plugin_directory: String,
 }
@@ -199,12 +207,36 @@ impl ComponentConfiguration {
         }
         if !is_local_loopback_endpoint(endpoint) {
             return Err(AppError::InvalidComponentConfiguration(
-                "Phase 4 planner endpoints must use an explicit local loopback address".into(),
+                "Ollama endpoints must use an explicit local loopback address".into(),
             ));
         }
         if !(100..=30_000).contains(&self.initialization_timeout_ms) {
             return Err(AppError::InvalidComponentConfiguration(
                 "initialization timeout must be between 100 and 30,000 milliseconds".into(),
+            ));
+        }
+        if !(250..=120_000).contains(&self.ollama_timeout_ms) {
+            return Err(AppError::InvalidComponentConfiguration(
+                "Ollama timeout must be between 250 and 120,000 milliseconds".into(),
+            ));
+        }
+        if !(1_024..=2_097_152).contains(&self.ollama_max_response_bytes) {
+            return Err(AppError::InvalidComponentConfiguration(
+                "Ollama maximum response size must be between 1 KiB and 2 MiB".into(),
+            ));
+        }
+        if self.ollama_max_operations == 0 || self.ollama_max_operations > 8 {
+            return Err(AppError::InvalidComponentConfiguration(
+                "Ollama may generate between one and eight operations".into(),
+            ));
+        }
+        if self.ollama_selected_model.as_ref().is_some_and(|model| {
+            model.trim().is_empty()
+                || model.chars().count() > 200
+                || model.chars().any(char::is_control)
+        }) {
+            return Err(AppError::InvalidComponentConfiguration(
+                "selected Ollama model names must contain 1 to 200 printable characters".into(),
             ));
         }
         if self.model_directories.len() > 8 {
@@ -228,6 +260,18 @@ impl ComponentConfiguration {
         }
         Ok(())
     }
+}
+
+pub const fn default_ollama_timeout_ms() -> u64 {
+    15_000
+}
+
+pub const fn default_ollama_max_response_bytes() -> u64 {
+    256 * 1_024
+}
+
+pub const fn default_ollama_max_operations() -> usize {
+    8
 }
 
 fn is_local_loopback_endpoint(endpoint: &str) -> bool {
@@ -324,6 +368,10 @@ mod tests {
             active_engine: EngineProvider::Deterministic,
             planner_endpoint: "http://localhost:11434".into(),
             initialization_timeout_ms: 5_000,
+            ollama_timeout_ms: default_ollama_timeout_ms(),
+            ollama_max_response_bytes: default_ollama_max_response_bytes(),
+            ollama_selected_model: None,
+            ollama_max_operations: default_ollama_max_operations(),
             model_directories: vec!["models".into()],
             plugin_directory: "plugins".into(),
         }

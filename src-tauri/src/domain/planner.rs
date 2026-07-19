@@ -633,7 +633,7 @@ fn operation_stage(operation: &EditOperation) -> u8 {
     }
 }
 
-fn operation_explanation(operation: &EditOperation) -> &'static str {
+pub(crate) fn operation_explanation(operation: &EditOperation) -> &'static str {
     match operation {
         EditOperation::Brightness { amount } if *amount < 0.0 => {
             "Reduces global luminance by a bounded amount."
