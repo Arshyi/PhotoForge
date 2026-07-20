@@ -4,7 +4,10 @@
   export let filename = '';
   export let comparison = false;
   export let comparisonPosition = 50;
+  export let comparisonMode: 'swipe' | 'split' | 'blink' | 'difference' = 'swipe';
   export let splitComparison = false;
+  export let gridOverlay = false;
+  export let crosshair = false;
   export let zoom = 100;
   export let processing = false;
   export let stale = false;
@@ -27,24 +30,24 @@
           </figure>
         </div>
       {:else}
-        <div class="canvas" style={`--zoom: ${zoom / 100}`}>
+        <div class="canvas" class:blink={comparison && comparisonMode === 'blink'} class:difference={comparison && comparisonMode === 'difference'} style={`--zoom: ${zoom / 100}`}>
           <img class="processed" src={previewUrl} alt={`Edited preview of ${filename}`} draggable="false" />
           {#if comparison && originalUrl}
-            <div class="before" style={`width: ${comparisonPosition}%`}>
+            <div class="before" style={`width: ${comparisonMode === 'swipe' ? comparisonPosition : 100}%`}>
               <img src={originalUrl} alt={`Original preview of ${filename}`} draggable="false" />
             </div>
-            <div class="divider" style={`left: ${comparisonPosition}%`} aria-hidden="true">
-              <span>↔</span>
-            </div>
+            {#if comparisonMode === 'swipe'}<div class="divider" style={`left: ${comparisonPosition}%`} aria-hidden="true"><span>↔</span></div>{/if}
             <span class="badge before-badge">Before</span>
             <span class="badge after-badge">After</span>
           {/if}
+          {#if gridOverlay}<div class="editing-grid" aria-label="Composition grid overlay"></div>{/if}
+          {#if crosshair}<div class="crosshair" aria-label="Pixel inspector crosshair"><i></i><b></b></div>{/if}
         </div>
       {/if}
       {#if processing}
         <div class="processing-pill"><span></span> Forging preview</div>
       {/if}
-      {#if comparison && !splitComparison}
+      {#if comparison && !splitComparison && comparisonMode === 'swipe'}
         <label class="comparison-slider">
           <span class="sr-only">Before and after divider</span>
           <input
@@ -173,6 +176,20 @@
     inset: 0 auto 0 0;
     overflow: hidden;
   }
+
+  .canvas.blink .before { animation: blink-compare 1s steps(1, end) infinite; }
+  .canvas.difference .before { mix-blend-mode: difference; filter: saturate(2.8) contrast(1.45); opacity: .92; }
+
+  .editing-grid, .crosshair { position: absolute; z-index: 8; inset: 0; pointer-events: none; }
+  .editing-grid {
+    background-image:
+      linear-gradient(90deg, transparent 33.2%, rgba(255,255,255,.7) 33.3%, transparent 33.5%, transparent 66.5%, rgba(255,255,255,.7) 66.7%, transparent 66.8%),
+      linear-gradient(transparent 33.2%, rgba(255,255,255,.7) 33.3%, transparent 33.5%, transparent 66.5%, rgba(255,255,255,.7) 66.7%, transparent 66.8%);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.75);
+  }
+  .crosshair i, .crosshair b { position: absolute; display: block; background: rgba(255,255,255,.9); box-shadow: 0 0 2px black; }
+  .crosshair i { top: 50%; left: 0; right: 0; height: 1px; }
+  .crosshair b { left: 50%; top: 0; bottom: 0; width: 1px; }
 
   .before img {
     max-width: none;
@@ -358,6 +375,8 @@
     70% { box-shadow: 0 0 0 8px rgba(192, 231, 126, 0); }
     100% { box-shadow: 0 0 0 0 rgba(192, 231, 126, 0); }
   }
+
+  @keyframes blink-compare { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
   @media (max-width: 760px) {
     .stage { padding: 16px; }

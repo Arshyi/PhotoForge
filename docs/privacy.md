@@ -1,5 +1,11 @@
 # Privacy
 
+## Phase 6 professional workflow privacy
+
+Professional tools, histograms, metadata inspection, workflow recording, batch processing, workspace layouts, shortcuts, comparison, and export profiles operate entirely on this device. Workflows contain edit parameters only; they contain no image pixels. Workspace and shortcut settings use local WebView storage. Batch inputs, outputs, progress, failures, and logs stay in user-selected local folders and process memory.
+
+Phase 6 adds no network dependency, telemetry, cloud processing, hidden upload, external execution, model, model download, or neural inference. Safe EXIF inspection reads only the bounded local input file and does not alter metadata. The optional Phase 5 Ollama loopback planner remains the only networking exception and professional tools never invoke it.
+
 PhotoForge is designed to work fully offline.
 
 - Images are decoded and processed locally on the user's device.

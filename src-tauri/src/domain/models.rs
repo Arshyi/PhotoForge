@@ -1,6 +1,101 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurvePoint {
+    pub input: f32,
+    pub output: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurveSet {
+    pub rgb: Vec<CurvePoint>,
+    pub red: Vec<CurvePoint>,
+    pub green: Vec<CurvePoint>,
+    pub blue: Vec<CurvePoint>,
+}
+
+impl Default for CurveSet {
+    fn default() -> Self {
+        let identity = vec![
+            CurvePoint {
+                input: 0.0,
+                output: 0.0,
+            },
+            CurvePoint {
+                input: 1.0,
+                output: 1.0,
+            },
+        ];
+        Self {
+            rgb: identity.clone(),
+            red: identity.clone(),
+            green: identity.clone(),
+            blue: identity,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HslAdjustment {
+    pub hue: f32,
+    pub saturation: f32,
+    pub lightness: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HslSettings {
+    pub master: HslAdjustment,
+    pub red: HslAdjustment,
+    pub yellow: HslAdjustment,
+    pub green: HslAdjustment,
+    pub cyan: HslAdjustment,
+    pub blue: HslAdjustment,
+    pub magenta: HslAdjustment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CropOverlay {
+    #[default]
+    None,
+    RuleOfThirds,
+    GoldenRatio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveCorners {
+    pub top_left: [f32; 2],
+    pub top_right: [f32; 2],
+    pub bottom_right: [f32; 2],
+    pub bottom_left: [f32; 2],
+}
+
+impl Default for PerspectiveCorners {
+    fn default() -> Self {
+        Self {
+            top_left: [0.0, 0.0],
+            top_right: [1.0, 0.0],
+            bottom_right: [1.0, 1.0],
+            bottom_left: [0.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectiveColorAdjustment {
+    pub cyan: f32,
+    pub magenta: f32,
+    pub yellow: f32,
+    pub black: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EditOperation {
@@ -60,6 +155,57 @@ pub enum EditOperation {
         strength: f32,
         radius: f32,
     },
+    Curves {
+        curves: CurveSet,
+    },
+    Levels {
+        input_black: u8,
+        input_white: u8,
+        gamma: f32,
+        output_black: u8,
+        output_white: u8,
+    },
+    WhitePoint {
+        red: u8,
+        green: u8,
+        blue: u8,
+    },
+    BlackPoint {
+        red: u8,
+        green: u8,
+        blue: u8,
+    },
+    Crop {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        aspect_ratio: Option<String>,
+        overlay: CropOverlay,
+    },
+    Straighten {
+        degrees: f32,
+    },
+    Perspective {
+        corners: PerspectiveCorners,
+    },
+    LensCorrection {
+        distortion: f32,
+        vignetting: f32,
+        chromatic_aberration: f32,
+    },
+    Hsl {
+        settings: HslSettings,
+    },
+    TemperatureTint {
+        temperature: f32,
+        tint: f32,
+    },
+    SelectiveColor {
+        target_hue: f32,
+        width: f32,
+        adjustment: SelectiveColorAdjustment,
+    },
 }
 
 impl EditOperation {
@@ -115,6 +261,81 @@ impl EditOperation {
             Self::UnevenLightingCorrection { strength, radius } => {
                 (0.0..=1.0).contains(strength) && (4.0..=96.0).contains(radius)
             }
+            Self::Curves { curves } => validate_curve_set(curves),
+            Self::Levels {
+                input_black,
+                input_white,
+                gamma,
+                output_black,
+                output_white,
+            } => {
+                input_black < input_white
+                    && output_black <= output_white
+                    && gamma.is_finite()
+                    && (0.1..=10.0).contains(gamma)
+            }
+            Self::WhitePoint { red, green, blue } => *red > 0 && *green > 0 && *blue > 0,
+            Self::BlackPoint { .. } => true,
+            Self::Crop {
+                x,
+                y,
+                width,
+                height,
+                aspect_ratio,
+                ..
+            } => {
+                [*x, *y, *width, *height]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    && *x >= 0.0
+                    && *y >= 0.0
+                    && *width > 0.0
+                    && *height > 0.0
+                    && *x + *width <= 1.000_001
+                    && *y + *height <= 1.000_001
+                    && aspect_ratio
+                        .as_ref()
+                        .map_or(true, |ratio| ratio.len() <= 32)
+            }
+            Self::Straighten { degrees } => degrees.is_finite() && (-45.0..=45.0).contains(degrees),
+            Self::Perspective { corners } => validate_corners(corners),
+            Self::LensCorrection {
+                distortion,
+                vignetting,
+                chromatic_aberration,
+            } => {
+                distortion.is_finite()
+                    && vignetting.is_finite()
+                    && chromatic_aberration.is_finite()
+                    && (-1.0..=1.0).contains(distortion)
+                    && (-1.0..=1.0).contains(vignetting)
+                    && (-1.0..=1.0).contains(chromatic_aberration)
+            }
+            Self::Hsl { settings } => validate_hsl(settings),
+            Self::TemperatureTint { temperature, tint } => {
+                temperature.is_finite()
+                    && tint.is_finite()
+                    && (-1.0..=1.0).contains(temperature)
+                    && (-1.0..=1.0).contains(tint)
+            }
+            Self::SelectiveColor {
+                target_hue,
+                width,
+                adjustment,
+            } => {
+                target_hue.is_finite()
+                    && width.is_finite()
+                    && (0.0..=360.0).contains(target_hue)
+                    && (1.0..=180.0).contains(width)
+                    && [
+                        adjustment.cyan,
+                        adjustment.magenta,
+                        adjustment.yellow,
+                        adjustment.black,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
+            }
         };
 
         if valid {
@@ -127,6 +348,64 @@ impl EditOperation {
     }
 }
 
+fn validate_curve(points: &[CurvePoint]) -> bool {
+    (2..=32).contains(&points.len())
+        && points.iter().all(|point| {
+            point.input.is_finite()
+                && point.output.is_finite()
+                && (0.0..=1.0).contains(&point.input)
+                && (0.0..=1.0).contains(&point.output)
+        })
+        && points.windows(2).all(|pair| pair[0].input < pair[1].input)
+        && points.first().is_some_and(|point| point.input == 0.0)
+        && points.last().is_some_and(|point| point.input == 1.0)
+}
+
+fn validate_curve_set(curves: &CurveSet) -> bool {
+    validate_curve(&curves.rgb)
+        && validate_curve(&curves.red)
+        && validate_curve(&curves.green)
+        && validate_curve(&curves.blue)
+}
+
+fn validate_hsl(settings: &HslSettings) -> bool {
+    [
+        settings.master,
+        settings.red,
+        settings.yellow,
+        settings.green,
+        settings.cyan,
+        settings.blue,
+        settings.magenta,
+    ]
+    .iter()
+    .all(|adjustment| {
+        adjustment.hue.is_finite()
+            && adjustment.saturation.is_finite()
+            && adjustment.lightness.is_finite()
+            && (-180.0..=180.0).contains(&adjustment.hue)
+            && (-1.0..=1.0).contains(&adjustment.saturation)
+            && (-1.0..=1.0).contains(&adjustment.lightness)
+    })
+}
+
+fn validate_corners(corners: &PerspectiveCorners) -> bool {
+    let points = [
+        corners.top_left,
+        corners.top_right,
+        corners.bottom_right,
+        corners.bottom_left,
+    ];
+    points
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        && corners.top_left[0] < corners.top_right[0]
+        && corners.bottom_left[0] < corners.bottom_right[0]
+        && corners.top_left[1] < corners.bottom_left[1]
+        && corners.top_right[1] < corners.bottom_right[1]
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageMetadata {
@@ -135,6 +414,13 @@ pub struct ImageMetadata {
     pub height: u32,
     pub format: String,
     pub file_size: u64,
+    pub color_space: String,
+    pub bit_depth: u8,
+    pub has_alpha: bool,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    pub camera_model: Option<String>,
+    pub exif_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -261,5 +547,244 @@ mod tests {
         assert_eq!(decoded, operations);
         assert!(json.contains("auto_white_balance"));
         assert!(json.contains("document_enhance"));
+    }
+
+    macro_rules! valid_operation_test {
+        ($name:ident, $operation:expr) => {
+            #[test]
+            fn $name() {
+                $operation.validate().unwrap();
+            }
+        };
+    }
+
+    macro_rules! invalid_operation_test {
+        ($name:ident, $operation:expr) => {
+            #[test]
+            fn $name() {
+                assert!(matches!(
+                    $operation.validate(),
+                    Err(AppError::InvalidOperation(_))
+                ));
+            }
+        };
+    }
+
+    valid_operation_test!(
+        accepts_identity_curves,
+        EditOperation::Curves {
+            curves: CurveSet::default()
+        }
+    );
+    valid_operation_test!(
+        accepts_levels_bounds,
+        EditOperation::Levels {
+            input_black: 0,
+            input_white: 255,
+            gamma: 1.0,
+            output_black: 0,
+            output_white: 255
+        }
+    );
+    valid_operation_test!(
+        accepts_white_point,
+        EditOperation::WhitePoint {
+            red: 200,
+            green: 210,
+            blue: 220
+        }
+    );
+    valid_operation_test!(
+        accepts_black_point,
+        EditOperation::BlackPoint {
+            red: 0,
+            green: 4,
+            blue: 8
+        }
+    );
+    valid_operation_test!(
+        accepts_normalized_crop,
+        EditOperation::Crop {
+            x: 0.1,
+            y: 0.2,
+            width: 0.8,
+            height: 0.7,
+            aspect_ratio: Some("16:9".into()),
+            overlay: CropOverlay::RuleOfThirds
+        }
+    );
+    valid_operation_test!(
+        accepts_straighten_limit,
+        EditOperation::Straighten { degrees: -45.0 }
+    );
+    valid_operation_test!(
+        accepts_identity_perspective,
+        EditOperation::Perspective {
+            corners: PerspectiveCorners::default()
+        }
+    );
+    valid_operation_test!(
+        accepts_lens_correction_bounds,
+        EditOperation::LensCorrection {
+            distortion: -1.0,
+            vignetting: 1.0,
+            chromatic_aberration: 0.25
+        }
+    );
+    valid_operation_test!(
+        accepts_neutral_hsl,
+        EditOperation::Hsl {
+            settings: HslSettings::default()
+        }
+    );
+    valid_operation_test!(
+        accepts_temperature_tint_bounds,
+        EditOperation::TemperatureTint {
+            temperature: 1.0,
+            tint: -1.0
+        }
+    );
+    valid_operation_test!(
+        accepts_selective_color_bounds,
+        EditOperation::SelectiveColor {
+            target_hue: 360.0,
+            width: 180.0,
+            adjustment: SelectiveColorAdjustment {
+                cyan: -1.0,
+                magenta: 1.0,
+                yellow: 0.0,
+                black: 0.5
+            }
+        }
+    );
+
+    invalid_operation_test!(
+        rejects_unsorted_curve_points,
+        EditOperation::Curves {
+            curves: CurveSet {
+                rgb: vec![
+                    CurvePoint {
+                        input: 0.0,
+                        output: 0.0
+                    },
+                    CurvePoint {
+                        input: 0.7,
+                        output: 0.7
+                    },
+                    CurvePoint {
+                        input: 0.6,
+                        output: 1.0
+                    }
+                ],
+                ..CurveSet::default()
+            }
+        }
+    );
+    invalid_operation_test!(
+        rejects_levels_reversed_input,
+        EditOperation::Levels {
+            input_black: 240,
+            input_white: 10,
+            gamma: 1.0,
+            output_black: 0,
+            output_white: 255
+        }
+    );
+    invalid_operation_test!(
+        rejects_zero_white_point_channel,
+        EditOperation::WhitePoint {
+            red: 0,
+            green: 100,
+            blue: 100
+        }
+    );
+    invalid_operation_test!(
+        rejects_crop_outside_canvas,
+        EditOperation::Crop {
+            x: 0.5,
+            y: 0.0,
+            width: 0.6,
+            height: 1.0,
+            aspect_ratio: None,
+            overlay: CropOverlay::None
+        }
+    );
+    invalid_operation_test!(
+        rejects_excessive_straighten,
+        EditOperation::Straighten { degrees: 45.1 }
+    );
+    invalid_operation_test!(
+        rejects_crossed_perspective_corners,
+        EditOperation::Perspective {
+            corners: PerspectiveCorners {
+                top_left: [0.8, 0.0],
+                top_right: [0.2, 0.0],
+                ..PerspectiveCorners::default()
+            }
+        }
+    );
+    invalid_operation_test!(
+        rejects_excessive_lens_distortion,
+        EditOperation::LensCorrection {
+            distortion: 1.1,
+            vignetting: 0.0,
+            chromatic_aberration: 0.0
+        }
+    );
+    invalid_operation_test!(
+        rejects_non_finite_hsl,
+        EditOperation::Hsl {
+            settings: HslSettings {
+                master: HslAdjustment {
+                    hue: f32::NAN,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+    );
+    invalid_operation_test!(
+        rejects_excessive_temperature,
+        EditOperation::TemperatureTint {
+            temperature: 1.01,
+            tint: 0.0
+        }
+    );
+    invalid_operation_test!(
+        rejects_zero_selective_width,
+        EditOperation::SelectiveColor {
+            target_hue: 0.0,
+            width: 0.0,
+            adjustment: SelectiveColorAdjustment::default()
+        }
+    );
+
+    #[test]
+    fn professional_operations_round_trip_through_tagged_json() {
+        let operations = vec![
+            EditOperation::Curves {
+                curves: CurveSet::default(),
+            },
+            EditOperation::Levels {
+                input_black: 4,
+                input_white: 250,
+                gamma: 1.1,
+                output_black: 2,
+                output_white: 252,
+            },
+            EditOperation::Perspective {
+                corners: PerspectiveCorners::default(),
+            },
+            EditOperation::TemperatureTint {
+                temperature: 0.2,
+                tint: -0.1,
+            },
+        ];
+        let json = serde_json::to_string(&operations).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<EditOperation>>(&json).unwrap(),
+            operations
+        );
+        assert!(json.contains("perspective"));
     }
 }

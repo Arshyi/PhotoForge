@@ -9,10 +9,12 @@
   import DiagnosticsSettings from './lib/components/DiagnosticsSettings.svelte';
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
+  import ProfessionalWorkspace from './lib/components/ProfessionalWorkspace.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import ToolButton from './lib/components/ToolButton.svelte';
+  import WorkspaceSettings from './lib/components/WorkspaceSettings.svelte';
   import { EditHistory } from './lib/stores/history';
   import type {
     EditOperation,
@@ -24,6 +26,9 @@
     OpenImageResult,
     OperationType,
     PreviewResult
+    ,ComparisonMode
+    ,ExportProfile
+    ,ShortcutBinding
   } from './lib/types/editor';
   import { errorMessage, formatBytes } from './lib/utils/format';
   import {
@@ -32,6 +37,7 @@
     saveGuidedSettings
   } from './lib/utils/guided';
   import { operationLabels, presets, replaceOperation, valueFor } from './lib/utils/operations';
+  import { loadShortcuts, normalizeShortcut } from './lib/utils/workspace';
 
   const history = new EditHistory();
   let operations: EditOperation[] = [];
@@ -41,6 +47,9 @@
   let zoom = 100;
   let comparison = false;
   let comparisonPosition = 50;
+  let comparisonMode: ComparisonMode = 'swipe';
+  let gridOverlay = false;
+  let crosshair = false;
   let processing = false;
   let previewCurrent = true;
   let processingTime = 0;
@@ -56,7 +65,7 @@
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
-  let settingsPage: 'general' | 'components' | 'diagnostics' | 'privacy' = 'general';
+  let settingsPage: 'general' | 'workspace' | 'components' | 'diagnostics' | 'privacy' = 'general';
   let componentConfigurationRevision = 0;
   let guidedSettings: GuidedSettings = { ...defaultGuidedSettings };
   let toast = '';
@@ -66,11 +75,15 @@
   let settingsDialog: HTMLDialogElement;
   let canUndo = false;
   let canRedo = false;
+  let exportProfile: ExportProfile = 'lossless';
+  let shortcuts: ShortcutBinding[] = [];
 
-  $: comparisonUsesSplitView = valueFor(operations, 'rotate', 0) % 360 !== 0;
+  $: comparisonUsesSplitView = comparisonMode === 'split' || valueFor(operations, 'rotate', 0) % 360 !== 0;
 
   onMount(() => {
     guidedSettings = loadGuidedSettings();
+    shortcuts = loadShortcuts();
+    exportProfile = (localStorage.getItem('photoforge.lastExportProfile') as ExportProfile | null) ?? 'lossless';
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -87,22 +100,29 @@
         closeSettings();
         return;
       }
-      if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === 'o') {
+      const action = shortcutAction(event);
+      if (action === 'Open image') {
         event.preventDefault();
         void chooseImage();
-      } else if (event.key.toLowerCase() === 's') {
+      } else if (action === 'Export image') {
         event.preventDefault();
         void exportImage();
-      } else if (event.key.toLowerCase() === 'z' && event.shiftKey) {
-        event.preventDefault();
-        redo();
-      } else if (event.key.toLowerCase() === 'z') {
+      } else if (action === 'Undo') {
         event.preventDefault();
         undo();
-      } else if (event.key.toLowerCase() === 'y') {
+      } else if (action === 'Redo') {
         event.preventDefault();
         redo();
+      } else if (action === 'Compare') {
+        event.preventDefault(); comparison = !comparison;
+      } else if (action === 'Zoom in') {
+        event.preventDefault(); zoom = Math.min(1600, zoom + (zoom >= 400 ? 100 : 25));
+      } else if (action === 'Zoom out') {
+        event.preventDefault(); zoom = Math.max(25, zoom - (zoom > 400 ? 100 : 25));
+      } else if (action === 'Pixel inspector') {
+        event.preventDefault(); crosshair = !crosshair;
+      } else if (action === 'Crop' || action === 'Straighten') {
+        event.preventDefault(); gridOverlay = true;
       }
     };
     window.addEventListener('keydown', handleKeys);
@@ -116,6 +136,17 @@
       analysisRequestId += 1;
     };
   });
+
+  function shortcutAction(event: KeyboardEvent): string | undefined {
+    const parts: string[] = [];
+    if (event.ctrlKey || event.metaKey) parts.push('ctrl');
+    if (event.altKey) parts.push('alt');
+    if (event.shiftKey) parts.push('shift');
+    const key = event.key === ' ' ? 'space' : event.key.toLowerCase();
+    if (!['control', 'meta', 'alt', 'shift'].includes(key)) parts.push(key);
+    const normalized = normalizeShortcut(parts.join('+'));
+    return shortcuts.find((binding) => normalizeShortcut(binding.keys) === normalized)?.action;
+  }
 
   function notify(message: string, kind: 'error' | 'success' = 'success') {
     toast = message;
@@ -336,9 +367,14 @@
     if (!metadata || exporting || opening) return;
     try {
       const stem = metadata.filename.replace(/\.[^.]+$/, '');
+      const extension = ['web', 'print', 'high_jpeg'].includes(exportProfile)
+        ? 'jpg'
+        : exportProfile === 'maximum_compression'
+          ? 'webp'
+          : 'png';
       const outputPath = await save({
         title: 'Export edited photo',
-        defaultPath: `${stem}-photoforge.png`,
+        defaultPath: `${stem}-photoforge.${extension}`,
         filters: [
           { name: 'PNG image', extensions: ['png'] },
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
@@ -347,9 +383,11 @@
       });
       if (!outputPath) return;
       exporting = true;
-      const result = await invoke<ExportResult>('export_image', {
+      localStorage.setItem('photoforge.lastExportProfile', exportProfile);
+      const result = await invoke<ExportResult>('export_with_profile', {
         outputPath,
-        operations
+        operations,
+        profile: exportProfile
       });
       processingTime = result.processingTimeMs;
       notify(`Exported ${result.width} × ${result.height} image`);
@@ -375,9 +413,17 @@
 
   async function closeSettings() {
     if (settingsPage === 'components') componentConfigurationRevision += 1;
+    if (settingsPage === 'workspace') shortcuts = loadShortcuts();
     settingsOpen = false;
     await tick();
     document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+  }
+
+  function updateProfessionalView(view: { grid?: boolean; crosshair?: boolean; comparisonMode?: ComparisonMode; zoom?: number }) {
+    if (view.grid !== undefined) gridOverlay = view.grid;
+    if (view.crosshair !== undefined) crosshair = view.crosshair;
+    if (view.zoom !== undefined) zoom = Math.max(25, Math.min(1600, view.zoom));
+    if (view.comparisonMode) { comparisonMode = view.comparisonMode; comparison = true; }
   }
 
   function updateGuidedSetting(key: keyof GuidedSettings, value: boolean) {
@@ -424,6 +470,14 @@
         disabled={!metadata || exporting || opening}
         onclick={exportImage}
       />
+      <select aria-label="Export profile" bind:value={exportProfile} title="Remembered export profile">
+        <option value="web">Web</option>
+        <option value="print">Print</option>
+        <option value="archive">Archive</option>
+        <option value="lossless">Lossless</option>
+        <option value="high_jpeg">High JPEG</option>
+        <option value="maximum_compression">Maximum compression</option>
+      </select>
     </nav>
 
     <div class="history-actions" aria-label="Edit history">
@@ -446,6 +500,9 @@
       {comparisonPosition}
       splitComparison={comparisonUsesSplitView}
       {zoom}
+      {comparisonMode}
+      {gridOverlay}
+      {crosshair}
       {processing}
       stale={!previewCurrent}
       onopen={chooseImage}
@@ -485,6 +542,15 @@
           configurationRevision={componentConfigurationRevision}
           onapply={applyGuidedPlan}
           onmessage={notify}
+        />
+
+        <ProfessionalWorkspace
+          {documentId}
+          {metadata}
+          {operations}
+          oncommit={commit}
+          onmessage={notify}
+          onviewchange={updateProfessionalView}
         />
 
         <section class="tool-section">
@@ -624,7 +690,7 @@
     <i></i>
     <button type="button" disabled={!metadata || opening} aria-label="Zoom out" on:click={() => (zoom = Math.max(25, zoom - 25))}>−</button>
     <span class="zoom-value">{zoom}%</span>
-    <button type="button" disabled={!metadata || opening} aria-label="Zoom in" on:click={() => (zoom = Math.min(400, zoom + 25))}>＋</button>
+    <button type="button" disabled={!metadata || opening} aria-label="Zoom in" on:click={() => (zoom = Math.min(1600, zoom + (zoom >= 400 ? 100 : 25)))}>＋</button>
     <button type="button" disabled={!metadata || opening} on:click={() => (zoom = 100)}>Fit</button>
   </div>
 
@@ -657,6 +723,7 @@
       </div>
       <nav class="settings-tabs" aria-label="Settings pages">
         <button type="button" class:active={settingsPage === 'general'} on:click={() => (settingsPage = 'general')}>General</button>
+        <button type="button" class:active={settingsPage === 'workspace'} on:click={() => (settingsPage = 'workspace')}>Workspace</button>
         <button type="button" class:active={settingsPage === 'components'} on:click={() => (settingsPage = 'components')}>Components</button>
         <button type="button" class:active={settingsPage === 'diagnostics'} on:click={() => (settingsPage = 'diagnostics')}>Diagnostics</button>
         <button type="button" class:active={settingsPage === 'privacy'} on:click={() => (settingsPage = 'privacy')}>Local AI Privacy</button>
@@ -713,6 +780,8 @@
           </label>
         </div>
         <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
+      {:else if settingsPage === 'workspace'}
+        <WorkspaceSettings />
       {:else if settingsPage === 'components'}
         <ComponentsSettings />
       {:else if settingsPage === 'diagnostics'}

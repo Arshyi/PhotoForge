@@ -174,4 +174,15 @@ export const operationLabels: Record<OperationType, string> = {
   mild_deblur: 'Mild Deblur',
   document_enhance: 'Document Enhance',
   uneven_lighting_correction: 'Uneven Lighting'
+  ,curves: 'Curves'
+  ,levels: 'Levels'
+  ,white_point: 'White Point'
+  ,black_point: 'Black Point'
+  ,crop: 'Crop'
+  ,straighten: 'Straighten'
+  ,perspective: 'Perspective'
+  ,lens_correction: 'Lens Correction'
+  ,hsl: 'HSL'
+  ,temperature_tint: 'Temperature & Tint'
+  ,selective_color: 'Selective Color'
 };

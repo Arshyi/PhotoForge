@@ -1,4 +1,4 @@
-use crate::domain::ImageMetadata;
+use crate::domain::{ExportProfile, ImageMetadata};
 use crate::error::AppError;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::codecs::jpeg::JpegEncoder;
@@ -12,6 +12,8 @@ use std::fs;
 use std::io::{BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use super::{camera_model, file_time};
 
 const MAX_PIXELS: u64 = 40_000_000;
 const MAX_DIMENSION: u32 = 20_000;
@@ -59,6 +61,7 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
     reader.limits(limits);
 
     let decoded = reader.decode().map_err(map_image_error)?;
+    let color = decoded.color();
     let preview = if width > PREVIEW_MAX_DIMENSION || height > PREVIEW_MAX_DIMENSION {
         decoded.thumbnail(PREVIEW_MAX_DIMENSION, PREVIEW_MAX_DIMENSION)
     } else {
@@ -70,12 +73,20 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         .and_then(|name| name.to_str())
         .unwrap_or("image")
         .to_string();
+    let camera_model = camera_model(&canonical_path);
     let metadata = ImageMetadata {
         filename,
         width,
         height,
         format: format_name(format).to_string(),
         file_size: file_metadata.len(),
+        color_space: "sRGB".to_string(),
+        bit_depth: (color.bits_per_pixel() / u16::from(color.channel_count())).min(255) as u8,
+        has_alpha: color.has_alpha(),
+        created_at: file_time(file_metadata.created()),
+        modified_at: file_time(file_metadata.modified()),
+        exif_available: camera_model.is_some(),
+        camera_model,
     };
 
     Ok(LoadedImage {
@@ -102,6 +113,15 @@ pub fn save_image(
     original_path: &Path,
     output_path: &Path,
 ) -> Result<PathBuf, AppError> {
+    save_image_with_profile(image, original_path, output_path, ExportProfile::Lossless)
+}
+
+pub fn save_image_with_profile(
+    image: &DynamicImage,
+    original_path: &Path,
+    output_path: &Path,
+    profile: ExportProfile,
+) -> Result<PathBuf, AppError> {
     let safe_path = validate_output_path(original_path, output_path)?;
     let format = output_format(&safe_path)?;
     let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
@@ -117,7 +137,12 @@ pub fn save_image(
         }
         ImageFormat::Jpeg => {
             let rgb = flatten_alpha_on_white(image);
-            JpegEncoder::new_with_quality(writer, JPEG_QUALITY)
+            let quality = match profile {
+                ExportProfile::Web => 82,
+                ExportProfile::Print | ExportProfile::HighJpeg => 95,
+                _ => JPEG_QUALITY,
+            };
+            JpegEncoder::new_with_quality(writer, quality)
                 .encode(rgb.as_raw(), width, height, ExtendedColorType::Rgb8)
                 .map_err(map_export_error)?;
         }

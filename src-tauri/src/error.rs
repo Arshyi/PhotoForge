@@ -75,6 +75,24 @@ pub enum AppError {
     OutOfMemoryRisk,
     #[error("Open an image before applying edits or exporting.")]
     NoImageOpen,
+    #[error("Workflow import failed: {0}")]
+    WorkflowImport(String),
+    #[error("Workflow validation failed: {0}")]
+    WorkflowValidation(String),
+    #[error("Batch processing failed: {0}")]
+    BatchFailure(String),
+    #[error("Perspective correction failed: {0}")]
+    PerspectiveCorrection(String),
+    #[error("Histogram generation failed: {0}")]
+    HistogramGeneration(String),
+    #[error("Metadata parsing failed: {0}")]
+    MetadataParsing(String),
+    #[error("Crop bounds are invalid: {0}")]
+    CropBounds(String),
+    #[error("Keyboard shortcut conflict: {0}")]
+    ShortcutConflict(String),
+    #[error("Workspace loading failed: {0}")]
+    WorkspaceLoading(String),
 }
 
 impl AppError {
@@ -115,6 +133,15 @@ impl AppError {
             Self::Permission => "permission_error",
             Self::OutOfMemoryRisk => "out_of_memory_risk",
             Self::NoImageOpen => "no_image_open",
+            Self::WorkflowImport(_) => "workflow_import",
+            Self::WorkflowValidation(_) => "workflow_validation",
+            Self::BatchFailure(_) => "batch_failure",
+            Self::PerspectiveCorrection(_) => "perspective_correction",
+            Self::HistogramGeneration(_) => "histogram_generation",
+            Self::MetadataParsing(_) => "metadata_parsing",
+            Self::CropBounds(_) => "crop_bounds",
+            Self::ShortcutConflict(_) => "shortcut_conflict",
+            Self::WorkspaceLoading(_) => "workspace_loading",
         }
     }
 }

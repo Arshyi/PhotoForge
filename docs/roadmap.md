@@ -1,5 +1,13 @@
 # Roadmap
 
+## Phase 6 — Professional editing and workflow system (complete)
+
+Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighten, perspective, lens correction, HSL, temperature/tint, selective color, live scopes, professional inspection, expanded comparison, versioned workflows, bounded batch processing, export profiles, workspace layouts, configurable shortcuts, and accessibility improvements.
+
+## Phase 7 — Future model-backed restoration (not implemented)
+
+Possible future work includes separately reviewed ONNX/Real-ESRGAN/GFPGAN/CodeFormer adapters, model provenance and integrity controls, opt-in model installation, OCR, and other explicitly scoped capabilities. Phase 6 contains none of these runtimes or behaviors.
+
 ## Phase 0 — Foundation (complete)
 
 - Tauri 2, Rust, Svelte 5, TypeScript, and Vite project

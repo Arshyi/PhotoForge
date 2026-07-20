@@ -1,5 +1,13 @@
 # Architecture
 
+## Phase 6 professional workflow boundary
+
+PhotoForge 0.6.0 extends `EditOperation` with validated curves, levels, point balance, crop, straighten, perspective, lens, HSL, temperature/tint, and selective-color variants. The deterministic processor remains the single pixel boundary. Interactive preview, undo/redo, workflow replay, export profiles, and batch processing all consume the same ordered operation vector.
+
+`domain::professional` owns the versioned workflow, histogram, pixel, batch, workspace, shortcut, and export-profile contracts. `image_processing::professional` owns deterministic pixel transforms; `image_processing::inspection` owns histogram and pixel sampling. `infrastructure::workflow_io` and `infrastructure::metadata` handle bounded JSON/EXIF parsing. `application::batch` discovers local inputs and schedules bounded workers. `commands::professional` is the Tauri validation and cancellation boundary.
+
+Batch state and cancellation are process-local atomics/mutexes. No worker holds the editor session lock while decoding or processing. Histogram work uses the bounded 1600-pixel preview and a stale-request gate. Full-resolution source images remain immutable `Arc<DynamicImage>` values and are decoded per batch item only while that item is active.
+
 ## Goals
 
 PhotoForge is local-first, non-destructive, modular, and conservative with memory. The desktop boundary exposes a small set of typed Tauri commands; the webview never receives unrestricted filesystem or shell access.

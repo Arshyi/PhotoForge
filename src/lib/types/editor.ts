@@ -1,3 +1,29 @@
+export interface CurvePoint { input: number; output: number }
+export interface CurveSet {
+  rgb: CurvePoint[];
+  red: CurvePoint[];
+  green: CurvePoint[];
+  blue: CurvePoint[];
+}
+export interface HslAdjustment { hue: number; saturation: number; lightness: number }
+export interface HslSettings {
+  master: HslAdjustment;
+  red: HslAdjustment;
+  yellow: HslAdjustment;
+  green: HslAdjustment;
+  cyan: HslAdjustment;
+  blue: HslAdjustment;
+  magenta: HslAdjustment;
+}
+export type CropOverlay = 'none' | 'rule_of_thirds' | 'golden_ratio';
+export interface PerspectiveCorners {
+  topLeft: [number, number];
+  topRight: [number, number];
+  bottomRight: [number, number];
+  bottomLeft: [number, number];
+}
+export interface SelectiveColorAdjustment { cyan: number; magenta: number; yellow: number; black: number }
+
 export type EditOperation =
   | { type: 'brightness'; amount: number }
   | { type: 'contrast'; amount: number }
@@ -16,7 +42,18 @@ export type EditOperation =
   | { type: 'edge_aware_sharpen'; strength: number; radius: number; threshold: number }
   | { type: 'mild_deblur'; strength: number; radius: number }
   | { type: 'document_enhance'; strength: number; grayscale: boolean }
-  | { type: 'uneven_lighting_correction'; strength: number; radius: number };
+  | { type: 'uneven_lighting_correction'; strength: number; radius: number }
+  | { type: 'curves'; curves: CurveSet }
+  | { type: 'levels'; input_black: number; input_white: number; gamma: number; output_black: number; output_white: number }
+  | { type: 'white_point'; red: number; green: number; blue: number }
+  | { type: 'black_point'; red: number; green: number; blue: number }
+  | { type: 'crop'; x: number; y: number; width: number; height: number; aspect_ratio: string | null; overlay: CropOverlay }
+  | { type: 'straighten'; degrees: number }
+  | { type: 'perspective'; corners: PerspectiveCorners }
+  | { type: 'lens_correction'; distortion: number; vignetting: number; chromatic_aberration: number }
+  | { type: 'hsl'; settings: HslSettings }
+  | { type: 'temperature_tint'; temperature: number; tint: number }
+  | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };
 
 export type OperationType = EditOperation['type'];
 
@@ -26,6 +63,13 @@ export interface ImageMetadata {
   height: number;
   format: string;
   fileSize: number;
+  colorSpace: string;
+  bitDepth: number;
+  hasAlpha: boolean;
+  createdAt: string | null;
+  modifiedAt: string | null;
+  cameraModel: string | null;
+  exifAvailable: boolean;
 }
 
 export interface OpenImageResult {
@@ -330,3 +374,86 @@ export interface PluginScanResult {
   records: PluginManifestRecord[];
   message: string;
 }
+
+export interface HistogramChannels {
+  red: number[];
+  green: number[];
+  blue: number[];
+  luminance: number[];
+  shadowClipping: number;
+  highlightClipping: number;
+  pixelCount: number;
+}
+
+export interface HistogramResult {
+  before: HistogramChannels;
+  after: HistogramChannels;
+  documentId: number;
+  requestId: number;
+  processingTimeMs: number;
+  isCurrent: boolean;
+}
+
+export interface PixelInspection {
+  x: number;
+  y: number;
+  red: number;
+  green: number;
+  blue: number;
+  alpha: number;
+  hue: number;
+  saturation: number;
+  value: number;
+}
+
+export interface Workflow {
+  id: string;
+  name: string;
+  description: string;
+  folder: string;
+  favorite: boolean;
+  operations: EditOperation[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowDocument { schemaVersion: 1; workflow: Workflow }
+export type ExportProfile = 'web' | 'print' | 'archive' | 'lossless' | 'high_jpeg' | 'maximum_compression';
+export interface BatchOptions {
+  inputFolder: string;
+  outputFolder: string;
+  filenameTemplate: string;
+  recursive: boolean;
+  overwrite: boolean;
+  workers: number;
+  exportProfile: ExportProfile;
+  dryRun: boolean;
+}
+export type BatchState = 'idle' | 'discovering' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
+export interface BatchFailureRecord { inputPath: string; error: string }
+export interface BatchStatus {
+  batchId: number;
+  state: BatchState;
+  discovered: number;
+  completed: number;
+  skipped: number;
+  failed: number;
+  currentFile: string | null;
+  estimatedRemainingMs: number | null;
+  elapsedMs: number;
+  failures: BatchFailureRecord[];
+  logPath: string | null;
+}
+export interface BatchPreview { discovered: number; sampleOutputs: string[]; estimatedTimeMs: number; skippedExisting: number }
+export interface WorkspaceLayout {
+  schemaVersion: 1;
+  name: string;
+  leftPanelWidth: number;
+  rightPanelWidth: number;
+  collapsedSections: string[];
+  activePanel: string;
+  highContrast: boolean;
+  uiScale: number;
+}
+export interface ShortcutBinding { action: string; keys: string }
+export type ComparisonMode = 'swipe' | 'split' | 'blink' | 'difference';

@@ -4,6 +4,7 @@ mod ollama;
 mod pipeline;
 mod planner;
 mod plugins;
+mod professional;
 
 pub use components::{
     ComponentActionResult, ComponentConfiguration, ComponentDiagnostics,
@@ -13,8 +14,9 @@ pub use components::{
 };
 
 pub use models::{
-    AnalysisResult, ColorCastEstimate, EditOperation, EditPlan, ExportResult, ImageMetadata,
-    ImageQualityAnalysis, OpenImageResult, PlanResult, PreviewResult,
+    AnalysisResult, ColorCastEstimate, CropOverlay, CurvePoint, CurveSet, EditOperation, EditPlan,
+    ExportResult, HslAdjustment, HslSettings, ImageMetadata, ImageQualityAnalysis, OpenImageResult,
+    PerspectiveCorners, PlanResult, PreviewResult, SelectiveColorAdjustment,
 };
 pub use ollama::{
     OllamaConnectionResult, OllamaDiagnostics, OllamaModel, OllamaModelDiscoveryResult,
@@ -28,6 +30,12 @@ pub use planner::{
 pub use plugins::{
     PluginManifest, PluginManifestRecord, PluginScanResult, PluginType, MAX_PLUGIN_MANIFESTS,
     MAX_PLUGIN_MANIFEST_BYTES,
+};
+pub use professional::{
+    validate_shortcuts, BatchFailureRecord, BatchOptions, BatchPreview, BatchState, BatchStatus,
+    ExportProfile, HistogramChannels, HistogramResult, PixelInspection, ShortcutBinding, Workflow,
+    WorkflowDocument, WorkspaceLayout, MAX_BATCH_FILES, MAX_BATCH_WORKERS, MAX_WORKFLOW_OPERATIONS,
+    WORKFLOW_SCHEMA_VERSION,
 };
 
 pub type ImageAnalysis = ImageQualityAnalysis;

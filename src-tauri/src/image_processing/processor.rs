@@ -2,6 +2,7 @@ use crate::domain::EditOperation;
 use crate::error::AppError;
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 
+use super::professional;
 use super::restoration;
 
 pub fn apply_pipeline(
@@ -124,6 +125,17 @@ fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaI
         EditOperation::UnevenLightingCorrection { strength, radius } => {
             restoration::uneven_lighting(image, *strength, *radius)
         }
+        EditOperation::Curves { .. }
+        | EditOperation::Levels { .. }
+        | EditOperation::WhitePoint { .. }
+        | EditOperation::BlackPoint { .. }
+        | EditOperation::Crop { .. }
+        | EditOperation::Straighten { .. }
+        | EditOperation::Perspective { .. }
+        | EditOperation::LensCorrection { .. }
+        | EditOperation::Hsl { .. }
+        | EditOperation::TemperatureTint { .. }
+        | EditOperation::SelectiveColor { .. } => professional::apply(image, operation),
     };
 
     Ok(output)

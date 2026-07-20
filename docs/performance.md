@@ -1,5 +1,11 @@
 # Performance
 
+## Phase 6 design and measurements
+
+Batch processing uses 1–8 bounded workers, a 10,000-file discovery cap, one decoded image per active worker, cooperative cancellation, and per-output overwrite claims. Live histograms operate on the existing preview capped at 1600 pixels and are debounced behind a stale-request gate. Interactive source and preview buffers are reused.
+
+The final staging test suite ran 357 Rust tests in 1.83 seconds after compilation and 271 frontend tests in 8.53 seconds. The production frontend contains 147 modules and bundles to 194.18 kB JavaScript and 49.28 kB CSS (61.40 kB and 9.26 kB gzip). Packaged startup, histogram, batch throughput, cancellation, and memory observations are added to the Phase 6 results during release validation.
+
 ## Phase 1 design targets
 
 - Near-zero idle CPU: no polling loop, animation is limited to an active processing indicator, and no model loads at startup.

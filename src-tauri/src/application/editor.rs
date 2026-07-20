@@ -1,7 +1,7 @@
-use crate::domain::{ImageQualityAnalysis, OllamaDiagnostics};
+use crate::domain::{BatchStatus, ImageQualityAnalysis, OllamaDiagnostics};
 use crate::infrastructure::LoadedImage;
-use std::sync::atomic::AtomicU64;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex};
 
 pub struct EditorSession {
     pub source: LoadedImage,
@@ -18,10 +18,15 @@ pub struct AppState {
     pub latest_preview_request: AtomicU64,
     pub latest_analysis_request: AtomicU64,
     pub latest_plan_request: AtomicU64,
+    pub latest_histogram_request: AtomicU64,
     pub preview_gate: tokio::sync::Mutex<()>,
     pub analysis_gate: tokio::sync::Mutex<()>,
     pub plan_gate: tokio::sync::Mutex<()>,
     pub export_gate: tokio::sync::Mutex<()>,
+    pub histogram_gate: tokio::sync::Mutex<()>,
+    pub batch_gate: tokio::sync::Mutex<()>,
+    pub batch_status: Arc<Mutex<BatchStatus>>,
+    pub batch_cancelled: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
@@ -37,10 +42,15 @@ impl Default for AppState {
             latest_preview_request: AtomicU64::new(0),
             latest_analysis_request: AtomicU64::new(0),
             latest_plan_request: AtomicU64::new(0),
+            latest_histogram_request: AtomicU64::new(0),
             preview_gate: tokio::sync::Mutex::new(()),
             analysis_gate: tokio::sync::Mutex::new(()),
             plan_gate: tokio::sync::Mutex::new(()),
             export_gate: tokio::sync::Mutex::new(()),
+            histogram_gate: tokio::sync::Mutex::new(()),
+            batch_gate: tokio::sync::Mutex::new(()),
+            batch_status: Arc::new(Mutex::new(BatchStatus::default())),
+            batch_cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 }

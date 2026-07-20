@@ -1,6 +1,8 @@
 # Component architecture
 
-PhotoForge 0.5.0 separates guided planning and restoration execution behind typed, optional component boundaries while preserving the built-in Phase 3 behavior. Phase 5 installs the first optional planner adapter—Ollama—without adding model downloads, image inference, cloud calls, or executable plugins.
+PhotoForge 0.6.0 separates guided planning and restoration execution behind typed, optional component boundaries while preserving the built-in behavior. Phase 5 installed the first optional planner adapter—Ollama—without adding model downloads, image inference, cloud calls, or executable plugins. Phase 6 adds workflow and batch orchestration above the same deterministic engine; it does not create a second processor or grant planners pixel access.
+
+Professional workflows serialize only typed `EditOperation` data. Batch workers resolve the active deterministic engine contract and process one decoded file at a time. Workflow import never initializes a provider, and batch processing never invokes a planner. Component availability, selection, model discovery, and Ollama loopback rules are unchanged.
 
 ## Runtime flow
 
