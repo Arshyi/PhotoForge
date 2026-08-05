@@ -37,11 +37,17 @@ export function capabilityLabels(capabilities: Capabilities): string[] {
   if ('supportsGuidedEditing' in capabilities && capabilities.supportsGuidedEditing) {
     labels.push('Guided editing');
   }
+  if ('supportsSelectionPlanning' in capabilities && capabilities.supportsSelectionPlanning) {
+    labels.push('Selection planning');
+  }
   if ('supportsReasoning' in capabilities && capabilities.supportsReasoning) {
     labels.push('Reasoning');
   }
   if ('supportsRestoration' in capabilities && capabilities.supportsRestoration) {
     labels.push('Restoration');
+  }
+  if ('supportsMaskedAdjustments' in capabilities && capabilities.supportsMaskedAdjustments) {
+    labels.push('Masked adjustments');
   }
   if ('supportsNeuralModels' in capabilities && capabilities.supportsNeuralModels) {
     labels.push('Neural models');

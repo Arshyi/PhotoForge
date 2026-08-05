@@ -23,8 +23,9 @@ export interface PerspectiveCorners {
   bottomLeft: [number, number];
 }
 export interface SelectiveColorAdjustment { cyan: number; magenta: number; yellow: number; black: number }
+import type { MaskSnapshot } from '../selections/types';
 
-export type EditOperation =
+export type BaseEditOperation =
   | { type: 'brightness'; amount: number }
   | { type: 'contrast'; amount: number }
   | { type: 'saturation'; amount: number }
@@ -55,7 +56,17 @@ export type EditOperation =
   | { type: 'temperature_tint'; temperature: number; tint: number }
   | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };
 
-export type OperationType = EditOperation['type'];
+export type EditOperation =
+  | BaseEditOperation
+  | {
+      type: 'masked';
+      operation: BaseEditOperation;
+      mask: MaskSnapshot;
+      invert: boolean;
+      mask_id: string | null;
+    };
+
+export type OperationType = BaseEditOperation['type'];
 
 export interface ImageMetadata {
   filename: string;
@@ -171,12 +182,14 @@ export type EngineProvider = 'deterministic' | 'onnx' | 'real_esrgan' | 'future'
 export interface PlannerCapabilities {
   supportsGuidedEditing: boolean;
   supportsReasoning: boolean;
+  supportsSelectionPlanning?: boolean;
   requiresModel: boolean;
   offline: boolean;
 }
 
 export interface RestorationCapabilities {
   supportsRestoration: boolean;
+  supportsMaskedAdjustments?: boolean;
   supportsNeuralModels: boolean;
   requiresModel: boolean;
   offline: boolean;

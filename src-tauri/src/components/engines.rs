@@ -14,6 +14,7 @@ impl RestorationEngine for DeterministicEngine {
     fn capabilities(&self) -> RestorationCapabilities {
         RestorationCapabilities {
             supports_restoration: true,
+            supports_masked_adjustments: true,
             supports_neural_models: false,
             requires_model: false,
             offline: true,
@@ -50,6 +51,7 @@ macro_rules! unavailable_engine {
             fn capabilities(&self) -> RestorationCapabilities {
                 RestorationCapabilities {
                     supports_restoration: true,
+                    supports_masked_adjustments: false,
                     supports_neural_models: true,
                     requires_model: true,
                     offline: true,

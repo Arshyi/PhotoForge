@@ -1,5 +1,15 @@
 # Architecture
 
+## Phase 7 selections and masks boundary
+
+PhotoForge 0.7.0 adds selections as a separate, deterministic domain under `src-tauri/src/mask`. A mask is an 8-bit coverage bitmap with checked dimensions, bounded geometry, and explicit composition semantics. Rectangle, ellipse, polygon, freehand, brush, magic-wand, and color-range tools all produce the same representation. Feathering, morphology, cleanup, border creation, and classical edge refinement transform only coverage values; none reconstruct image content or invoke a model.
+
+`EditOperation::Masked` embeds an immutable mask snapshot around one mask-capable edit. The processor renders that edit through the existing deterministic path and coverage-blends it with the unmodified input while preserving alpha. Geometry-changing operations cannot be wrapped, nested wrappers are rejected, and incompatible mask/image aspect ratios fail closed. Workflow replay therefore does not depend on mutable UI selection state.
+
+Tauri mask commands validate all dimensions, payloads, local paths, checksums, operation parameters, document identifiers, and request generations before work begins. Long operations use cooperative cancellation and stale-result checks. Mask files and grayscale PNGs use user-selected absolute local paths; the webview receives no general filesystem capability.
+
+The Svelte presentation owns interactive tool state, named masks, the active mask, bounded selection history, per-document local session persistence, modifier keys, and overlay rendering. `ImageStage` maps pointer coordinates through the displayed image bounds into full image space, so zoom and high-DPI display scaling do not change selection coordinates. Pixel generation and validation remain native Rust responsibilities.
+
 ## Phase 6 professional workflow boundary
 
 PhotoForge 0.6.0 extends `EditOperation` with validated curves, levels, point balance, crop, straighten, perspective, lens, HSL, temperature/tint, and selective-color variants. The deterministic processor remains the single pixel boundary. Interactive preview, undo/redo, workflow replay, export profiles, and batch processing all consume the same ordered operation vector.
@@ -20,7 +30,8 @@ Svelte presentation
        └─ application state and use-case orchestration
             ├─ components: registries, factories, planners, Ollama HTTP/validation, restoration engines, timeout
             ├─ domain: operations, plans, component capabilities, manifests, validation
-            ├─ image_processing: deterministic pixel algorithms
+            ├─ mask: coverage bitmaps, rasterization, transforms, persistence, diagnostics
+            ├─ image_processing: deterministic pixel algorithms and mask-aware composition
             └─ infrastructure: decoding, export safety, manifest/model metadata discovery
 ```
 
@@ -108,6 +119,7 @@ The settings dialog makes the application shell inert while open, traps keyboard
 ## Extension points
 
 - New deterministic edits: add a domain variant, validation, processor implementation, TypeScript mirror, and tests.
+- New selection algorithms: accept or return `MaskBitmap`, validate bounded inputs, preserve 8-bit coverage semantics, add cancellation where work is long, and expose only a typed command.
 - Restoration: add another validated tagged operation and implement it inside the focused restoration processor.
 - Guided planners: implement `EditPlanner` and return the same validated `EditPlan`; the approval boundary remains unchanged.
 - Restoration engines: implement `RestorationEngine` while preserving typed operation validation and export safety.

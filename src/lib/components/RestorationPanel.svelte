@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { EditOperation, OperationType } from '../types/editor';
+  import type { BaseEditOperation, EditOperation, OperationType } from '../types/editor';
+  import { baseOperation, operationType } from '../utils/operations';
   import SliderControl from './SliderControl.svelte';
 
   export let operations: EditOperation[];
@@ -8,8 +9,9 @@
   let expanded: OperationType | null = null;
   const percent = (value: number) => `${Math.round(value * 100)}%`;
 
-  function operation(type: OperationType): EditOperation | undefined {
-    return operations.find((candidate) => candidate.type === type);
+  function operation(type: OperationType): BaseEditOperation | undefined {
+    const candidate = operations.find((value) => operationType(value) === type);
+    return candidate ? baseOperation(candidate) : undefined;
   }
 
   function numberParameter(type: OperationType, key: string, fallback: number): number {

@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::mask::MaskSnapshot;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -206,10 +207,49 @@ pub enum EditOperation {
         width: f32,
         adjustment: SelectiveColorAdjustment,
     },
+    Masked {
+        operation: Box<EditOperation>,
+        mask: MaskSnapshot,
+        #[serde(default)]
+        invert: bool,
+        #[serde(default)]
+        mask_id: Option<String>,
+    },
 }
 
 impl EditOperation {
     pub fn validate(&self) -> Result<(), AppError> {
+        if let Self::Masked {
+            operation,
+            mask,
+            mask_id,
+            ..
+        } = self
+        {
+            if matches!(operation.as_ref(), Self::Masked { .. }) {
+                return Err(AppError::InvalidOperation(
+                    "masked operations cannot contain another masked operation".into(),
+                ));
+            }
+            if !operation.supports_masking() {
+                return Err(AppError::InvalidOperation(format!(
+                    "{} cannot be applied through a selection mask",
+                    operation.kind()
+                )));
+            }
+            if mask_id
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 128)
+            {
+                return Err(AppError::InvalidOperation(
+                    "mask identifiers must contain 1 to 128 characters".into(),
+                ));
+            }
+            operation.validate()?;
+            mask.decode()?;
+            return Ok(());
+        }
+
         let exceeds_resource_limit = match self {
             Self::LocalContrast { tile_size, .. } => *tile_size > 128,
             Self::EdgeAwareSharpen { radius, .. } => radius.is_finite() && *radius > 4.0,
@@ -336,6 +376,7 @@ impl EditOperation {
                     .iter()
                     .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
             }
+            Self::Masked { .. } => unreachable!("masked operations return after validation"),
         };
 
         if valid {
@@ -344,6 +385,54 @@ impl EditOperation {
             Err(AppError::InvalidOperation(format!(
                 "parameter is outside the supported range for {self:?}"
             )))
+        }
+    }
+
+    pub fn supports_masking(&self) -> bool {
+        !matches!(
+            self,
+            Self::ReflectHorizontal
+                | Self::Rotate { .. }
+                | Self::Crop { .. }
+                | Self::Straighten { .. }
+                | Self::Perspective { .. }
+                | Self::LensCorrection { .. }
+                | Self::Masked { .. }
+        )
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Brightness { .. } => "brightness",
+            Self::Contrast { .. } => "contrast",
+            Self::Saturation { .. } => "saturation",
+            Self::Gamma { .. } => "gamma",
+            Self::Grayscale => "grayscale",
+            Self::Sepia => "sepia",
+            Self::ReflectHorizontal => "reflect_horizontal",
+            Self::Rotate { .. } => "rotate",
+            Self::GaussianBlur { .. } => "gaussian_blur",
+            Self::Sharpen { .. } => "sharpen",
+            Self::AutoWhiteBalance { .. } => "auto_white_balance",
+            Self::LocalContrast { .. } => "local_contrast",
+            Self::Denoise { .. } => "denoise",
+            Self::Deblock { .. } => "deblock",
+            Self::EdgeAwareSharpen { .. } => "edge_aware_sharpen",
+            Self::MildDeblur { .. } => "mild_deblur",
+            Self::DocumentEnhance { .. } => "document_enhance",
+            Self::UnevenLightingCorrection { .. } => "uneven_lighting_correction",
+            Self::Curves { .. } => "curves",
+            Self::Levels { .. } => "levels",
+            Self::WhitePoint { .. } => "white_point",
+            Self::BlackPoint { .. } => "black_point",
+            Self::Crop { .. } => "crop",
+            Self::Straighten { .. } => "straighten",
+            Self::Perspective { .. } => "perspective",
+            Self::LensCorrection { .. } => "lens_correction",
+            Self::Hsl { .. } => "hsl",
+            Self::TemperatureTint { .. } => "temperature_tint",
+            Self::SelectiveColor { .. } => "selective_color",
+            Self::Masked { .. } => "masked",
         }
     }
 }

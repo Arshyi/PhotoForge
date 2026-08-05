@@ -22,7 +22,7 @@
     WorkflowDocument
   } from '../types/editor';
   import { errorMessage, formatBytes } from '../utils/format';
-  import { cloneOperations, operationLabels, replaceOperation } from '../utils/operations';
+  import { cloneOperations, operationLabels, operationType, replaceOperation } from '../utils/operations';
   import {
     createWorkflow,
     duplicateOperationAt,
@@ -455,7 +455,7 @@
       </div>
       {#if selectedWorkflow}
         <div class="workflow-editor"><h3>Workflow editor</h3><label>Name<input value={selectedWorkflow.name} on:change={(event) => updateSelected((workflow) => ({ ...workflow, name: event.currentTarget.value }))} /></label><label>Folder<input value={selectedWorkflow.folder} on:change={(event) => updateSelected((workflow) => ({ ...workflow, folder: event.currentTarget.value }))} /></label>
-          <ol>{#each selectedWorkflow.operations as operation, index}<li><span>{index + 1}. {operationLabels[operation.type]}</span><div><button aria-label="Move up" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, -1) }))}>↑</button><button aria-label="Move down" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, 1) }))}>↓</button><button aria-label="Duplicate operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: duplicateOperationAt(workflow.operations, index) }))}>⧉</button><button aria-label="Delete operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: removeOperationAt(workflow.operations, index) }))}>×</button></div></li>{/each}</ol>
+          <ol>{#each selectedWorkflow.operations as operation, index}<li><span>{index + 1}. {operationLabels[operationType(operation)]}{operation.type === 'masked' ? ' · Masked' : ''}</span><div><button aria-label="Move up" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, -1) }))}>↑</button><button aria-label="Move down" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, 1) }))}>↓</button><button aria-label="Duplicate operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: duplicateOperationAt(workflow.operations, index) }))}>⧉</button><button aria-label="Delete operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: removeOperationAt(workflow.operations, index) }))}>×</button></div></li>{/each}</ol>
           <label>Typed operation JSON<textarea rows="8" bind:value={workflowJson} placeholder="Select workflow to edit operation parameters"></textarea></label><div class="button-row"><button on:click={applyWorkflowJson}>Validate & update</button><button class="primary" on:click={() => applyWorkflow(selectedWorkflow)}>Preview workflow</button></div>
         </div>
       {/if}

@@ -3,12 +3,12 @@ use crate::error::AppError;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_WORKFLOW_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_WORKFLOW_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn parse_workflow_json(json: &str) -> Result<WorkflowDocument, AppError> {
     if json.len() as u64 > MAX_WORKFLOW_BYTES {
         return Err(AppError::WorkflowImport(
-            "workflow exceeds the 2 MiB import limit".into(),
+            "workflow exceeds the 64 MiB import limit".into(),
         ));
     }
     let document: WorkflowDocument =
@@ -22,7 +22,7 @@ pub fn load_workflow(path: &Path) -> Result<WorkflowDocument, AppError> {
         fs::metadata(path).map_err(|error| AppError::WorkflowImport(error.to_string()))?;
     if !metadata.is_file() || metadata.len() > MAX_WORKFLOW_BYTES {
         return Err(AppError::WorkflowImport(
-            "workflow file is not a regular JSON file within the 2 MiB limit".into(),
+            "workflow file is not a regular JSON file within the 64 MiB limit".into(),
         ));
     }
     let json =
@@ -53,6 +53,11 @@ pub fn save_workflow(path: &Path, document: &WorkflowDocument) -> Result<PathBuf
     }
     let json = serde_json::to_vec_pretty(document)
         .map_err(|error| AppError::WorkflowValidation(error.to_string()))?;
+    if json.len() as u64 > MAX_WORKFLOW_BYTES {
+        return Err(AppError::WorkflowValidation(
+            "workflow exceeds the 64 MiB export limit".into(),
+        ));
+    }
     let temporary = path.with_extension("json.photoforge-tmp");
     fs::write(&temporary, json).map_err(|error| AppError::WorkflowValidation(error.to_string()))?;
     if path.exists() {

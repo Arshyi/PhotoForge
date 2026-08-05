@@ -35,6 +35,7 @@ impl EditPlanner for RulePlanner {
         PlannerCapabilities {
             supports_guided_editing: true,
             supports_reasoning: false,
+            supports_selection_planning: false,
             requires_model: false,
             offline: true,
         }

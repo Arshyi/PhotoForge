@@ -10,6 +10,7 @@
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
   import ProfessionalWorkspace from './lib/components/ProfessionalWorkspace.svelte';
+  import SelectionWorkspace from './lib/components/SelectionWorkspace.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
@@ -36,10 +37,64 @@
     loadGuidedSettings,
     saveGuidedSettings
   } from './lib/utils/guided';
-  import { operationLabels, presets, replaceOperation, valueFor } from './lib/utils/operations';
+  import {
+    baseOperation,
+    cloneOperations,
+    maskedOperation,
+    operationLabels,
+    operationSupportsMask,
+    operationType,
+    presets,
+    replaceOperation,
+    valueFor
+  } from './lib/utils/operations';
   import { loadShortcuts, normalizeShortcut } from './lib/utils/workspace';
+  import {
+    cancelMaskOperation,
+    colorRangeSelection,
+    composeSelectionMasks,
+    exportMaskFile,
+    exportMaskPng,
+    importMaskFile,
+    importMaskPng,
+    inspectSelectionMask,
+    magicWandSelection,
+    rasterizeSelection,
+    refineSelection,
+    transformSelection
+  } from './lib/selections/commands';
+  import {
+    createNamedMask,
+    createSelectionState,
+    deleteNamedMask,
+    duplicateNamedMask,
+    loadNamedMask,
+    moveNamedMask,
+    operationModeFromModifiers,
+    renameNamedMask,
+    replaceNamedMask,
+    SelectionHistory,
+    setActiveMask,
+    toggleNamedMask
+  } from './lib/selections/state';
+  import {
+    createMaskFile,
+    documentSelectionKey,
+    loadSelectionSession,
+    saveSelectionSession
+  } from './lib/selections/serialization';
+  import type {
+    MaskOperation,
+    MaskResult,
+    NamedMask,
+    SelectionGesture,
+    SelectionShape,
+    SelectionState,
+    SelectionTool
+  } from './lib/selections/types';
 
   const history = new EditHistory();
+  const selectionHistory = new SelectionHistory();
   let operations: EditOperation[] = [];
   let metadata: ImageMetadata | null = null;
   let originalUrl: string | null = null;
@@ -77,6 +132,12 @@
   let canRedo = false;
   let exportProfile: ExportProfile = 'lossless';
   let shortcuts: ShortcutBinding[] = [];
+  let selectionState: SelectionState = createSelectionState();
+  let selectionBusy = false;
+  let maskRequestId = 0;
+  let historyEvents: Array<'edit' | 'selection'> = [];
+  let redoEvents: Array<'edit' | 'selection'> = [];
+  let selectionPersistenceWarningShown = false;
 
   $: comparisonUsesSplitView = comparisonMode === 'split' || valueFor(operations, 'rotate', 0) % 360 !== 0;
 
@@ -85,6 +146,7 @@
     shortcuts = loadShortcuts();
     exportProfile = (localStorage.getItem('photoforge.lastExportProfile') as ExportProfile | null) ?? 'lossless';
     let unlisten: (() => void) | undefined;
+    const persistBeforeClose = () => persistSelectionState();
     getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === 'drop' && event.payload.paths[0]) {
@@ -99,6 +161,62 @@
         event.preventDefault();
         closeSettings();
         return;
+      }
+      const target = event.target as HTMLElement | null;
+      const textFocused = Boolean(
+        target?.matches('input, textarea, select, [contenteditable="true"]')
+      );
+      if (!textFocused && metadata) {
+        const command = event.ctrlKey || event.metaKey;
+        const key = event.key.toLowerCase();
+        if (command && key === 'a') {
+          event.preventDefault();
+          void applyMaskOperation({ type: 'select_all' });
+          return;
+        }
+        if (command && !event.shiftKey && key === 'd') {
+          event.preventDefault();
+          void applyMaskOperation({ type: 'deselect' });
+          return;
+        }
+        if (command && event.shiftKey && key === 'i') {
+          event.preventDefault();
+          void applyMaskOperation({ type: 'invert' });
+          return;
+        }
+        if (!command && !event.altKey && key === 'q') {
+          event.preventDefault();
+          commitSelectionState({
+            ...selectionState,
+            overlay: { ...selectionState.overlay, visible: !selectionState.overlay.visible }
+          });
+          return;
+        }
+        if (!command && !event.altKey && key === 'm') {
+          event.preventDefault();
+          setSelectionTool(selectionState.tool === 'rectangle' ? 'ellipse' : 'rectangle');
+          return;
+        }
+        if (!command && !event.altKey && key === 'l') {
+          event.preventDefault();
+          setSelectionTool(selectionState.tool === 'freehand' ? 'polygon' : 'freehand');
+          return;
+        }
+        const toolShortcuts: Partial<Record<string, SelectionTool>> = {
+          w: 'magic_wand',
+          b: 'brush',
+          e: 'eraser'
+        };
+        if (!command && !event.altKey && toolShortcuts[key]) {
+          event.preventDefault();
+          setSelectionTool(toolShortcuts[key] as SelectionTool);
+          return;
+        }
+        if (event.key === 'Escape' && selectionBusy) {
+          event.preventDefault();
+          void cancelCurrentMaskOperation();
+          return;
+        }
       }
       const action = shortcutAction(event);
       if (action === 'Open image') {
@@ -126,10 +244,12 @@
       }
     };
     window.addEventListener('keydown', handleKeys);
+    window.addEventListener('beforeunload', persistBeforeClose);
 
     return () => {
       unlisten?.();
       window.removeEventListener('keydown', handleKeys);
+      window.removeEventListener('beforeunload', persistBeforeClose);
       if (renderTimer) clearTimeout(renderTimer);
       if (toastTimer) clearTimeout(toastTimer);
       previewQueued = false;
@@ -171,6 +291,7 @@
   }
 
   async function loadPath(path: string) {
+    persistSelectionState();
     const ownOpenRequest = ++requestId;
     activeOpenRequest = ownOpenRequest;
     opening = true;
@@ -185,7 +306,6 @@
       });
       if (!result.isCurrent || activeOpenRequest !== ownOpenRequest) return;
       history.clear();
-      syncHistoryActions();
       operations = [];
       metadata = result.metadata;
       documentId = result.documentId;
@@ -195,8 +315,24 @@
       processingTime = result.processingTimeMs;
       zoom = 100;
       comparison = false;
+      const selectionKey = documentSelectionKey(
+        result.metadata.filename,
+        result.metadata.width,
+        result.metadata.height
+      );
+      selectionState = selectionHistory.replace(
+        loadSelectionSession(selectionKey, result.metadata.width, result.metadata.height)
+      );
+      if (!selectionState.activeMask) selectionState = { ...selectionState, applyScope: 'global' };
+      historyEvents = [];
+      redoEvents = [];
+      selectionPersistenceWarningShown = false;
+      syncHistoryActions();
       previewCurrent = true;
       notify(`${result.metadata.filename} opened locally`);
+      if (selectionState.activeMask && !selectionState.activeDiagnostics) {
+        void refreshActiveMaskDiagnostics();
+      }
       void requestAnalysis(result.documentId);
     } catch (error) {
       if (activeOpenRequest === ownOpenRequest) {
@@ -260,7 +396,7 @@
         previewQueued = false;
         const ownRequest = requestId;
         const ownDocument = documentId;
-        const pipeline = operations.map((operation) => ({ ...operation })) as EditOperation[];
+        const pipeline = cloneOperations(operations);
         processing = true;
         try {
           const result = await invoke<PreviewResult>('render_preview', {
@@ -292,14 +428,57 @@
   }
 
   function commit(next: EditOperation[], coalesceKey?: string) {
-    operations = history.commit(next, coalesceKey);
+    const scoped = scopeChangedOperations(next);
+    const before = JSON.stringify(operations);
+    operations = history.commit(scoped, coalesceKey);
+    if (JSON.stringify(operations) !== before) recordHistoryEvent('edit');
     syncHistoryActions();
     schedulePreview();
   }
 
+  function commitGlobal(next: EditOperation[], coalesceKey?: string) {
+    const before = JSON.stringify(operations);
+    operations = history.commit(cloneOperations(next), coalesceKey);
+    if (JSON.stringify(operations) !== before) recordHistoryEvent('edit');
+    syncHistoryActions();
+    schedulePreview();
+  }
+
+  function scopeChangedOperations(next: EditOperation[]): EditOperation[] {
+    return next.map((candidate) => {
+      if (candidate.type === 'masked') return structuredClone(candidate);
+      const previous = operations.find((value) => operationType(value) === candidate.type);
+      if (previous && JSON.stringify(previous) === JSON.stringify(candidate)) {
+        return structuredClone(candidate);
+      }
+      const base = baseOperation(candidate);
+      if (
+        selectionState.applyScope === 'global' ||
+        !selectionState.activeMask ||
+        !operationSupportsMask(base)
+      ) {
+        return base;
+      }
+      return maskedOperation(base, selectionState.activeMask, selectionState.applyScope);
+    });
+  }
+
+  function commitSelectionState(next: SelectionState, coalesceKey?: string) {
+    const before = JSON.stringify(selectionState);
+    selectionState = selectionHistory.commit(next, coalesceKey);
+    if (JSON.stringify(selectionState) !== before) recordHistoryEvent('selection');
+    persistSelectionState();
+    syncHistoryActions();
+  }
+
+  function recordHistoryEvent(kind: 'edit' | 'selection') {
+    historyEvents = [...historyEvents, kind];
+    redoEvents = [];
+  }
+
   function syncHistoryActions() {
-    canUndo = history.canUndo;
-    canRedo = history.canRedo;
+    canUndo = history.canUndo || selectionHistory.canUndo;
+    canRedo = history.canRedo || selectionHistory.canRedo;
   }
 
   function setNumeric(
@@ -315,7 +494,7 @@
   }
 
   function toggle(operation: EditOperation) {
-    const enabled = !operations.some((candidate) => candidate.type === operation.type);
+    const enabled = !operations.some((candidate) => operationType(candidate) === operationType(operation));
     commit(replaceOperation(operations, operation, enabled));
   }
 
@@ -335,22 +514,69 @@
   }
 
   function undo() {
-    if (!history.canUndo) return;
-    operations = history.undo();
+    while (historyEvents.length) {
+      const kind = historyEvents.at(-1) as 'edit' | 'selection';
+      historyEvents = historyEvents.slice(0, -1);
+      if (kind === 'edit' && history.canUndo) {
+        operations = history.undo();
+        redoEvents = [...redoEvents, kind];
+        schedulePreview();
+        break;
+      }
+      if (kind === 'selection' && selectionHistory.canUndo) {
+        selectionState = selectionHistory.undo();
+        redoEvents = [...redoEvents, kind];
+        persistSelectionState();
+        break;
+      }
+    }
     syncHistoryActions();
-    schedulePreview();
   }
 
   function redo() {
-    if (!history.canRedo) return;
-    operations = history.redo();
+    while (redoEvents.length) {
+      const kind = redoEvents.at(-1) as 'edit' | 'selection';
+      redoEvents = redoEvents.slice(0, -1);
+      if (kind === 'edit' && history.canRedo) {
+        operations = history.redo();
+        historyEvents = [...historyEvents, kind];
+        schedulePreview();
+        break;
+      }
+      if (kind === 'selection' && selectionHistory.canRedo) {
+        selectionState = selectionHistory.redo();
+        historyEvents = [...historyEvents, kind];
+        persistSelectionState();
+        break;
+      }
+    }
     syncHistoryActions();
-    schedulePreview();
+  }
+
+  function undoSelectionOnly() {
+    if (!selectionHistory.canUndo) return;
+    selectionState = selectionHistory.undo();
+    const index = historyEvents.lastIndexOf('selection');
+    if (index >= 0) historyEvents = historyEvents.filter((_, candidate) => candidate !== index);
+    redoEvents = [...redoEvents, 'selection'];
+    persistSelectionState();
+    syncHistoryActions();
+  }
+
+  function redoSelectionOnly() {
+    if (!selectionHistory.canRedo) return;
+    selectionState = selectionHistory.redo();
+    const index = redoEvents.lastIndexOf('selection');
+    if (index >= 0) redoEvents = redoEvents.filter((_, candidate) => candidate !== index);
+    historyEvents = [...historyEvents, 'selection'];
+    persistSelectionState();
+    syncHistoryActions();
   }
 
   function reset() {
     if (!metadata || operations.length === 0) return;
     operations = history.reset();
+    recordHistoryEvent('edit');
     syncHistoryActions();
     schedulePreview();
   }
@@ -360,7 +586,326 @@
   }
 
   function applyGuidedPlan(planOperations: EditOperation[]) {
-    commit(planOperations);
+    commitGlobal(planOperations);
+  }
+
+  function persistSelectionState() {
+    if (!selectionState.documentKey) return;
+    const persisted = saveSelectionSession(selectionState);
+    if (!persisted && !selectionPersistenceWarningShown) {
+      selectionPersistenceWarningShown = true;
+      notify('This mask set exceeds bounded session storage; export important masks as local files.', 'error');
+    }
+  }
+
+  function setSelectionTool(tool: SelectionTool) {
+    commitSelectionState({ ...selectionState, tool });
+  }
+
+  function updateSelectionState(next: SelectionState, coalesceKey?: string) {
+    if (!next.activeMask && next.applyScope !== 'global') next = { ...next, applyScope: 'global' };
+    commitSelectionState(next, coalesceKey);
+  }
+
+  async function refreshActiveMaskDiagnostics() {
+    if (!selectionState.activeMask) return;
+    try {
+      const diagnostics = await inspectSelectionMask(selectionState.activeMask);
+      if (selectionState.activeMask) {
+        selectionState = { ...selectionState, activeDiagnostics: diagnostics };
+        persistSelectionState();
+      }
+    } catch (error) {
+      selectionState = selectionHistory.replace(
+        setActiveMask(selectionState, null, null)
+      );
+      syncHistoryActions();
+      notify(errorMessage(error), 'error');
+    }
+  }
+
+  async function handleSelectionGesture(gesture: SelectionGesture) {
+    if (!metadata || selectionBusy) return;
+    const configuredMode = operationModeFromModifiers(
+      selectionState.mode,
+      gesture.shiftKey,
+      gesture.altKey
+    );
+    const mode = gesture.tool === 'eraser' ? 'subtract' : configuredMode;
+    const ownRequest = ++maskRequestId;
+    selectionBusy = true;
+    try {
+      let result: MaskResult;
+      if (gesture.tool === 'magic_wand') {
+        result = await magicWandSelection({
+          point: gesture.points[0],
+          options: {
+            tolerance: selectionState.settings.wandTolerance,
+            connectivity: selectionState.settings.wandConnectivity,
+            antiAlias: selectionState.settings.wandAntiAlias,
+            contiguous: selectionState.settings.wandContiguous
+          },
+          mode,
+          base: selectionState.activeMask,
+          sampleMerged: selectionState.settings.sampleMerged,
+          operations: cloneOperations(operations),
+          documentId,
+          requestId: ownRequest
+        });
+      } else if (gesture.tool === 'color_range') {
+        result = await colorRangeSelection({
+          samples: gesture.points,
+          options: {
+            tolerance: selectionState.settings.colorTolerance,
+            luminanceSensitivity: selectionState.settings.luminanceSensitivity,
+            hueSensitivity: selectionState.settings.hueSensitivity,
+            saturationSensitivity: selectionState.settings.saturationSensitivity
+          },
+          mode,
+          base: selectionState.activeMask,
+          sampleMerged: selectionState.settings.sampleMerged,
+          operations: cloneOperations(operations),
+          documentId,
+          requestId: ownRequest
+        });
+      } else {
+        const shape = selectionShape(gesture);
+        if (!shape) return;
+        result = await rasterizeSelection({
+          width: metadata.width,
+          height: metadata.height,
+          shape,
+          mode,
+          base: selectionState.activeMask,
+          documentId,
+          requestId: ownRequest
+        });
+      }
+      acceptMaskResult(result, gesture.tool);
+    } catch (error) {
+      if (ownRequest === maskRequestId && !isMaskCancellation(error)) notify(errorMessage(error), 'error');
+    } finally {
+      if (ownRequest === maskRequestId) selectionBusy = false;
+    }
+  }
+
+  function selectionShape(gesture: SelectionGesture): SelectionShape | null {
+    const [start, end] = gesture.points;
+    if ((gesture.tool === 'rectangle' || gesture.tool === 'ellipse') && start && end) {
+      return { type: gesture.tool, start, end };
+    }
+    if (gesture.tool === 'freehand' && gesture.points.length >= 3) {
+      return { type: 'freehand', points: gesture.points };
+    }
+    if (gesture.tool === 'polygon' && gesture.points.length >= 3) {
+      return { type: 'polygon', points: gesture.points };
+    }
+    if ((gesture.tool === 'brush' || gesture.tool === 'eraser') && gesture.points.length) {
+      return {
+        type: 'brush',
+        points: gesture.points,
+        diameter: selectionState.settings.brushDiameter,
+        hardness: selectionState.settings.brushHardness,
+        opacity: selectionState.settings.brushOpacity
+      };
+    }
+    return null;
+  }
+
+  async function applyMaskOperation(operation: MaskOperation) {
+    if (!metadata || selectionBusy) return;
+    if (operation.type === 'deselect') {
+      commitSelectionState({
+        ...setActiveMask(selectionState, null, null),
+        applyScope: 'global'
+      });
+      return;
+    }
+    const ownRequest = ++maskRequestId;
+    selectionBusy = true;
+    try {
+      let result: MaskResult | null = null;
+      if (operation.type === 'select_all') {
+        result = await rasterizeSelection({
+            width: metadata.width,
+            height: metadata.height,
+            shape: {
+              type: 'rectangle',
+              start: { x: 0, y: 0 },
+              end: { x: metadata.width, y: metadata.height }
+            },
+            mode: 'replace',
+            base: null,
+            documentId,
+            requestId: ownRequest
+          });
+      } else if (selectionState.activeMask && operation.type === 'refine') {
+        result = await refineSelection({
+          mask: selectionState.activeMask,
+          operation,
+          edgeStrength: 0.7,
+          sampleMerged: selectionState.settings.sampleMerged,
+          operations: cloneOperations(operations),
+          documentId,
+          requestId: ownRequest
+        });
+      } else if (selectionState.activeMask) {
+        result = await transformSelection({
+              mask: selectionState.activeMask,
+              operation,
+              documentId,
+              requestId: ownRequest
+            });
+      }
+      if (result) acceptMaskResult(result, operation.type);
+    } catch (error) {
+      if (ownRequest === maskRequestId && !isMaskCancellation(error)) notify(errorMessage(error), 'error');
+    } finally {
+      if (ownRequest === maskRequestId) selectionBusy = false;
+    }
+  }
+
+  function acceptMaskResult(result: MaskResult, source: string) {
+    if (!result.isCurrent || result.requestId !== maskRequestId || result.documentId !== documentId) return;
+    processingTime = result.processingTimeMs;
+    commitSelectionState(
+      setActiveMask(
+        { ...selectionState, overlay: { ...selectionState.overlay, visible: true } },
+        result.mask,
+        result.diagnostics
+      )
+    );
+    notify(`${source.replaceAll('_', ' ')} selection updated`);
+  }
+
+  async function cancelCurrentMaskOperation() {
+    if (!selectionBusy) return;
+    await cancelMaskOperation(maskRequestId).catch(() => false);
+  }
+
+  function isMaskCancellation(error: unknown): boolean {
+    return Boolean(
+      error && typeof error === 'object' && 'code' in error && error.code === 'mask_cancelled'
+    );
+  }
+
+  async function handleNamedMaskAction(
+    action: 'create' | 'rename' | 'duplicate' | 'delete' | 'visible' | 'locked' | 'up' | 'down' | 'load' | 'combine' | 'replace' | 'export' | 'export_png',
+    id?: string,
+    value?: string
+  ) {
+    if (action === 'create') {
+      commitSelectionState(createNamedMask(selectionState, value ?? ''));
+      return;
+    }
+    if (!id) return;
+    if (action === 'rename') commitSelectionState(renameNamedMask(selectionState, id, value ?? ''));
+    else if (action === 'duplicate') commitSelectionState(duplicateNamedMask(selectionState, id));
+    else if (action === 'delete') commitSelectionState(deleteNamedMask(selectionState, id));
+    else if (action === 'visible' || action === 'locked') commitSelectionState(toggleNamedMask(selectionState, id, action));
+    else if (action === 'up' || action === 'down') commitSelectionState(moveNamedMask(selectionState, id, action === 'up' ? -1 : 1));
+    else if (action === 'load') {
+      commitSelectionState(loadNamedMask(selectionState, id));
+      await refreshActiveMaskDiagnostics();
+    } else if (action === 'combine') {
+      await combineNamedMask(id);
+    } else if (action === 'replace') commitSelectionState(replaceNamedMask(selectionState, id));
+    else {
+      const named = selectionState.namedMasks.find((mask) => mask.id === id);
+      if (named) await exportNamedMask(named, action === 'export_png');
+    }
+  }
+
+  async function combineNamedMask(id: string) {
+    const named = selectionState.namedMasks.find((mask) => mask.id === id);
+    if (!named || !selectionState.activeMask || selectionBusy) return;
+    const ownRequest = ++maskRequestId;
+    selectionBusy = true;
+    try {
+      const result = await composeSelectionMasks({
+        base: selectionState.activeMask,
+        incoming: named.mask,
+        mode: selectionState.mode,
+        documentId,
+        requestId: ownRequest
+      });
+      acceptMaskResult(result, `${selectionState.mode} ${named.name}`);
+    } catch (error) {
+      if (ownRequest === maskRequestId && !isMaskCancellation(error)) notify(errorMessage(error), 'error');
+    } finally {
+      if (ownRequest === maskRequestId) selectionBusy = false;
+    }
+  }
+
+  async function importSelectionMask(format: 'json' | 'png') {
+    if (!metadata) return;
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        title: format === 'json' ? 'Import PhotoForge mask' : 'Import grayscale mask',
+        filters: [format === 'json'
+          ? { name: 'PhotoForge mask', extensions: ['json'] }
+          : { name: 'Grayscale PNG mask', extensions: ['png'] }]
+      });
+      if (typeof path !== 'string') return;
+      if (format === 'json') {
+        const document = await importMaskFile(path);
+        ensureMaskDimensions(document.mask);
+        const duplicateId = selectionState.namedMasks.some((mask) => mask.id === document.id);
+        const id = duplicateId ? `${document.id}-${Date.now().toString(36)}` : document.id;
+        const named: NamedMask = {
+          id,
+          name: document.name,
+          mask: document.mask,
+          visible: true,
+          locked: false,
+          createdAt: document.metadata.createdAt || new Date().toISOString(),
+          modifiedAt: document.metadata.modifiedAt || new Date().toISOString(),
+          sourceTool: document.metadata.sourceTool as SelectionTool | undefined
+        };
+        commitSelectionState({
+          ...setActiveMask(selectionState, document.mask, await inspectSelectionMask(document.mask)),
+          namedMasks: [...selectionState.namedMasks, named]
+        });
+      } else {
+        const mask = await importMaskPng(path);
+        ensureMaskDimensions(mask);
+        const diagnostics = await inspectSelectionMask(mask);
+        const next = setActiveMask(selectionState, mask, diagnostics);
+        commitSelectionState(createNamedMask(next, 'Imported PNG'));
+      }
+      notify('Mask imported locally');
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    }
+  }
+
+  async function exportNamedMask(named: NamedMask, png: boolean) {
+    try {
+      const path = await save({
+        title: png ? 'Export grayscale mask' : 'Export PhotoForge mask',
+        defaultPath: `${named.name.replace(/[^a-z0-9_-]+/gi, '-')}${png ? '.png' : '.photoforge-mask.json'}`,
+        filters: [png
+          ? { name: 'Grayscale PNG mask', extensions: ['png'] }
+          : { name: 'PhotoForge mask', extensions: ['json'] }]
+      });
+      if (!path) return;
+      if (png) await exportMaskPng(path, named.mask);
+      else await exportMaskFile(
+        path,
+        createMaskFile(named.id, named.name, named.mask, named.createdAt, named.modifiedAt, named.sourceTool)
+      );
+      notify(`Exported ${png ? 'grayscale PNG' : 'PhotoForge mask'}`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    }
+  }
+
+  function ensureMaskDimensions(mask: { width: number; height: number }) {
+    if (!metadata || mask.width !== metadata.width || mask.height !== metadata.height) {
+      throw new Error(`Mask dimensions must match ${metadata?.width ?? 0} × ${metadata?.height ?? 0}.`);
+    }
   }
 
   async function exportImage() {
@@ -399,7 +944,7 @@
   }
 
   function active(type: OperationType): boolean {
-    return operations.some((operation) => operation.type === type);
+    return operations.some((operation) => operationType(operation) === type);
   }
 
   const percent = (value: number) => `${Math.round(value * 100)}%`;
@@ -507,6 +1052,16 @@
       stale={!previewCurrent}
       onopen={chooseImage}
       oncomparisonchange={(value) => (comparisonPosition = value)}
+      imageWidth={metadata?.width ?? 0}
+      imageHeight={metadata?.height ?? 0}
+      selectionTool={comparisonUsesSplitView ? 'none' : selectionState.tool}
+      activeMask={selectionState.activeMask}
+      overlaySettings={selectionState.overlay}
+      brushDiameter={selectionState.settings.brushDiameter}
+      fixedAspect={selectionState.settings.fixedAspect}
+      fromCenter={selectionState.settings.fromCenter}
+      onselectiongesture={handleSelectionGesture}
+      onselectioncancel={() => undefined}
     />
 
     <aside aria-label="Editing controls">
@@ -534,6 +1089,21 @@
         inert={!metadata || opening}
         aria-disabled={!metadata || opening}
       >
+        <SelectionWorkspace
+          state={selectionState}
+          disabled={!metadata || opening}
+          busy={selectionBusy}
+          canUndo={selectionHistory.canUndo}
+          canRedo={selectionHistory.canRedo}
+          onstatechange={updateSelectionState}
+          onoperation={applyMaskOperation}
+          onnamedaction={handleNamedMaskAction}
+          onimport={importSelectionMask}
+          onundo={undoSelectionOnly}
+          onredo={redoSelectionOnly}
+          oncancel={cancelCurrentMaskOperation}
+        />
+
         <GuidedEditPanel
           {documentId}
           ready={Boolean(metadata && analysis)}
@@ -674,7 +1244,7 @@
             <h2 id="pipeline-heading"><span>≡</span> Active Pipeline</h2>
             <ol class="pipeline-list">
               {#each operations as operation, index}
-                <li><span>{index + 1}</span>{operationLabels[operation.type]}</li>
+                <li><span>{index + 1}</span>{operationLabels[operationType(operation)]}{operation.type === 'masked' ? ` · ${operation.invert ? 'Outside mask' : 'Inside mask'}` : ''}</li>
               {/each}
             </ol>
           </section>

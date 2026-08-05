@@ -344,6 +344,41 @@ mod tests {
     }
 
     #[test]
+    fn workflow_embeds_immutable_mask_snapshot_without_changing_schema_version() {
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 1, vec![255, 0]).unwrap();
+        let mut value = workflow();
+        value.operations = vec![EditOperation::Masked {
+            operation: Box::new(EditOperation::Brightness { amount: 0.1 }),
+            mask: crate::mask::MaskSnapshot::encode(&mask),
+            invert: false,
+            mask_id: Some("subject".into()),
+        }];
+        let document = WorkflowDocument {
+            schema_version: WORKFLOW_SCHEMA_VERSION,
+            workflow: value,
+        };
+        document.validate().unwrap();
+        let decoded: WorkflowDocument =
+            serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
+        assert_eq!(decoded, document);
+    }
+
+    #[test]
+    fn workflow_with_corrupted_embedded_mask_fails_closed() {
+        let mut snapshot =
+            crate::mask::MaskSnapshot::encode(&crate::mask::MaskBitmap::full(1, 1).unwrap());
+        snapshot.checksum = "fnv1a64:0000000000000000".into();
+        let mut value = workflow();
+        value.operations = vec![EditOperation::Masked {
+            operation: Box::new(EditOperation::Contrast { amount: 0.1 }),
+            mask: snapshot,
+            invert: false,
+            mask_id: Some("missing-or-corrupt".into()),
+        }];
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
     fn batch_options_bound_workers() {
         for workers in [0, MAX_BATCH_WORKERS + 1, usize::MAX] {
             let options = BatchOptions {

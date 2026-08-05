@@ -142,29 +142,31 @@ export interface PlanValueControl {
 }
 
 export function planValueControl(operation: EditOperation): PlanValueControl | null {
-  switch (operation.type) {
+  const candidate = operation.type === 'masked' ? operation.operation : operation;
+  switch (candidate.type) {
     case 'brightness':
     case 'contrast':
-      return { value: operation.amount, min: -0.5, max: 0.5, step: 0.01, noun: 'amount' };
+      return { value: candidate.amount, min: -0.5, max: 0.5, step: 0.01, noun: 'amount' };
     case 'saturation':
-      return { value: operation.amount, min: -1, max: 1, step: 0.01, noun: 'amount' };
+      return { value: candidate.amount, min: -1, max: 1, step: 0.01, noun: 'amount' };
     case 'auto_white_balance':
     case 'denoise':
     case 'deblock':
     case 'mild_deblur':
     case 'document_enhance':
     case 'uneven_lighting_correction':
-      return { value: operation.strength, min: 0, max: 1, step: 0.01, noun: 'strength' };
+      return { value: candidate.strength, min: 0, max: 1, step: 0.01, noun: 'strength' };
     case 'local_contrast':
-      return { value: operation.strength, min: 0, max: 1, step: 0.01, noun: 'strength' };
+      return { value: candidate.strength, min: 0, max: 1, step: 0.01, noun: 'strength' };
     case 'edge_aware_sharpen':
-      return { value: operation.strength, min: 0, max: 2, step: 0.01, noun: 'strength' };
+      return { value: candidate.strength, min: 0, max: 2, step: 0.01, noun: 'strength' };
     default:
       return null;
   }
 }
 
 export function withPlanValue(operation: EditOperation, value: number): EditOperation {
+  if (operation.type === 'masked') return { ...operation, operation: withPlanValue(operation.operation, value) as typeof operation.operation };
   if ('amount' in operation) return { ...operation, amount: value };
   if ('strength' in operation) return { ...operation, strength: value } as EditOperation;
   return { ...operation };

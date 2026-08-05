@@ -4,9 +4,15 @@
 
 Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighten, perspective, lens correction, HSL, temperature/tint, selective color, live scopes, professional inspection, expanded comparison, versioned workflows, bounded batch processing, export profiles, workspace layouts, configurable shortcuts, and accessibility improvements.
 
-## Phase 7 — Future model-backed restoration (not implemented)
+## Phase 7 — Professional selections and masking (complete)
 
-Possible future work includes separately reviewed ONNX/Real-ESRGAN/GFPGAN/CodeFormer adapters, model provenance and integrity controls, opt-in model installation, OCR, and other explicitly scoped capabilities. Phase 6 contains none of these runtimes or behaviors.
+- Deterministic 8-bit mask engine with rectangle, ellipse, polygon, freehand, brush, eraser, Magic Wand, and Color Range tools
+- Replace, add, subtract, intersect, invert, feather, expand, contract, smooth, cleanup, border, and classical edge-refinement operations
+- Active and named masks with visibility, locking, ordering, duplication, import/export, bounded history, and per-document local sessions
+- Marching-ants, color, grayscale, black/white, and mask-only overlays with image-space pointer mapping across zoom and high-DPI displays
+- Immutable mask snapshots in validated typed edit operations and workflows, including inside/outside adjustment scopes
+- Versioned `.photoforge-mask.json` plus grayscale PNG interchange, checksums, decompression bounds, cancellation, stale-result protection, and local-path enforcement
+- No AI, semantic selection, OCR, cloud service, marketplace, account, or payment dependency
 
 ## Phase 0 — Foundation (complete)
 
@@ -83,4 +89,4 @@ Possible future work includes separately reviewed ONNX/Real-ESRGAN/GFPGAN/CodeFo
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, perspective correction, batch processing, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable. Ollama remains a text-to-validated-plan adapter only; it receives no image and has no pixel or tool authority.
+No OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable. Perspective correction and batch processing are deterministic local Phase 6 features. Ollama remains a text-to-validated-plan adapter only; it receives no image, mask, or pixel/tool authority.

@@ -1,4 +1,5 @@
-import type { EditOperation, OperationType, Preset } from '../types/editor';
+import type { BaseEditOperation, EditOperation, OperationType, Preset } from '../types/editor';
+import type { ApplyScope, MaskSnapshot } from '../selections/types';
 
 export const presets: Preset[] = [
   {
@@ -115,7 +116,38 @@ export const presets: Preset[] = [
 ];
 
 export function operationType(operation: EditOperation): OperationType {
-  return operation.type;
+  return operation.type === 'masked' ? operation.operation.type : operation.type;
+}
+
+export function baseOperation(operation: EditOperation): BaseEditOperation {
+  return structuredClone(operation.type === 'masked' ? operation.operation : operation);
+}
+
+export function maskedOperation(
+  operation: BaseEditOperation,
+  mask: MaskSnapshot,
+  scope: ApplyScope,
+  maskId: string | null = null
+): EditOperation {
+  if (scope === 'global') return structuredClone(operation);
+  return {
+    type: 'masked',
+    operation: structuredClone(operation),
+    mask: structuredClone(mask),
+    invert: scope === 'outside',
+    mask_id: maskId
+  };
+}
+
+export function operationSupportsMask(operation: BaseEditOperation): boolean {
+  return ![
+    'reflect_horizontal',
+    'rotate',
+    'crop',
+    'straighten',
+    'perspective',
+    'lens_correction'
+  ].includes(operation.type);
 }
 
 export function replaceOperation(
@@ -123,16 +155,17 @@ export function replaceOperation(
   next: EditOperation,
   enabled = true
 ): EditOperation[] {
-  const index = operations.findIndex((operation) => operation.type === next.type);
+  const nextType = operationType(next);
+  const index = operations.findIndex((operation) => operationType(operation) === nextType);
   if (!enabled) {
     return index === -1
-      ? operations.map((operation) => ({ ...operation }))
+      ? cloneOperations(operations)
       : operations.filter((_, operationIndex) => operationIndex !== index);
   }
 
-  const copy = operations.map((operation) => ({ ...operation })) as EditOperation[];
-  if (index === -1) copy.push(next);
-  else copy[index] = next;
+  const copy = cloneOperations(operations);
+  if (index === -1) copy.push(structuredClone(next));
+  else copy[index] = structuredClone(next);
   return copy;
 }
 
@@ -141,18 +174,19 @@ export function valueFor(
   type: OperationType,
   fallback: number
 ): number {
-  const operation = operations.find((candidate) => candidate.type === type);
+  const operation = operations.find((candidate) => operationType(candidate) === type);
   if (!operation) return fallback;
-  if ('amount' in operation) return operation.amount;
-  if ('value' in operation) return operation.value;
-  if ('radius' in operation) return operation.radius;
-  if ('strength' in operation) return operation.strength;
-  if ('degrees' in operation) return operation.degrees;
+  const base = baseOperation(operation);
+  if ('amount' in base) return base.amount;
+  if ('value' in base) return base.value;
+  if ('radius' in base) return base.radius;
+  if ('strength' in base) return base.strength;
+  if ('degrees' in base) return base.degrees;
   return fallback;
 }
 
 export function cloneOperations(operations: EditOperation[]): EditOperation[] {
-  return operations.map((operation) => ({ ...operation })) as EditOperation[];
+  return structuredClone(operations);
 }
 
 export const operationLabels: Record<OperationType, string> = {

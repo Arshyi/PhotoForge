@@ -21,6 +21,7 @@ impl EditPlanner for OllamaPlanner {
         PlannerCapabilities {
             supports_guided_editing: true,
             supports_reasoning: true,
+            supports_selection_planning: false,
             requires_model: true,
             offline: true,
         }
@@ -44,6 +45,7 @@ macro_rules! unavailable_planner {
                 PlannerCapabilities {
                     supports_guided_editing: true,
                     supports_reasoning: true,
+                    supports_selection_planning: false,
                     requires_model: true,
                     offline: $offline,
                 }

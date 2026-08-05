@@ -121,6 +121,7 @@ impl FromStr for EngineProvider {
 pub struct PlannerCapabilities {
     pub supports_guided_editing: bool,
     pub supports_reasoning: bool,
+    pub supports_selection_planning: bool,
     pub requires_model: bool,
     pub offline: bool,
 }
@@ -129,6 +130,7 @@ pub struct PlannerCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct RestorationCapabilities {
     pub supports_restoration: bool,
+    pub supports_masked_adjustments: bool,
     pub supports_neural_models: bool,
     pub requires_model: bool,
     pub offline: bool,

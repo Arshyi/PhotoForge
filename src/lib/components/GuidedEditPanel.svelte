@@ -29,7 +29,7 @@
     updatePlanOperation,
     withPlanValue
   } from '../utils/guided';
-  import { operationLabels } from '../utils/operations';
+  import { operationLabels, operationType } from '../utils/operations';
 
   export let documentId = 0;
   export let ready = false;
@@ -420,7 +420,7 @@
               <p>{candidate.plan.summary}</p>
               <p><strong>{Math.round(candidate.plan.confidence * 100)}%</strong> confidence · {candidate.plan.operations.length} operations</p>
               {#if candidate.plan.warnings.length}<ul>{#each candidate.plan.warnings as warning}<li>{warning}</li>{/each}</ul>{/if}
-              <ol>{#each candidate.plan.operations as operation}<li>{operationLabels[operation.type]}</li>{/each}</ol>
+              <ol>{#each candidate.plan.operations as operation}<li>{operationLabels[operationType(operation)]}</li>{/each}</ol>
             {:else}<p class="comparison-error">{candidate.error}</p>{/if}
           </section>
         {/each}
@@ -480,21 +480,21 @@
           {@const control = planValueControl(operation)}
           <li>
             <div class="plan-operation-heading">
-              <span><b>{index + 1}</b><strong>{operationLabels[operation.type]}</strong></span>
+              <span><b>{index + 1}</b><strong>{operationLabels[operationType(operation)]}</strong></span>
               {#if inspectorOpen}
                 <div>
-                  <button type="button" aria-label={`Move ${operationLabels[operation.type]} up`} disabled={index === 0} on:click={() => moveOperation(index, -1)}>↑</button>
-                  <button type="button" aria-label={`Move ${operationLabels[operation.type]} down`} disabled={index === plan.operations.length - 1} on:click={() => moveOperation(index, 1)}>↓</button>
-                  <button type="button" aria-label={`Delete ${operationLabels[operation.type]}`} on:click={() => removeOperation(index)}>×</button>
+                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} up`} disabled={index === 0} on:click={() => moveOperation(index, -1)}>↑</button>
+                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} down`} disabled={index === plan.operations.length - 1} on:click={() => moveOperation(index, 1)}>↓</button>
+                  <button type="button" aria-label={`Delete ${operationLabels[operationType(operation)]}`} on:click={() => removeOperation(index)}>×</button>
                 </div>
               {/if}
             </div>
             <p>{plan.operationExplanations[index]}</p>
             {#if inspectorOpen && control}
               <label class="plan-value">
-                <span>{operationLabels[operation.type]} {control.noun}<output>{control.value.toFixed(2)}</output></span>
+                <span>{operationLabels[operationType(operation)]} {control.noun}<output>{control.value.toFixed(2)}</output></span>
                 <input
-                  aria-label={`${operationLabels[operation.type]} ${control.noun}`}
+                  aria-label={`${operationLabels[operationType(operation)]} ${control.noun}`}
                   type="range"
                   value={control.value}
                   min={control.min}

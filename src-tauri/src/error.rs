@@ -93,6 +93,23 @@ pub enum AppError {
     ShortcutConflict(String),
     #[error("Workspace loading failed: {0}")]
     WorkspaceLoading(String),
+    #[error("Invalid selection mask: {0}")]
+    InvalidMask(String),
+    #[error("This mask is too large to process safely ({pixels} units; limit {limit}).")]
+    MaskTooLarge { pixels: u64, limit: u64 },
+    #[error("Mask format version {0} is not supported.")]
+    UnsupportedMaskVersion(u32),
+    #[error("The mask is {mask_width} x {mask_height}, but this image stage is {image_width} x {image_height}.")]
+    MaskDimensionMismatch {
+        mask_width: u32,
+        mask_height: u32,
+        image_width: u32,
+        image_height: u32,
+    },
+    #[error("The selection operation was cancelled.")]
+    MaskCancelled,
+    #[error("Mask file access failed: {0}")]
+    MaskIo(String),
 }
 
 impl AppError {
@@ -142,6 +159,12 @@ impl AppError {
             Self::CropBounds(_) => "crop_bounds",
             Self::ShortcutConflict(_) => "shortcut_conflict",
             Self::WorkspaceLoading(_) => "workspace_loading",
+            Self::InvalidMask(_) => "invalid_mask",
+            Self::MaskTooLarge { .. } => "mask_too_large",
+            Self::UnsupportedMaskVersion(_) => "unsupported_mask_version",
+            Self::MaskDimensionMismatch { .. } => "mask_dimension_mismatch",
+            Self::MaskCancelled => "mask_cancelled",
+            Self::MaskIo(_) => "mask_io",
         }
     }
 }

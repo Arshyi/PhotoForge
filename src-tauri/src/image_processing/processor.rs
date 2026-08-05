@@ -125,6 +125,16 @@ fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaI
         EditOperation::UnevenLightingCorrection { strength, radius } => {
             restoration::uneven_lighting(image, *strength, *radius)
         }
+        EditOperation::Masked {
+            operation,
+            mask,
+            invert,
+            ..
+        } => {
+            let decoded = mask.decode()?.resample_to(image.width(), image.height())?;
+            let adjusted = apply_operation(image, operation)?;
+            blend_masked(image, &adjusted, &decoded, *invert)?
+        }
         EditOperation::Curves { .. }
         | EditOperation::Levels { .. }
         | EditOperation::WhitePoint { .. }
@@ -174,6 +184,47 @@ fn unsharp_mask(source: &RgbaImage, strength: f32) -> RgbaImage {
         );
     }
     output
+}
+
+fn blend_masked(
+    source: &RgbaImage,
+    adjusted: &RgbaImage,
+    mask: &crate::mask::MaskBitmap,
+    invert: bool,
+) -> Result<RgbaImage, AppError> {
+    if source.dimensions() != adjusted.dimensions()
+        || source.dimensions() != (mask.width(), mask.height())
+    {
+        return Err(AppError::InvalidOperation(
+            "masked adjustments must preserve the image dimensions".into(),
+        ));
+    }
+    let mut output = RgbaImage::new(source.width(), source.height());
+    for (index, ((x, y, original), changed)) in
+        source.enumerate_pixels().zip(adjusted.pixels()).enumerate()
+    {
+        let coverage = if invert {
+            255 - mask.coverage()[index]
+        } else {
+            mask.coverage()[index]
+        };
+        let inverse = 255_u16 - u16::from(coverage);
+        let blend = |before: u8, after: u8| {
+            ((u16::from(before) * inverse + u16::from(after) * u16::from(coverage) + 127) / 255)
+                as u8
+        };
+        output.put_pixel(
+            x,
+            y,
+            Rgba([
+                blend(original[0], changed[0]),
+                blend(original[1], changed[1]),
+                blend(original[2], changed[2]),
+                original[3],
+            ]),
+        );
+    }
+    Ok(output)
 }
 
 pub(crate) fn clamp(value: f32) -> u8 {
@@ -462,5 +513,60 @@ mod tests {
         let preview = apply_pipeline(&source, &operations).unwrap().to_rgba8();
         let export = apply_pipeline(&source, &operations).unwrap().to_rgba8();
         assert_eq!(preview, export);
+    }
+
+    #[test]
+    fn masked_brightness_blends_partial_coverage_and_preserves_alpha() {
+        let source = image(
+            3,
+            1,
+            &[[10, 20, 30, 10], [10, 20, 30, 20], [10, 20, 30, 30]],
+        );
+        let mask = crate::mask::MaskBitmap::from_coverage(3, 1, vec![0, 128, 255]).unwrap();
+        let result = apply_pipeline(
+            &source,
+            &[EditOperation::Masked {
+                operation: Box::new(EditOperation::Brightness { amount: 0.2 }),
+                mask: crate::mask::MaskSnapshot::encode(&mask),
+                invert: false,
+                mask_id: Some("subject".into()),
+            }],
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(result.get_pixel(0, 0).0, [10, 20, 30, 10]);
+        assert_eq!(result.get_pixel(1, 0).0, [36, 46, 56, 20]);
+        assert_eq!(result.get_pixel(2, 0).0, [61, 71, 81, 30]);
+    }
+
+    #[test]
+    fn outside_mask_application_inverts_coverage() {
+        let source = image(2, 1, &[[10, 20, 30, 255], [10, 20, 30, 255]]);
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 1, vec![255, 0]).unwrap();
+        let result = apply_pipeline(
+            &source,
+            &[EditOperation::Masked {
+                operation: Box::new(EditOperation::Contrast { amount: 0.5 }),
+                mask: crate::mask::MaskSnapshot::encode(&mask),
+                invert: true,
+                mask_id: None,
+            }],
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(result.get_pixel(0, 0), source.to_rgba8().get_pixel(0, 0));
+        assert_ne!(result.get_pixel(1, 0), source.to_rgba8().get_pixel(1, 0));
+    }
+
+    #[test]
+    fn geometric_edits_cannot_be_wrapped_in_masks() {
+        let mask = crate::mask::MaskSnapshot::encode(&crate::mask::MaskBitmap::full(1, 1).unwrap());
+        let operation = EditOperation::Masked {
+            operation: Box::new(EditOperation::Rotate { degrees: 90 }),
+            mask,
+            invert: false,
+            mask_id: None,
+        };
+        assert!(operation.validate().is_err());
     }
 }

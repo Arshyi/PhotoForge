@@ -1,5 +1,13 @@
 # Privacy
 
+## Phase 7 selections and masks
+
+Selection geometry, mask coverage, named-mask state, refinement, previews, import/export, and masked edits remain on this device. Phase 7 adds no network request, telemetry, scraping, OCR, browser automation, account, marketplace integration, payment flow, model download, neural inference, or cloud service. Magic Wand and Color Range are deterministic pixel comparisons; Refine uses classical smoothing, morphology, and local gradients and changes only mask coverage.
+
+Per-document selection sessions may be retained in the webview's local storage when they fit the documented bound. Large/noisy masks that exceed that storage ceiling remain in memory and should be exported explicitly. `.photoforge-mask.json`, grayscale PNG, workflow, and edited-image exports occur only through an explicit local file choice. Mask files contain coverage data and user-provided metadata but contain no source image pixels, source path, credentials, or executable content.
+
+The optional Ollama planner remains text-only and cannot see selections, masks, image pixels, or paths. Current planner capability metadata explicitly reports that selection planning is unsupported.
+
 ## Phase 6 professional workflow privacy
 
 Professional tools, histograms, metadata inspection, workflow recording, batch processing, workspace layouts, shortcuts, comparison, and export profiles operate entirely on this device. Workflows contain edit parameters only; they contain no image pixels. Workspace and shortcut settings use local WebView storage. Batch inputs, outputs, progress, failures, and logs stay in user-selected local folders and process memory.
@@ -11,6 +19,7 @@ PhotoForge is designed to work fully offline.
 - Images are decoded and processed locally on the user's device.
 - PhotoForge does not upload images or edit data.
 - The initial version has no analytics, telemetry, crash reporting, or remote logging.
+- The Windows WebView2 host is asked to disable browser background networking, without preventing a deliberate loopback Ollama action. WebView2 is an operating-system component and its required diagnostic/configuration traffic remains governed by Windows; see the packaged observation below.
 - Exported files are created only after the user explicitly chooses an output location.
 - Original image files are not modified by default, and export rejects the original's canonical path.
 - Interactive previews are local in-memory PNG data URLs; they are not sent to a service.
@@ -23,7 +32,7 @@ PhotoForge is designed to work fully offline.
 - Rule Planner requests are matched locally by fixed Rust rules. Ollama requests are sent only after an explicit user action to the configured loopback endpoint.
 - Remembered guided requests are optional, limited to 25 provider-tagged entries in local WebView storage, and cleared when prompt history is disabled. They contain no image pixels or generated analysis payload.
 
-The packaged application was observed with zero TCP connections during the Phase 1.1 startup/idle smoke test. That observation supports the source and CSP review; it is not a claim that Windows or WebView2 itself can never perform unrelated operating-system activity.
+The packaged application was observed with zero TCP connections during the Phase 1.1 startup/idle smoke test. On the Phase 7 validation machine, newer WebView2 151 instead opened two TLS connections from its browser-host process to Microsoft infrastructure despite the background-networking flag. PhotoForge made no application request and its Rust process opened no connection. [Microsoft documents](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy) that required WebView2 diagnostic collection follows Windows settings and is not fully controlled by the embedding application. This operating-system runtime observation is disclosed rather than described as application traffic or a zero-network guarantee.
 
 Development builds can print technical failures to local development tooling. User-facing errors contain concise messages rather than stack traces.
 

@@ -1,5 +1,13 @@
 # Performance
 
+## Phase 7 mask measurements
+
+The reproducible release-mode benchmark is `cargo run --manifest-path src-tauri/Cargo.toml --release --example mask_benchmark`. On the Phase 7 Windows validation machine (Intel Core i7-12850HX), representative results were 46.234 ms for a 6000×4000 rectangle, 3.405 ms for a 500-point polygon at 1920×1080, 50.095 ms for a 500-point brush stroke at 4000×3000, 68.496–69.875 ms for feather radii 4–64 at 4000×3000, and 115.462/116.348 ms for expand/contract radius 24 at 4000×3000. A worst-case contiguous Magic Wand pass over a 6000×4000 single-color fixture took 1,633.557 ms. Mask save/load at that size took 26.917/51.647 ms, and a masked 4000×3000 brightness operation took 167.739 ms.
+
+These are one-machine regression observations, not cross-machine guarantees. The benchmark's 24 MP mask is 24,000,000 bytes and its RGBA fixture is 96,000,000 bytes; it does not claim measured peak process memory. Cooperative cancellation was acknowledged in 0.994 ms in the benchmark cancellation case. See [phase-7-results.md](phase-7-results.md) for the complete table and test context.
+
+The production frontend contains 153 modules and bundles to 237.83 kB JavaScript and 55.72 kB CSS (74.09 kB and 10.24 kB gzip). Release artifacts grew by 5.05–5.99% over 0.6.0 without adding an npm or Cargo dependency; exact sizes and hashes are recorded in the Phase 7 results.
+
 ## Phase 6 design and measurements
 
 Batch processing uses 1–8 bounded workers, a 10,000-file discovery cap, one decoded image per active worker, cooperative cancellation, and per-output overwrite claims. Live histograms operate on the existing preview capped at 1600 pixels and are debounced behind a stale-request gate. Interactive source and preview buffers are reused.

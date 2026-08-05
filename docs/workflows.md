@@ -1,6 +1,6 @@
 # Workflows
 
-Workflows are reusable, local, typed edit pipelines introduced in PhotoForge 0.6.0. Recording a workflow copies the current operation list; it never stores image pixels or source paths.
+Workflows are reusable, local, typed edit pipelines introduced in PhotoForge 0.6.0 and extended with immutable mask snapshots in 0.7.0. Recording a workflow copies the current operation list; it never stores source image pixels or source paths.
 
 ## Library and editor
 
@@ -32,6 +32,29 @@ Exports use this envelope:
 }
 ```
 
-The Rust import boundary caps files at 2 MiB, validates the schema version, validates every operation and parameter, and rejects unknown operation types. Unknown envelope fields are ignored for forward compatibility, but unknown schema versions are rejected rather than guessed. Export uses a temporary sibling file followed by a rename.
+The Rust import boundary caps files at 64 MiB, validates the schema version, validates every operation and parameter, and rejects unknown operation types. The larger ceiling permits bounded embedded masks while remaining below the standalone mask engine's allocation ceiling. Unknown envelope fields are ignored for forward compatibility, but unknown schema versions are rejected rather than guessed. Export checks the serialized size and uses a temporary sibling file followed by a rename.
 
-Workflow JSON is data only. PhotoForge never evaluates scripts, loads plugins, follows paths from the workflow, or executes external programs.
+## Masked operations
+
+A Phase 7 workflow may wrap a mask-capable operation in a `masked` operation:
+
+```json
+{
+  "type": "masked",
+  "operation": { "type": "brightness", "value": 18 },
+  "mask": {
+    "version": 1,
+    "width": 2,
+    "height": 2,
+    "encoding": "base64_u8",
+    "data": "AP+A/w",
+    "checksum": "fnv1a64:d865707bf628386d"
+  },
+  "invert": false,
+  "mask_id": "subject"
+}
+```
+
+The embedded snapshot is immutable and self-contained, so replay is independent of the currently selected named mask. Import validates its dimensions, encoding, decompressed length, checksum, and wrapped operation. Nested masked operations and geometry-changing masked operations are rejected. Preview may resample a mask only when image and mask aspect ratios agree; replay fails closed for incompatible dimensions.
+
+Workflow JSON is data only. PhotoForge never evaluates scripts, loads plugins, follows paths from the workflow, or executes external programs. A mask snapshot is coverage data, not a source-image copy.

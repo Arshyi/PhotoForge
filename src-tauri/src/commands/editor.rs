@@ -28,6 +28,8 @@ pub async fn open_image(
     state.latest_preview_request.store(0, Ordering::Release);
     state.latest_analysis_request.store(0, Ordering::Release);
     state.latest_plan_request.store(0, Ordering::Release);
+    state.latest_mask_request.store(0, Ordering::Release);
+    state.mask_cancelled.store(true, Ordering::Release);
 
     let input_path = PathBuf::from(path);
     let loaded = match tauri::async_runtime::spawn_blocking(move || load_image(&input_path)).await {

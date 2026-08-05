@@ -2,7 +2,7 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 6 professional editing and workflow system. The current version is **0.6.0**.
+This repository contains the Phase 0 foundation through the Phase 7 professional selections and masking system. The current version is **0.7.0**.
 
 ## What works
 
@@ -31,6 +31,12 @@ This repository contains the Phase 0 foundation through the Phase 6 professional
 - A Diagnostics page for registered, loaded, unavailable, failed, and invalid components plus explicit local overhead measurement
 - Local-only model metadata discovery and bounded plugin-manifest validation; no model is loaded and no plugin code is executed
 - No telemetry, analytics, remote logging, Python runtime, cloud service, or mandatory AI model
+- Image-space rectangle, ellipse, freehand-lasso, polygon-lasso, brush, eraser, magic-wand, and color-range selections
+- Replace, Add, Subtract, and Intersect coverage composition with feathered 8-bit masks
+- Invert, feather, expand, contract, smooth, fill-holes, island cleanup, border, and classical edge-aware refinement operations
+- Global, inside-mask, and outside-mask application for deterministic pixel adjustments without changing existing global behavior
+- Named masks with stable identifiers, lock/visibility/reorder/load/replace/combine actions, bounded undo/redo, and local session restoration
+- Integrity-checked `.photoforge-mask.json` and grayscale PNG mask import/export, with bounded raw or run-length encoding
 
 ## Requirements
 
@@ -82,6 +88,7 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 9. Open **Settings → Components** to inspect or configure optional providers. Rule Planner and the Deterministic Engine remain the defaults. Ollama requires an already installed local model; PhotoForge never downloads one.
 10. Use **Test Connection** or **Refresh Models** explicitly before selecting an Ollama Planner Model. Generate Plan and Compare Planners are the only other actions that contact the configured loopback endpoint.
 11. Open **Settings → Local AI Privacy** to inspect the exact information boundary before enabling Ollama.
+12. Use **Selections & Masks** to choose a tool, compose an active selection, save named masks, and set new adjustments to Global, Inside selection, or Outside selection. Shift adds, Alt subtracts, and Shift+Alt intersects.
 
 ## Architecture and project notes
 
@@ -106,10 +113,13 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Workflows](docs/workflows.md)
 - [Batch processing](docs/batch-processing.md)
 - [Phase 6 results](docs/phase-6-results.md)
+- [Selections and masks](docs/selections-and-masks.md)
+- [Mask file format](docs/mask-file-format.md)
+- [Phase 7 results](docs/phase-7-results.md)
 
 ## Honest scope
 
-PhotoForge 0.6.0 adds professional curves, levels, geometry, color, inspection, workflow, batch, workspace, shortcut, comparison, metadata, and export-profile systems. Rule Planner remains the default, optional Ollama remains a local planning adapter only, and the Deterministic Engine remains the only component that changes pixels. PhotoForge does not install or download models, send images to Ollama, execute model-supplied code, call cloud providers, execute plugins, generate missing image content, or reconstruct factual details that were never captured. OpenAI, ONNX, Real-ESRGAN, and future adapters remain unavailable placeholders. OCR, neural restoration, super-resolution, inpainting, and generative editing remain outside this release.
+PhotoForge 0.7.0 adds local coverage masks and selective deterministic adjustments while preserving the Phase 6 editing and workflow system. Rule Planner remains the default, current planners truthfully report that selection planning is unavailable, optional Ollama remains a text-only local planning adapter, and the Deterministic Engine is the only component that changes pixels. PhotoForge does not install or download models, send images or masks to Ollama, execute model-supplied code, call cloud providers, execute plugins, generate missing image content, or reconstruct factual details that were never captured. Semantic selection, decontaminate-colors, layers, OCR, neural restoration, super-resolution, inpainting, and generative editing remain outside this release.
 
 ## License
 

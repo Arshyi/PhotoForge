@@ -1,5 +1,6 @@
 mod components;
 mod editor;
+mod mask;
 mod ollama;
 mod planner;
 mod professional;
@@ -10,6 +11,12 @@ pub use components::{
     select_restoration_engine, update_component_configuration, validate_plugin_manifest,
 };
 pub use editor::{analyze_image, export_image, open_image, render_preview};
+pub use mask::{
+    cancel_mask_operation, color_range_selection, compose_selection_masks, export_mask_file,
+    export_mask_png, import_mask_file, import_mask_png, inspect_selection_mask,
+    magic_wand_selection, rasterize_selection, refine_selection_mask, transform_selection_mask,
+    validate_mask_snapshot,
+};
 pub use ollama::{
     cancel_ollama_plan, compare_planners, generate_ollama_plan, get_ollama_diagnostics,
     refresh_ollama_models, test_ollama_connection, validate_ollama_json,
