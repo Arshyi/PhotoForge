@@ -1,9 +1,10 @@
 use super::bitmap::MaskBitmap;
 use super::geometry::Point;
+use super::progress::MaskWorkContext;
 use crate::error::AppError;
 use image::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 const MAX_COLOR_SAMPLES: usize = 32;
 
@@ -44,6 +45,20 @@ pub fn select(
     options: ColorRangeOptions,
     cancelled: Option<&AtomicBool>,
 ) -> Result<MaskBitmap, AppError> {
+    select_with_progress(
+        image,
+        sample_points,
+        options,
+        MaskWorkContext::cancellation_only(cancelled),
+    )
+}
+
+pub(crate) fn select_with_progress(
+    image: &RgbaImage,
+    sample_points: &[Point],
+    options: ColorRangeOptions,
+    context: MaskWorkContext<'_>,
+) -> Result<MaskBitmap, AppError> {
     options.validate()?;
     if sample_points.is_empty() || sample_points.len() > MAX_COLOR_SAMPLES {
         return Err(AppError::InvalidMask(format!(
@@ -68,9 +83,10 @@ pub fn select(
     }
 
     let mut mask = MaskBitmap::empty(image.width(), image.height())?;
+    let pixels = u64::from(image.width()) * u64::from(image.height());
     for (index, pixel) in image.pixels().enumerate() {
-        if index % 4_096 == 0 && cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err(AppError::MaskCancelled);
+        if index % 4_096 == 0 {
+            context.report("color_range_pixels", index as u64, pixels)?;
         }
         if pixel[3] == 0 {
             mask.coverage_mut()[index] = 0;
@@ -93,6 +109,7 @@ pub fn select(
         mask.coverage_mut()[index] =
             ((u16::from(coverage) * u16::from(pixel[3]) + 127) / 255) as u8;
     }
+    context.report("color_range_pixels", pixels, pixels)?;
     Ok(mask)
 }
 

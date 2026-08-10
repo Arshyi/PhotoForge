@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import ProfessionalWorkspace from './ProfessionalWorkspace.svelte';
 import type { HistogramChannels, ImageMetadata } from '../types/editor';
+import { createWorkflow, saveWorkflows } from '../utils/workflows';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -10,13 +11,13 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
 const bins = (): HistogramChannels => ({ red: Array(256).fill(1), green: Array(256).fill(1), blue: Array(256).fill(1), luminance: Array(256).fill(1), shadowClipping: 0, highlightClipping: 0, pixelCount: 256 });
 const metadata: ImageMetadata = { filename: 'photo.png', width: 100, height: 80, format: 'PNG', fileSize: 2048, colorSpace: 'sRGB', bitDepth: 8, hasAlpha: true, createdAt: '1Z', modifiedAt: '2Z', cameraModel: 'Test Camera', exifAvailable: true };
 
-function setup(oncommit = vi.fn()) {
+function setup(oncommit = vi.fn(), onmessage = vi.fn()) {
   return render(ProfessionalWorkspace, {
     documentId: 1,
     metadata,
     operations: [{ type: 'brightness', amount: 0.1 }],
     oncommit,
-    onmessage: vi.fn(),
+    onmessage,
     onviewchange: vi.fn()
   });
 }
@@ -70,6 +71,44 @@ describe('ProfessionalWorkspace', () => {
     expect(screen.getByLabelText('Search workflows')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Import JSON' })).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Export JSON' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('waits for asynchronous workflow replay without claiming premature success', async () => {
+    let resolveCommit: ((value: boolean) => void) | undefined;
+    const commit = vi.fn(() => new Promise<boolean>((resolve) => { resolveCommit = resolve; }));
+    const message = vi.fn();
+    saveWorkflows([createWorkflow('Async Flow', [{ type: 'brightness', amount: 0.2 }])]);
+    setup(commit, message);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
+    expect(commit).toHaveBeenCalledWith([{ type: 'brightness', amount: 0.2 }]);
+    expect(message).not.toHaveBeenCalled();
+    resolveCommit?.(true);
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    expect(message).not.toHaveBeenCalled();
+  });
+
+  it('reports asynchronous workflow replay failure', async () => {
+    const commit = vi.fn(async () => { throw new Error('geometry reconciliation failed'); });
+    const message = vi.fn();
+    saveWorkflows([createWorkflow('Failing Flow', [{ type: 'brightness', amount: 0.2 }])]);
+    setup(commit, message);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
+    await waitFor(() => expect(message).toHaveBeenCalledWith('geometry reconciliation failed', 'error'));
+  });
+
+  it('rejects malformed typed operation JSON without changing storage', async () => {
+    const message = vi.fn();
+    saveWorkflows([createWorkflow('Editable Flow', [{ type: 'brightness', amount: 0.2 }])]);
+    setup(vi.fn(), message);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByText('Editable Flow'));
+    const before = localStorage.getItem('photoforge.workflows.v1');
+    await fireEvent.input(screen.getByLabelText('Typed operation JSON'), { target: { value: '[{"type":"brightness","amount":99}]' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Validate & update' }));
+    expect(message).toHaveBeenCalledWith(expect.stringMatching(/Operation 1/), 'error');
+    expect(localStorage.getItem('photoforge.workflows.v1')).toBe(before);
   });
 
   it.each(['Input folder', 'Output folder', 'Workflow', 'Filename template', 'Export profile', 'Bounded workers'])('exposes batch field %s', async (label) => {

@@ -1,14 +1,26 @@
 # Architecture
 
-## Phase 7 selections and masks boundary
+## Phase 7 and 7.1 selections and masks boundary
 
-PhotoForge 0.7.0 adds selections as a separate, deterministic domain under `src-tauri/src/mask`. A mask is an 8-bit coverage bitmap with checked dimensions, bounded geometry, and explicit composition semantics. Rectangle, ellipse, polygon, freehand, brush, magic-wand, and color-range tools all produce the same representation. Feathering, morphology, cleanup, border creation, and classical edge refinement transform only coverage values; none reconstruct image content or invoke a model.
+PhotoForge 0.7.0 added selections as a separate, deterministic domain under `src-tauri/src/mask`; 0.7.1 completes its geometry, progress, preview, and session boundaries. A mask is an 8-bit coverage bitmap with checked dimensions, bounded geometry, and explicit composition semantics. Rectangle, ellipse, polygon, freehand, brush, magic-wand, and color-range tools all produce the same representation. Feathering, morphology, cleanup, border creation, and classical edge refinement transform only coverage values; none reconstruct image content or invoke a model.
 
-`EditOperation::Masked` embeds an immutable mask snapshot around one mask-capable edit. The processor renders that edit through the existing deterministic path and coverage-blends it with the unmodified input while preserving alpha. Geometry-changing operations cannot be wrapped, nested wrappers are rejected, and incompatible mask/image aspect ratios fail closed. Workflow replay therefore does not depend on mutable UI selection state.
+`EditOperation::Masked` embeds an immutable mask snapshot around one mask-capable edit. The processor renders that edit through the existing deterministic path and coverage-blends it with the unmodified input while preserving alpha. Geometry-changing operations cannot be wrapped and nested wrappers are rejected. Every embedded snapshot must exactly match its full-resolution pipeline stage. Preview preparation separately tracks full and bounded-preview stage dimensions and creates an ephemeral bilinear preview mask; the canonical workflow snapshot is never resized or rewritten by preview. Workflow replay therefore does not depend on mutable UI selection state.
 
-Tauri mask commands validate all dimensions, payloads, local paths, checksums, operation parameters, document identifiers, and request generations before work begins. Long operations use cooperative cancellation and stale-result checks. Mask files and grayscale PNGs use user-selected absolute local paths; the webview receives no general filesystem capability.
+Tauri mask commands validate all dimensions, payloads, local paths, checksums, operation parameters, document identifiers, and request generations before work begins. Long operations use cooperative cancellation, stale-result checks, and request-scoped work-unit progress. Mask files and grayscale PNGs use user-selected absolute local paths; the webview receives no general filesystem capability.
 
-The Svelte presentation owns interactive tool state, named masks, the active mask, bounded selection history, per-document local session persistence, modifier keys, and overlay rendering. `ImageStage` maps pointer coordinates through the displayed image bounds into full image space, so zoom and high-DPI display scaling do not change selection coordinates. Pixel generation and validation remain native Rust responsibilities.
+The Svelte presentation owns interactive tool state, named masks, the active mask, bounded selection history, per-document local session persistence, modifier keys, lazy thumbnails, progress presentation, and overlay rendering. `ImageStage` maps pointer coordinates through the displayed image bounds into current image-stage space, so zoom and high-DPI display scaling do not change selection coordinates. It resolves optional pen pressure into explicit diameter/opacity samples; Rust receives deterministic resolved values rather than live hardware state. Pixel generation and trust-boundary validation remain native Rust responsibilities.
+
+### Geometry transaction boundary
+
+`mask::transform` models crop, exact quarter-turn rotation, horizontal reflection, straighten, and perspective as a checked `GeometryChain`. The chain records dimensions for every stage. Exact crop/quarter-turn/reflection suffixes use discrete coverage mapping; general rebases map a destination pixel through the new chain to original image space, through the old chain to the source stage, then bilinearly sample once. Pixels outside the valid source domain become zero. Perspective inversion is iteration-bounded and rejects non-finite, folded, near-singular, or non-convergent mappings.
+
+The `remap_selection_masks` command accepts a bounded batch of keyed snapshots with explicit old/new stages. It validates all geometry, dimensions, key uniqueness, item count, aggregate allocation, cancellation, and work units before returning. The frontend reconciles every result key and performs one compound edit-history/selection-history commit. Active, named, and persistent embedded workflow masks therefore move together, and any missing item or stale document leaves both states unchanged.
+
+### Presentation caches and session migration
+
+Named-mask thumbnails are area-averaged grayscale coverage generated only when visible or idle. Their content key is checksum plus source/target dimensions. A shared LRU retains at most 96 entries and approximately 2 MiB; overlay coverage uses a separate bounded cache. Neither cache writes to disk or contacts a service.
+
+Selection-session schema 2 stores current-stage dimensions, the canonical geometry-operation list, and its fingerprint in addition to Phase 7 state. Loading validates every mask against that stage. The loader reads schema-2 first and can migrate a valid schema-1 Phase 7 record in memory with empty geometry and new settings at conservative defaults. It writes only schema 2 and rejects incompatible future or incoherent records rather than guessing.
 
 ## Phase 6 professional workflow boundary
 

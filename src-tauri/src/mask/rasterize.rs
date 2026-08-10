@@ -1,5 +1,5 @@
 use super::bitmap::MaskBitmap;
-use super::geometry::{simplify_path, Point, SelectionShape};
+use super::geometry::{simplify_path, Point, ResolvedBrushSample, SelectionShape};
 use crate::error::AppError;
 
 const SAMPLES: [(f32, f32); 16] = [
@@ -21,6 +21,12 @@ const SAMPLES: [(f32, f32); 16] = [
     (0.875, 0.875),
 ];
 
+// A brush stroke may contain up to 20,000 valid points or resolved samples.
+// Per-segment limits alone still permit billions of interpolated dabs, so cap
+// both interpolation overhead and conservative dab bounding-box pixel visits.
+const MAX_BRUSH_DABS: u64 = 1_000_000;
+const MAX_BRUSH_PIXEL_WORK: u64 = 128_000_000;
+
 pub fn rasterize(width: u32, height: u32, shape: &SelectionShape) -> Result<MaskBitmap, AppError> {
     shape.validate()?;
     match shape {
@@ -34,6 +40,9 @@ pub fn rasterize(width: u32, height: u32, shape: &SelectionShape) -> Result<Mask
             hardness,
             opacity,
         } => brush(width, height, points, *diameter, *hardness, *opacity),
+        SelectionShape::ResolvedBrush { samples, hardness } => {
+            resolved_brush(width, height, samples, *hardness)
+        }
     }
 }
 
@@ -174,18 +183,16 @@ fn brush(
     hardness: f32,
     opacity: f32,
 ) -> Result<MaskBitmap, AppError> {
+    let steps_by_segment = brush_plan(width, height, points, diameter)?;
     let mut mask = MaskBitmap::empty(width, height)?;
     let radius = diameter / 2.0;
-    let spacing = (diameter * 0.18).max(0.5);
     if points.len() == 1 {
         paint_dab(&mut mask, points[0], radius, hardness, opacity);
         return Ok(mask);
     }
-    for pair in points.windows(2) {
+    for (pair, &steps) in points.windows(2).zip(&steps_by_segment) {
         let dx = pair[1].x - pair[0].x;
         let dy = pair[1].y - pair[0].y;
-        let distance = dx.hypot(dy);
-        let steps = (distance / spacing).ceil().max(1.0) as usize;
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
             paint_dab(
@@ -201,6 +208,193 @@ fn brush(
         }
     }
     Ok(mask)
+}
+
+fn brush_plan(
+    width: u32,
+    height: u32,
+    points: &[Point],
+    diameter: f32,
+) -> Result<Vec<usize>, AppError> {
+    let mut aggregate_dabs = 0_u64;
+    let mut aggregate_pixel_work = 0_u64;
+    if points.len() == 1 {
+        add_brush_work(
+            width,
+            height,
+            1,
+            diameter,
+            &mut aggregate_dabs,
+            &mut aggregate_pixel_work,
+        )?;
+        return Ok(Vec::new());
+    }
+
+    let spacing = (diameter * 0.18).max(0.5);
+    let maximum_steps = 2.0 * (f64::from(width) + f64::from(height) + 4_096.0);
+    let mut steps_by_segment = Vec::with_capacity(points.len().saturating_sub(1));
+    for pair in points.windows(2) {
+        let distance = (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y);
+        let requested_steps = (distance / spacing).ceil().max(1.0);
+        if !requested_steps.is_finite() || f64::from(requested_steps) > maximum_steps {
+            return Err(AppError::InvalidMask(
+                "brush segment exceeds the bounded rasterization span".into(),
+            ));
+        }
+        let steps_u64 = requested_steps as u64;
+        add_brush_work(
+            width,
+            height,
+            steps_u64.saturating_add(1),
+            diameter,
+            &mut aggregate_dabs,
+            &mut aggregate_pixel_work,
+        )?;
+        let steps = usize::try_from(steps_u64)
+            .map_err(|_| AppError::InvalidMask("brush step count exceeds this platform".into()))?;
+        steps_by_segment.push(steps);
+    }
+    Ok(steps_by_segment)
+}
+
+fn resolved_brush(
+    width: u32,
+    height: u32,
+    samples: &[ResolvedBrushSample],
+    hardness: f32,
+) -> Result<MaskBitmap, AppError> {
+    let steps_by_segment = resolved_brush_plan(width, height, samples)?;
+    let mut mask = MaskBitmap::empty(width, height)?;
+    if samples.len() == 1 {
+        paint_resolved_dab(&mut mask, samples[0], hardness);
+        return Ok(mask);
+    }
+
+    for (pair, &steps) in samples.windows(2).zip(&steps_by_segment) {
+        let start = pair[0];
+        let end = pair[1];
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            paint_resolved_dab(
+                &mut mask,
+                ResolvedBrushSample {
+                    x: start.x + dx * t,
+                    y: start.y + dy * t,
+                    diameter: start.diameter + (end.diameter - start.diameter) * t,
+                    opacity: start.opacity + (end.opacity - start.opacity) * t,
+                },
+                hardness,
+            );
+        }
+    }
+    Ok(mask)
+}
+
+fn resolved_brush_plan(
+    width: u32,
+    height: u32,
+    samples: &[ResolvedBrushSample],
+) -> Result<Vec<usize>, AppError> {
+    let mut aggregate_dabs = 0_u64;
+    let mut aggregate_pixel_work = 0_u64;
+    if samples.len() == 1 {
+        add_brush_work(
+            width,
+            height,
+            1,
+            samples[0].diameter,
+            &mut aggregate_dabs,
+            &mut aggregate_pixel_work,
+        )?;
+        return Ok(Vec::new());
+    }
+
+    let mut steps_by_segment = Vec::with_capacity(samples.len().saturating_sub(1));
+    for pair in samples.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        let distance = (end.x - start.x).hypot(end.y - start.y);
+        if !distance.is_finite() {
+            return Err(AppError::InvalidMask(
+                "resolved brush segment length is invalid".into(),
+            ));
+        }
+        let spacing = (start.diameter.min(end.diameter) * 0.18).max(0.5);
+        let requested_steps = (f64::from(distance) / f64::from(spacing)).ceil().max(1.0);
+        let maximum_steps = 2.0 * (f64::from(width) + f64::from(height) + 4_096.0);
+        if !requested_steps.is_finite() || requested_steps > maximum_steps {
+            return Err(AppError::InvalidMask(
+                "resolved brush segment exceeds the bounded rasterization span".into(),
+            ));
+        }
+        let steps_u64 = requested_steps as u64;
+        add_brush_work(
+            width,
+            height,
+            steps_u64.saturating_add(1),
+            start.diameter.max(end.diameter),
+            &mut aggregate_dabs,
+            &mut aggregate_pixel_work,
+        )?;
+        let steps = usize::try_from(steps_u64).map_err(|_| {
+            AppError::InvalidMask("resolved brush step count exceeds this platform".into())
+        })?;
+        steps_by_segment.push(steps);
+    }
+    Ok(steps_by_segment)
+}
+
+fn add_brush_work(
+    width: u32,
+    height: u32,
+    dabs: u64,
+    maximum_diameter: f32,
+    aggregate_dabs: &mut u64,
+    aggregate_pixel_work: &mut u64,
+) -> Result<(), AppError> {
+    *aggregate_dabs = aggregate_dabs
+        .checked_add(dabs)
+        .ok_or_else(brush_work_error)?;
+    if *aggregate_dabs > MAX_BRUSH_DABS {
+        return Err(brush_work_error());
+    }
+
+    // paint_dab visits the clipped integer bounding box from radius + 1px
+    // padding. ceil(diameter) + 3 is a conservative maximum side length.
+    let maximum_side = maximum_diameter.ceil() as u64 + 3;
+    let bounding_width = u64::from(width).min(maximum_side);
+    let bounding_height = u64::from(height).min(maximum_side);
+    let pixels_per_dab = bounding_width
+        .checked_mul(bounding_height)
+        .ok_or_else(brush_work_error)?;
+    let added_work = pixels_per_dab
+        .checked_mul(dabs)
+        .ok_or_else(brush_work_error)?;
+    *aggregate_pixel_work = aggregate_pixel_work
+        .checked_add(added_work)
+        .ok_or_else(brush_work_error)?;
+    if *aggregate_pixel_work > MAX_BRUSH_PIXEL_WORK {
+        return Err(brush_work_error());
+    }
+    Ok(())
+}
+
+fn brush_work_error() -> AppError {
+    AppError::InvalidMask(format!(
+        "brush exceeds aggregate rasterization limits ({MAX_BRUSH_DABS} dabs or {MAX_BRUSH_PIXEL_WORK} conservative pixel visits)"
+    ))
+}
+
+fn paint_resolved_dab(mask: &mut MaskBitmap, sample: ResolvedBrushSample, hardness: f32) {
+    paint_dab(
+        mask,
+        sample.point(),
+        sample.diameter / 2.0,
+        hardness,
+        sample.opacity,
+    );
 }
 
 fn paint_dab(mask: &mut MaskBitmap, center: Point, radius: f32, hardness: f32, opacity: f32) {
@@ -302,5 +496,227 @@ mod tests {
         )
         .unwrap();
         assert!((5..95).all(|x| mask.get(x, 10) == 255));
+    }
+
+    #[test]
+    fn resolved_uniform_samples_match_legacy_brush_exactly() {
+        let points = vec![
+            Point { x: 5.5, y: 8.5 },
+            Point { x: 34.5, y: 12.5 },
+            Point { x: 58.5, y: 8.5 },
+        ];
+        let legacy = rasterize(
+            64,
+            24,
+            &SelectionShape::Brush {
+                points: points.clone(),
+                diameter: 10.0,
+                hardness: 0.65,
+                opacity: 0.7,
+            },
+        )
+        .unwrap();
+        let resolved = rasterize(
+            64,
+            24,
+            &SelectionShape::ResolvedBrush {
+                samples: points
+                    .into_iter()
+                    .map(|point| ResolvedBrushSample {
+                        x: point.x,
+                        y: point.y,
+                        diameter: 10.0,
+                        opacity: 0.7,
+                    })
+                    .collect(),
+                hardness: 0.65,
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved, legacy);
+    }
+
+    #[test]
+    fn resolved_brush_interpolates_size_and_opacity_conservatively() {
+        let mask = rasterize(
+            48,
+            32,
+            &SelectionShape::ResolvedBrush {
+                samples: vec![
+                    ResolvedBrushSample {
+                        x: 10.5,
+                        y: 15.5,
+                        diameter: 4.0,
+                        opacity: 0.25,
+                    },
+                    ResolvedBrushSample {
+                        x: 30.5,
+                        y: 15.5,
+                        diameter: 12.0,
+                        opacity: 1.0,
+                    },
+                ],
+                hardness: 1.0,
+            },
+        )
+        .unwrap();
+
+        assert!((64..=254).contains(&mask.get(10, 15)));
+        assert!((65..=254).contains(&mask.get(20, 15)));
+        assert_eq!(mask.get(30, 15), 255);
+        assert_eq!(mask.get(10, 20), 0);
+        assert_eq!(mask.get(30, 20), 255);
+
+        let conservative = rasterize(
+            48,
+            32,
+            &SelectionShape::ResolvedBrush {
+                samples: vec![
+                    ResolvedBrushSample {
+                        x: 10.5,
+                        y: 15.5,
+                        diameter: 4.0,
+                        opacity: 0.4,
+                    },
+                    ResolvedBrushSample {
+                        x: 30.5,
+                        y: 15.5,
+                        diameter: 12.0,
+                        opacity: 0.4,
+                    },
+                ],
+                hardness: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(conservative.coverage().iter().copied().max(), Some(102));
+    }
+
+    #[test]
+    fn resolved_single_point_uses_effective_values() {
+        let mask = rasterize(
+            24,
+            24,
+            &SelectionShape::ResolvedBrush {
+                samples: vec![ResolvedBrushSample {
+                    x: 10.5,
+                    y: 10.5,
+                    diameter: 6.0,
+                    opacity: 0.4,
+                }],
+                hardness: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(mask.get(10, 10), 102);
+        assert_eq!(mask.coverage().iter().copied().max(), Some(102));
+        assert_eq!(mask.get(0, 0), 0);
+    }
+
+    #[test]
+    fn resolved_variable_segment_has_no_centerline_gaps_and_replays_exactly() {
+        let shape = SelectionShape::ResolvedBrush {
+            samples: vec![
+                ResolvedBrushSample {
+                    x: 5.5,
+                    y: 10.5,
+                    diameter: 2.0,
+                    opacity: 1.0,
+                },
+                ResolvedBrushSample {
+                    x: 95.5,
+                    y: 10.5,
+                    diameter: 8.0,
+                    opacity: 1.0,
+                },
+            ],
+            hardness: 1.0,
+        };
+        let first = rasterize(104, 24, &shape).unwrap();
+        let replayed = rasterize(104, 24, &shape).unwrap();
+        assert_eq!(first, replayed);
+        assert!((5..=95).all(|x| first.get(x, 10) == 255));
+    }
+
+    #[test]
+    fn resolved_brush_rejects_aggregate_large_dab_pixel_work_before_painting() {
+        let samples: Vec<_> = (0..128)
+            .map(|index| ResolvedBrushSample {
+                x: if index % 2 == 0 { 0.0 } else { 4_095.0 },
+                y: 2_048.0,
+                diameter: 2_048.0,
+                opacity: 1.0,
+            })
+            .collect();
+        let shape = SelectionShape::ResolvedBrush {
+            samples: samples.clone(),
+            hardness: 0.5,
+        };
+        shape.validate().unwrap();
+        assert!(matches!(
+            resolved_brush_plan(4_096, 4_096, &samples),
+            Err(AppError::InvalidMask(message)) if message.contains("aggregate rasterization limits")
+        ));
+        assert!(matches!(
+            rasterize(4_096, 4_096, &shape),
+            Err(AppError::InvalidMask(message)) if message.contains("aggregate rasterization limits")
+        ));
+    }
+
+    #[test]
+    fn legacy_brush_rejects_finite_hostile_spans_before_step_conversion() {
+        let points = vec![Point { x: -1.0e30, y: 0.0 }, Point { x: 1.0e30, y: 0.0 }];
+        let shape = SelectionShape::Brush {
+            points: points.clone(),
+            diameter: 1.0,
+            hardness: 1.0,
+            opacity: 1.0,
+        };
+        shape.validate().unwrap();
+        assert!(matches!(
+            brush_plan(64, 64, &points, 1.0),
+            Err(AppError::InvalidMask(message)) if message.contains("bounded rasterization span")
+        ));
+        assert!(matches!(
+            rasterize(64, 64, &shape),
+            Err(AppError::InvalidMask(message)) if message.contains("bounded rasterization span")
+        ));
+    }
+
+    #[test]
+    fn resolved_brush_rejects_aggregate_dab_count_for_alternating_far_points() {
+        let samples: Vec<_> = (0..128)
+            .map(|index| ResolvedBrushSample {
+                x: if index % 2 == 0 { 0.0 } else { 4_095.0 },
+                y: 0.5,
+                diameter: 1.0,
+                opacity: 0.5,
+            })
+            .collect();
+        assert!(matches!(
+            resolved_brush_plan(4_096, 1, &samples),
+            Err(AppError::InvalidMask(message)) if message.contains("aggregate rasterization limits")
+        ));
+    }
+
+    #[test]
+    fn resolved_brush_aggregate_caps_preserve_normal_deterministic_strokes() {
+        let samples: Vec<_> = (0..100)
+            .map(|index| ResolvedBrushSample {
+                x: 4.5 + index as f32 * 4.0,
+                y: 32.5 + (index % 3) as f32,
+                diameter: 24.0,
+                opacity: 0.75,
+            })
+            .collect();
+        let shape = SelectionShape::ResolvedBrush {
+            samples: samples.clone(),
+            hardness: 0.7,
+        };
+        assert_eq!(resolved_brush_plan(420, 72, &samples).unwrap().len(), 99);
+        let first = rasterize(420, 72, &shape).unwrap();
+        let replayed = rasterize(420, 72, &shape).unwrap();
+        assert_eq!(first, replayed);
+        assert!(first.coverage().contains(&191));
     }
 }

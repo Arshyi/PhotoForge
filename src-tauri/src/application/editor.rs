@@ -1,5 +1,6 @@
 use crate::domain::{BatchStatus, ImageQualityAnalysis, OllamaDiagnostics};
 use crate::infrastructure::LoadedImage;
+use crate::mask::SharedMaskProgress;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,7 @@ pub struct AppState {
     pub batch_status: Arc<Mutex<BatchStatus>>,
     pub batch_cancelled: Arc<AtomicBool>,
     pub mask_cancelled: Arc<AtomicBool>,
+    pub mask_progress: SharedMaskProgress,
 }
 
 impl Default for AppState {
@@ -57,6 +59,7 @@ impl Default for AppState {
             batch_status: Arc::new(Mutex::new(BatchStatus::default())),
             batch_cancelled: Arc::new(AtomicBool::new(false)),
             mask_cancelled: Arc::new(AtomicBool::new(false)),
+            mask_progress: Arc::new(Mutex::new(None)),
         }
     }
 }

@@ -2,7 +2,7 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 7 professional selections and masking system. The current version is **0.7.0**.
+This repository contains the Phase 0 foundation through the completed and hardened Phase 7 professional selections and masking system. The current version is **0.7.1**.
 
 ## What works
 
@@ -37,6 +37,8 @@ This repository contains the Phase 0 foundation through the Phase 7 professional
 - Global, inside-mask, and outside-mask application for deterministic pixel adjustments without changing existing global behavior
 - Named masks with stable identifiers, lock/visibility/reorder/load/replace/combine actions, bounded undo/redo, and local session restoration
 - Integrity-checked `.photoforge-mask.json` and grayscale PNG mask import/export, with bounded raw or run-length encoding
+- Transactional active, named, and embedded workflow-mask remapping through crop, quarter-turn rotation, horizontal reflection, straighten, and perspective operations
+- Real lazy grayscale mask thumbnails, visible named-mask overlays, delayed numerical progress, optional pen pressure, and a dedicated preview-only Refine Selection dialog
 
 ## Requirements
 
@@ -60,7 +62,7 @@ The Vite-only UI can be opened with `npm run dev`, but native image open, proces
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run check
 npm run test
@@ -116,10 +118,11 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Selections and masks](docs/selections-and-masks.md)
 - [Mask file format](docs/mask-file-format.md)
 - [Phase 7 results](docs/phase-7-results.md)
+- [Phase 7.1 results](docs/phase-7.1-results.md)
 
 ## Honest scope
 
-PhotoForge 0.7.0 adds local coverage masks and selective deterministic adjustments while preserving the Phase 6 editing and workflow system. Rule Planner remains the default, current planners truthfully report that selection planning is unavailable, optional Ollama remains a text-only local planning adapter, and the Deterministic Engine is the only component that changes pixels. PhotoForge does not install or download models, send images or masks to Ollama, execute model-supplied code, call cloud providers, execute plugins, generate missing image content, or reconstruct factual details that were never captured. Semantic selection, decontaminate-colors, layers, OCR, neural restoration, super-resolution, inpainting, and generative editing remain outside this release.
+PhotoForge 0.7.1 completes and hardens the local Phase 7 coverage-mask system while preserving the Phase 6 editing and workflow boundary. Rule Planner remains the default, current planners truthfully report that selection planning is unavailable, optional Ollama remains a text-only local planning adapter, and the Deterministic Engine is the only component that changes pixels. PhotoForge does not install or download models, send images or masks to Ollama, execute model-supplied code, call cloud providers, execute plugins, generate missing image content, or reconstruct factual details that were never captured. Semantic selection, Decontaminate Colors, layers, OCR, neural restoration, super-resolution, inpainting, and generative editing remain outside this release.
 
 ## License
 

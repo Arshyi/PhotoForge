@@ -22,6 +22,47 @@ impl Point {
     }
 }
 
+/// One fully resolved brush input sample.
+///
+/// Live hardware pressure is intentionally not part of this schema. Callers
+/// resolve any optional input-device pressure into the effective diameter and
+/// opacity before crossing the deterministic mask boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedBrushSample {
+    pub x: f32,
+    pub y: f32,
+    pub diameter: f32,
+    pub opacity: f32,
+}
+
+impl ResolvedBrushSample {
+    pub fn validate(self) -> Result<(), AppError> {
+        Point {
+            x: self.x,
+            y: self.y,
+        }
+        .validate()?;
+        if !self.diameter.is_finite()
+            || !self.opacity.is_finite()
+            || !(1.0..=2_048.0).contains(&self.diameter)
+            || !(0.0..=1.0).contains(&self.opacity)
+        {
+            return Err(AppError::InvalidMask(
+                "resolved brush diameter or opacity is invalid".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn point(self) -> Point {
+        Point {
+            x: self.x,
+            y: self.y,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SelectionShape {
@@ -44,6 +85,10 @@ pub enum SelectionShape {
         diameter: f32,
         hardness: f32,
         opacity: f32,
+    },
+    ResolvedBrush {
+        samples: Vec<ResolvedBrushSample>,
+        hardness: f32,
     },
 }
 
@@ -81,6 +126,19 @@ impl SelectionShape {
                         "brush diameter, hardness, or opacity is invalid".into(),
                     ));
                 }
+            }
+            Self::ResolvedBrush { samples, hardness } => {
+                if samples.is_empty() || samples.len() > MAX_PATH_POINTS {
+                    return Err(AppError::InvalidMask(format!(
+                        "resolved brush paths require 1 to {MAX_PATH_POINTS} samples"
+                    )));
+                }
+                if !hardness.is_finite() || !(0.0..=1.0).contains(hardness) {
+                    return Err(AppError::InvalidMask(
+                        "resolved brush hardness is invalid".into(),
+                    ));
+                }
+                samples.iter().try_for_each(|sample| sample.validate())?;
             }
         }
         Ok(())
@@ -139,5 +197,89 @@ mod tests {
             Point { x: 5.0, y: 5.0 },
         ];
         assert_eq!(simplify_path(&points, 1.0), vec![points[0], points[2]]);
+    }
+
+    #[test]
+    fn resolved_brush_rejects_malformed_samples_and_raw_pressure() {
+        let valid = ResolvedBrushSample {
+            x: 1.0,
+            y: 2.0,
+            diameter: 24.0,
+            opacity: 0.5,
+        };
+        for sample in [
+            ResolvedBrushSample {
+                x: f32::NAN,
+                ..valid
+            },
+            ResolvedBrushSample {
+                y: f32::INFINITY,
+                ..valid
+            },
+            ResolvedBrushSample {
+                diameter: 0.99,
+                ..valid
+            },
+            ResolvedBrushSample {
+                diameter: 2_048.01,
+                ..valid
+            },
+            ResolvedBrushSample {
+                opacity: -0.01,
+                ..valid
+            },
+            ResolvedBrushSample {
+                opacity: 1.01,
+                ..valid
+            },
+        ] {
+            assert!(sample.validate().is_err());
+        }
+
+        assert!(SelectionShape::ResolvedBrush {
+            samples: Vec::new(),
+            hardness: 0.5,
+        }
+        .validate()
+        .is_err());
+        assert!(SelectionShape::ResolvedBrush {
+            samples: vec![valid],
+            hardness: f32::NAN,
+        }
+        .validate()
+        .is_err());
+        assert!(SelectionShape::ResolvedBrush {
+            samples: vec![valid; MAX_PATH_POINTS + 1],
+            hardness: 0.5,
+        }
+        .validate()
+        .is_err());
+
+        let raw_pressure = r#"{
+            "type":"resolved_brush",
+            "samples":[{"x":1.0,"y":2.0,"diameter":24.0,"opacity":0.5,"pressure":0.7}],
+            "hardness":0.5
+        }"#;
+        assert!(serde_json::from_str::<SelectionShape>(raw_pressure).is_err());
+    }
+
+    #[test]
+    fn resolved_brush_round_trip_persists_only_effective_values() {
+        let shape = SelectionShape::ResolvedBrush {
+            samples: vec![ResolvedBrushSample {
+                x: 4.0,
+                y: 5.0,
+                diameter: 12.0,
+                opacity: 0.75,
+            }],
+            hardness: 0.6,
+        };
+        let json = serde_json::to_string(&shape).unwrap();
+        assert!(json.contains("resolved_brush"));
+        assert!(!json.contains("pressure"));
+        assert_eq!(
+            serde_json::from_str::<SelectionShape>(&json).unwrap(),
+            shape
+        );
     }
 }

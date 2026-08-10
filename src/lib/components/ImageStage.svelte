@@ -1,10 +1,16 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { drawMaskOverlay } from '../selections/overlays';
+  import { drawMaskOverlays } from '../selections/overlays';
+  import {
+    resolveBrushSample,
+    shouldAppendPointerUpSample,
+    type PressureSettings
+  } from '../selections/pressure';
   import type {
     MaskSnapshot,
     OverlaySettings,
     Point,
+    ResolvedBrushSample,
     SelectionGesture,
     SelectionTool
   } from '../selections/types';
@@ -27,6 +33,7 @@
   export let imageHeight = 0;
   export let selectionTool: SelectionTool = 'none';
   export let activeMask: MaskSnapshot | null = null;
+  export let visibleMasks: MaskSnapshot[] = [];
   export let overlaySettings: OverlaySettings = {
     visible: false,
     mode: 'color',
@@ -34,6 +41,12 @@
     color: '#ef5b5b'
   };
   export let brushDiameter = 48;
+  export let brushOpacity = 1;
+  export let pressureEnabled = false;
+  export let pressureAffectsSize = true;
+  export let pressureAffectsOpacity = false;
+  export let pressureMinSizeFactor = 0.35;
+  export let pressureMinOpacityFactor = 0.25;
   export let fixedAspect = false;
   export let fromCenter = false;
   export let onselectiongesture: (gesture: SelectionGesture) => void = () => undefined;
@@ -44,16 +57,27 @@
   let interactionLayer: HTMLButtonElement;
   let dragging = false;
   let dragPoints: Point[] = [];
+  let dragBrushSamples: ResolvedBrushSample[] = [];
+  let activeGestureTool: SelectionTool = 'none';
   let polygonPoints: Point[] = [];
   let hoverPoint: Point | null = null;
+  let hoverDiameter = brushDiameter;
   let gestureShift = false;
   let gestureAlt = false;
   let antFrame = 0;
   let antTimer: ReturnType<typeof setInterval> | undefined;
 
-  $: overlayKey = `${previewUrl}:${activeMask?.checksum ?? ''}:${JSON.stringify(overlaySettings)}:${antFrame}`;
+  $: overlayKey = `${previewUrl}:${activeMask?.checksum ?? ''}:${visibleMasks.map((mask) => mask.checksum).join(',')}:${JSON.stringify(overlaySettings)}:${antFrame}`;
   $: if (overlayKey && overlayCanvas && processedImage) redrawOverlay();
   $: if (selectionTool !== 'polygon' && polygonPoints.length) polygonPoints = [];
+  $: if (dragging && activeGestureTool !== selectionTool) cancelGesture();
+  $: pressureSettings = {
+    enabled: pressureEnabled,
+    affectsSize: pressureAffectsSize,
+    affectsOpacity: pressureAffectsOpacity,
+    minimumSizeFactor: pressureMinSizeFactor,
+    minimumOpacityFactor: pressureMinOpacityFactor
+  } satisfies PressureSettings;
   $: previewBounds = dragPoints.length >= 2 ? selectionBounds(dragPoints[0], dragPoints.at(-1) as Point) : null;
 
   onMount(() => {
@@ -69,9 +93,12 @@
   function redrawOverlay() {
     if (!processedImage?.naturalWidth || !overlayCanvas) return;
     try {
-      drawMaskOverlay(
+      drawMaskOverlays(
         overlayCanvas,
-        activeMask,
+        [
+          ...(activeMask ? [activeMask] : []),
+          ...visibleMasks.filter((mask) => mask.checksum !== activeMask?.checksum)
+        ],
         overlaySettings,
         processedImage.naturalWidth,
         processedImage.naturalHeight,
@@ -83,12 +110,35 @@
     }
   }
 
-  function imagePoint(event: PointerEvent | MouseEvent): Point {
+  function imagePoint(event: PointerEvent | MouseEvent): Point | null {
     const bounds = interactionLayer.getBoundingClientRect();
+    if (
+      !Number.isFinite(bounds.left) ||
+      !Number.isFinite(bounds.top) ||
+      !Number.isFinite(bounds.width) ||
+      !Number.isFinite(bounds.height) ||
+      bounds.width <= 0 ||
+      bounds.height <= 0 ||
+      !Number.isFinite(event.clientX) ||
+      !Number.isFinite(event.clientY) ||
+      !Number.isFinite(imageWidth) ||
+      !Number.isFinite(imageHeight) ||
+      imageWidth <= 0 ||
+      imageHeight <= 0
+    ) return null;
     return {
       x: Math.max(0, Math.min(imageWidth, ((event.clientX - bounds.left) / bounds.width) * imageWidth)),
       y: Math.max(0, Math.min(imageHeight, ((event.clientY - bounds.top) / bounds.height) * imageHeight))
     };
+  }
+
+  function brushSample(event: PointerEvent, point: Point): ResolvedBrushSample {
+    return resolveBrushSample(point, event, brushDiameter, brushOpacity, pressureSettings);
+  }
+
+  function coalescedEvents(event: PointerEvent): PointerEvent[] {
+    const values = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [];
+    return values.length ? values : [event];
   }
 
   function handlePointerDown(event: PointerEvent) {
@@ -96,7 +146,9 @@
     event.preventDefault();
     interactionLayer.focus();
     const point = imagePoint(event);
+    if (!point) return;
     hoverPoint = point;
+    hoverDiameter = brushSample(event, point).diameter;
     gestureShift = event.shiftKey;
     gestureAlt = event.altKey;
     if (selectionTool === 'magic_wand' || selectionTool === 'color_range') {
@@ -104,22 +156,33 @@
       return;
     }
     dragging = true;
+    activeGestureTool = selectionTool;
     dragPoints = [point];
+    dragBrushSamples = selectionTool === 'brush' || selectionTool === 'eraser' ? [brushSample(event, point)] : [];
     interactionLayer.setPointerCapture(event.pointerId);
   }
 
   function handlePointerMove(event: PointerEvent) {
     if (!imageWidth || !imageHeight) return;
     const point = imagePoint(event);
+    if (!point) return;
     hoverPoint = point;
+    hoverDiameter = brushSample(event, point).diameter;
     if (!dragging) return;
     if (selectionTool === 'rectangle' || selectionTool === 'ellipse') {
       dragPoints = [dragPoints[0], point];
     } else {
-      const previous = dragPoints.at(-1) as Point;
-      const minimum = Math.max(0.35, selectionTool === 'brush' || selectionTool === 'eraser' ? brushDiameter * 0.04 : 0.75);
-      if (Math.hypot(point.x - previous.x, point.y - previous.y) >= minimum) {
-        dragPoints = [...dragPoints, point];
+      for (const pointerEvent of coalescedEvents(event)) {
+        const candidate = imagePoint(pointerEvent);
+        if (!candidate) continue;
+        const previous = dragPoints.at(-1) as Point;
+        const minimum = Math.max(0.35, selectionTool === 'brush' || selectionTool === 'eraser' ? brushDiameter * 0.04 : 0.75);
+        if (Math.hypot(candidate.x - previous.x, candidate.y - previous.y) >= minimum) {
+          dragPoints = [...dragPoints, candidate];
+          if (selectionTool === 'brush' || selectionTool === 'eraser') {
+            dragBrushSamples = [...dragBrushSamples, brushSample(pointerEvent, candidate)];
+          }
+        }
       }
     }
   }
@@ -127,17 +190,35 @@
   function handlePointerUp(event: PointerEvent) {
     if (!dragging) return;
     const point = imagePoint(event);
-    const points =
-      selectionTool === 'rectangle' || selectionTool === 'ellipse'
+    if (!point) {
+      cancelGesture();
+      return;
+    }
+    const gestureTool = activeGestureTool;
+    let points =
+      gestureTool === 'rectangle' || gestureTool === 'ellipse'
         ? pointsFromBounds(selectionBounds(dragPoints[0], point))
-        : [...dragPoints, point];
+        : [...dragPoints];
+    let resolvedBrushSamples = [...dragBrushSamples];
+    if (gestureTool !== 'rectangle' && gestureTool !== 'ellipse') {
+      const previous = points.at(-1);
+      const distinct = !previous || Math.hypot(point.x - previous.x, point.y - previous.y) > 0.001;
+      const paintTool = gestureTool === 'brush' || gestureTool === 'eraser';
+      if (distinct && (!paintTool || shouldAppendPointerUpSample(event, pressureSettings, resolvedBrushSamples.length))) {
+        points = [...points, point];
+        if (paintTool) resolvedBrushSamples = [...resolvedBrushSamples, brushSample(event, point)];
+      }
+    }
     dragging = false;
     dragPoints = [];
-    interactionLayer.releasePointerCapture(event.pointerId);
-    if (points.length >= (selectionTool === 'freehand' ? 3 : 1)) {
+    dragBrushSamples = [];
+    activeGestureTool = 'none';
+    try { interactionLayer.releasePointerCapture(event.pointerId); } catch { /* capture may already be lost */ }
+    if (points.length >= (gestureTool === 'freehand' ? 3 : 1)) {
       onselectiongesture({
-        tool: selectionTool,
+        tool: gestureTool,
         points,
+        ...((gestureTool === 'brush' || gestureTool === 'eraser') ? { resolvedBrushSamples } : {}),
         shiftKey: gestureShift || event.shiftKey,
         altKey: gestureAlt || event.altKey
       });
@@ -160,7 +241,8 @@
       }
       return;
     }
-    polygonPoints = [...polygonPoints, imagePoint(event)];
+    const point = imagePoint(event);
+    if (point) polygonPoints = [...polygonPoints, point];
   }
 
   function handleSelectionKey(event: KeyboardEvent) {
@@ -185,8 +267,14 @@
   function cancelGesture() {
     dragging = false;
     dragPoints = [];
+    dragBrushSamples = [];
+    activeGestureTool = 'none';
     polygonPoints = [];
     onselectioncancel();
+  }
+
+  function clearHover() {
+    if (!dragging) hoverPoint = null;
   }
 
   function selectionBounds(start: Point, end: Point): { left: number; top: number; right: number; bottom: number } {
@@ -258,6 +346,7 @@
               on:pointermove={handlePointerMove}
               on:pointerup={handlePointerUp}
               on:pointercancel={cancelGesture}
+              on:pointerleave={clearHover}
               on:click={handlePolygonClick}
               on:keydown={handleSelectionKey}
             >
@@ -274,7 +363,7 @@
                   {#each polygonPoints as point}<circle class="polygon-node" cx={point.x} cy={point.y} r={Math.max(2, imageWidth / 500)}></circle>{/each}
                 {/if}
                 {#if hoverPoint && (selectionTool === 'brush' || selectionTool === 'eraser')}
-                  <circle class="brush-cursor" cx={hoverPoint.x} cy={hoverPoint.y} r={brushDiameter / 2}></circle>
+                  <circle class="brush-cursor" cx={hoverPoint.x} cy={hoverPoint.y} r={hoverDiameter / 2}></circle>
                 {/if}
               </svg>
             </button>

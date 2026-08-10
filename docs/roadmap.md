@@ -14,6 +14,16 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Versioned `.photoforge-mask.json` plus grayscale PNG interchange, checksums, decompression bounds, cancellation, stale-result protection, and local-path enforcement
 - No AI, semantic selection, OCR, cloud service, marketplace, account, or payment dependency
 
+## Phase 7.1 — Phase 7 completion and hardening (complete)
+
+- Transactional active, named, and embedded workflow-mask remapping for crop, exact rotation, horizontal reflection, straighten, and perspective
+- Lazy real-coverage grayscale thumbnails, visible named-mask overlays, bounded caches, and stricter full-resolution stage alignment
+- Work-unit numerical progress with delayed display, stale-request filtering, cooperative cancelling state, and terminal cleanup
+- Optional pen pressure resolved into deterministic brush samples, disabled by default with unchanged mouse behavior
+- Dedicated preview-only Refine Selection comparison dialog with split/toggle and four background modes
+- Versioned selection-session schema 2 with read-only Phase 7 migration; standalone mask and workflow file schemas remain compatible
+- Decontaminate Colors remains unshipped because the reviewed refinement contract changes coverage only
+
 ## Phase 0 — Foundation (complete)
 
 - Tauri 2, Rust, Svelte 5, TypeScript, and Vite project

@@ -55,6 +55,10 @@ A Phase 7 workflow may wrap a mask-capable operation in a `masked` operation:
 }
 ```
 
-The embedded snapshot is immutable and self-contained, so replay is independent of the currently selected named mask. Import validates its dimensions, encoding, decompressed length, checksum, and wrapped operation. Nested masked operations and geometry-changing masked operations are rejected. Preview may resample a mask only when image and mask aspect ratios agree; replay fails closed for incompatible dimensions.
+The embedded snapshot is immutable and self-contained, so replay is independent of the currently selected named mask. Import validates its dimensions, encoding, decompressed length, checksum, and wrapped operation. Nested masked operations and geometry-changing masked operations are rejected. Version 0.7.1 requires each snapshot to match its exact full-resolution pipeline stage. Preview alone creates an ephemeral bilinear copy at the corresponding bounded-preview stage; the stored workflow is not modified.
+
+When the current edit pipeline changes geometry, 0.7.1 identifies persistent embedded masked operations by semantic operation signature and stage. Their snapshots participate in the same all-or-error geometry transaction as active and named masks. A crop, quarter-turn rotation, horizontal reflection, straighten, or perspective inserted before a masked adjustment therefore remaps that immutable coverage to its new stage before the edit is committed. If a snapshot cannot be reconciled, a transform is invalid, the document changes, or any result is missing, the whole geometry commit fails closed.
+
+Workflow envelope schema remains version 1. Phase 6 global workflows and Phase 7 masked workflows require no file migration, and loading does not rewrite them. Unsupported future envelope versions, stale/malformed embedded snapshots, and incompatible stage dimensions are rejected rather than silently applying an adjustment globally.
 
 Workflow JSON is data only. PhotoForge never evaluates scripts, loads plugins, follows paths from the workflow, or executes external programs. A mask snapshot is coverage data, not a source-image copy.

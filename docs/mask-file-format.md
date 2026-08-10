@@ -51,3 +51,9 @@ Runs follow row-major order and may cross row boundaries. Encoders select RLE on
 ## Grayscale PNG interchange
 
 PhotoForge also imports and exports grayscale PNG masks. PNG intensity maps directly to coverage: black is `0`, white is `255`, and intermediate values remain partial. Dimensions are inspected and bounded before decode. Other formats are rejected for mask interchange.
+
+## Version 0.7.1 compatibility
+
+PhotoForge 0.7.1 does not change the standalone mask format: JSON masks and their embedded snapshots remain version 1, and Phase 7 files are loaded without rewriting them. A mask file describes coverage at one image stage; it intentionally does not contain a geometry pipeline or source-image pixels. Import therefore requires the mask dimensions to match the current stage. Once accepted into a document, subsequent supported geometry edits remap that in-memory mask transactionally; a later export writes the remapped coverage and new dimensions as another version-1 file.
+
+The 0.7.1 selection-session schema is separate from this interchange format. Session schema 2 adds current-stage dimensions and a canonical geometry fingerprint so restored masks can be checked against the edit pipeline. This does not alter, wrap, or migrate `.photoforge-mask.json` files.

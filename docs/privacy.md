@@ -1,10 +1,12 @@
 # Privacy
 
-## Phase 7 selections and masks
+## Phase 7 and 7.1 selections and masks
 
 Selection geometry, mask coverage, named-mask state, refinement, previews, import/export, and masked edits remain on this device. Phase 7 adds no network request, telemetry, scraping, OCR, browser automation, account, marketplace integration, payment flow, model download, neural inference, or cloud service. Magic Wand and Color Range are deterministic pixel comparisons; Refine uses classical smoothing, morphology, and local gradients and changes only mask coverage.
 
-Per-document selection sessions may be retained in the webview's local storage when they fit the documented bound. Large/noisy masks that exceed that storage ceiling remain in memory and should be exported explicitly. `.photoforge-mask.json`, grayscale PNG, workflow, and edited-image exports occur only through an explicit local file choice. Mask files contain coverage data and user-provided metadata but contain no source image pixels, source path, credentials, or executable content.
+Phase 7.1 geometry remapping, coverage thumbnails, numerical progress, resolved pen-pressure samples, and the dedicated Refine dialog remain local as well. Thumbnails and refine comparisons are generated in memory from mask coverage and local preview data URLs; their caches are bounded and perform no disk writes or network requests. Pen pressure is reduced to explicit numeric brush diameter/opacity samples before history or replay. Decontaminate Colors is not shipped, so Refine still changes only mask coverage and never rewrites image-edge colors.
+
+Per-document selection sessions may be retained in the webview's local storage when they fit the documented bound. Their current storage key hashes the normalized source path together with original image dimensions and does not contain the plaintext path or a source-pixel/content hash. Session schema 2 additionally retains current-stage dimensions, geometry operations, and a non-secret integrity fingerprint; it can read a valid Phase 7 schema-1 session and the older filename-and-dimensions key without rewriting either fallback. Large/noisy masks that exceed that storage ceiling remain in memory and should be exported explicitly. `.photoforge-mask.json`, grayscale PNG, workflow, and edited-image exports occur only through an explicit local file choice. Mask files contain coverage data and user-provided metadata but contain no source image pixels, source path, credentials, or executable content.
 
 The optional Ollama planner remains text-only and cannot see selections, masks, image pixels, or paths. Current planner capability metadata explicitly reports that selection planning is unsupported.
 

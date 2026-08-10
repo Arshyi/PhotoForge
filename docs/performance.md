@@ -8,6 +8,12 @@ These are one-machine regression observations, not cross-machine guarantees. The
 
 The production frontend contains 153 modules and bundles to 237.83 kB JavaScript and 55.72 kB CSS (74.09 kB and 10.24 kB gzip). Release artifacts grew by 5.05–5.99% over 0.6.0 without adding an npm or Cargo dependency; exact sizes and hashes are recorded in the Phase 7 results.
 
+## Phase 7.1 mask measurements
+
+Version 0.7.1 extends the reproducible release benchmark across 1920×1080, 4000×3000, and 6000×4000 fixtures. It includes rectangle, freehand, a 500-point polygon, full-image Magic Wand, two feather radii, morphology, refinement, thumbnail generation, crop/quarter-turn/straighten/perspective remaps, JSON and PNG interchange, masked export, cancellation acknowledgement, and owned-buffer observations. Confirmed release figures are recorded in [phase-7.1-results.md](phase-7.1-results.md); historical 0.7.0 figures above remain unchanged.
+
+The 0.7.1 thumbnail cache retains at most 96 rendered thumbnails and approximately 2 MiB. The output uses area averaging and never recalculates the image-processing pipeline. Geometry batches cap their item count and aggregate pixel allocation, and their general transform path bilinearly samples the destination coverage once. The numerical progress UI is delayed 180 ms so short operations do not add visual churn.
+
 ## Phase 6 design and measurements
 
 Batch processing uses 1–8 bounded workers, a 10,000-file discovery cap, one decoded image per active worker, cooperative cancellation, and per-output overwrite claims. Live histograms operate on the existing preview capped at 1600 pixels and are debounced behind a stale-request gate. Interactive source and preview buffers are reused.

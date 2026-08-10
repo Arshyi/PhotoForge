@@ -1,5 +1,18 @@
 import type { MaskSnapshot, OverlaySettings } from './types';
 
+const MAX_OVERLAY_CACHE_ENTRIES = 12;
+const MAX_OVERLAY_CACHE_BYTES = 64 * 1024 * 1024;
+const MAX_VISIBLE_MASKS = 100;
+const MAX_MASK_PIXELS = 100_000_000;
+
+interface CoverageEntry {
+  coverage: Uint8Array;
+  bytes: number;
+}
+
+const coverageCache = new Map<string, CoverageEntry>();
+let coverageCacheBytes = 0;
+
 export function decodeCoverage(mask: MaskSnapshot): Uint8Array {
   if (!['base64_u8', 'base64_rle_u8'].includes(mask.encoding)) {
     throw new Error(`Unsupported mask encoding: ${mask.encoding}`);
@@ -35,18 +48,63 @@ export function overlayPixels(
   outputHeight = mask.height,
   animationFrame = 0
 ): Uint8ClampedArray {
-  const coverage = decodeCoverage(mask);
+  return overlayPixelsFromCoverage(
+    cachedCoverage([mask]),
+    mask.width,
+    mask.height,
+    settings,
+    outputWidth,
+    outputHeight,
+    animationFrame
+  );
+}
+
+export function overlayPixelsForMasks(
+  masks: MaskSnapshot[],
+  settings: OverlaySettings,
+  outputWidth: number,
+  outputHeight: number,
+  animationFrame = 0
+): Uint8ClampedArray {
+  if (!masks.length) return new Uint8ClampedArray(outputWidth * outputHeight * 4);
+  if (masks.length > MAX_VISIBLE_MASKS) {
+    throw new Error(`Visible masks are limited to ${MAX_VISIBLE_MASKS}.`);
+  }
+  const { width, height } = masks[0];
+  if (masks.some((mask) => mask.width !== width || mask.height !== height)) {
+    throw new Error('Visible masks do not share the current canvas dimensions.');
+  }
+  return overlayPixelsFromCoverage(
+    cachedCoverage(masks),
+    width,
+    height,
+    settings,
+    outputWidth,
+    outputHeight,
+    animationFrame
+  );
+}
+
+function overlayPixelsFromCoverage(
+  coverage: Uint8Array,
+  sourceWidth: number,
+  sourceHeight: number,
+  settings: OverlaySettings,
+  outputWidth: number,
+  outputHeight: number,
+  animationFrame: number
+): Uint8ClampedArray {
   const output = new Uint8ClampedArray(outputWidth * outputHeight * 4);
   const color = parseColor(settings.color);
   for (let y = 0; y < outputHeight; y += 1) {
-    const sourceY = Math.min(mask.height - 1, Math.floor(((y + 0.5) * mask.height) / outputHeight));
+    const sourceY = Math.min(sourceHeight - 1, Math.floor(((y + 0.5) * sourceHeight) / outputHeight));
     for (let x = 0; x < outputWidth; x += 1) {
-      const sourceX = Math.min(mask.width - 1, Math.floor(((x + 0.5) * mask.width) / outputWidth));
-      const sourceIndex = sourceY * mask.width + sourceX;
+      const sourceX = Math.min(sourceWidth - 1, Math.floor(((x + 0.5) * sourceWidth) / outputWidth));
+      const sourceIndex = sourceY * sourceWidth + sourceX;
       const value = coverage[sourceIndex];
       const outputIndex = (y * outputWidth + x) * 4;
       if (settings.mode === 'marching_ants') {
-        if (!boundary(coverage, mask.width, mask.height, sourceX, sourceY)) continue;
+        if (!boundary(coverage, sourceWidth, sourceHeight, sourceX, sourceY)) continue;
         const white = (x + y + animationFrame) % 8 < 4;
         output.set([white ? 255 : 0, white ? 255 : 0, white ? 255 : 0, 255], outputIndex);
       } else if (settings.mode === 'color') {
@@ -68,6 +126,58 @@ export function overlayPixels(
   return output;
 }
 
+function cachedCoverage(masks: MaskSnapshot[]): Uint8Array {
+  const orderedKeys = masks
+    .map((mask) => `${mask.checksum}:${mask.width}x${mask.height}`)
+    .sort();
+  const key = orderedKeys.join('|');
+  const existing = coverageCache.get(key);
+  if (existing) {
+    coverageCache.delete(key);
+    coverageCache.set(key, existing);
+    return existing.coverage;
+  }
+  const pixels = masks[0].width * masks[0].height;
+  if (!Number.isSafeInteger(pixels) || pixels < 1 || pixels > MAX_MASK_PIXELS) {
+    throw new Error('Visible mask dimensions exceed the bounded overlay limit.');
+  }
+  let coverage: Uint8Array | undefined;
+  for (const mask of masks) {
+    const decoded = decodeCoverage(mask);
+    if (!coverage) coverage = decoded;
+    else mergeCoverageMaximum(coverage, decoded);
+  }
+  if (!coverage) throw new Error('Visible mask coverage is unavailable.');
+  const bytes = coverage.byteLength + key.length * 2;
+  if (bytes <= MAX_OVERLAY_CACHE_BYTES) {
+    coverageCache.set(key, { coverage, bytes });
+    coverageCacheBytes += bytes;
+    while (
+      coverageCache.size > MAX_OVERLAY_CACHE_ENTRIES ||
+      coverageCacheBytes > MAX_OVERLAY_CACHE_BYTES
+    ) {
+      const oldestKey = coverageCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      const removed = coverageCache.get(oldestKey);
+      coverageCache.delete(oldestKey);
+      if (removed) coverageCacheBytes -= removed.bytes;
+    }
+  }
+  return coverage;
+}
+
+function mergeCoverageMaximum(output: Uint8Array, value: Uint8Array): void {
+  if (value.length !== output.length) throw new Error('Visible mask coverage lengths differ.');
+  for (let index = 0; index < output.length; index += 1) {
+    if (value[index] > output[index]) output[index] = value[index];
+  }
+}
+
+export function clearOverlayCoverageCache(): void {
+  coverageCache.clear();
+  coverageCacheBytes = 0;
+}
+
 export function drawMaskOverlay(
   canvas: HTMLCanvasElement,
   mask: MaskSnapshot | null,
@@ -84,6 +194,30 @@ export function drawMaskOverlay(
   if (!mask || !settings.visible) return;
   context.putImageData(
     new ImageData(overlayPixels(mask, settings, canvas.width, canvas.height, animationFrame), canvas.width),
+    0,
+    0
+  );
+}
+
+export function drawMaskOverlays(
+  canvas: HTMLCanvasElement,
+  masks: MaskSnapshot[],
+  settings: OverlaySettings,
+  width: number,
+  height: number,
+  animationFrame = 0
+): void {
+  canvas.width = Math.max(1, width);
+  canvas.height = Math.max(1, height);
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!masks.length || !settings.visible) return;
+  context.putImageData(
+    new ImageData(
+      overlayPixelsForMasks(masks, settings, canvas.width, canvas.height, animationFrame),
+      canvas.width
+    ),
     0,
     0
   );

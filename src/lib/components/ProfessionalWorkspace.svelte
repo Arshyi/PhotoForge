@@ -28,6 +28,8 @@
     duplicateOperationAt,
     duplicateWorkflow,
     loadWorkflows,
+    MAX_WORKFLOW_JSON_CHARACTERS,
+    MAX_WORKFLOW_OPERATIONS,
     moveOperation,
     removeOperationAt,
     removeWorkflow,
@@ -35,13 +37,15 @@
     searchWorkflows,
     toggleFavorite,
     upsertWorkflow,
+    validateEditOperation,
+    validateWorkflow,
     workflowDocument
   } from '../utils/workflows';
 
   export let documentId = 0;
   export let metadata: ImageMetadata | null = null;
   export let operations: EditOperation[] = [];
-  export let oncommit: (operations: EditOperation[], coalesceKey?: string) => void;
+  export let oncommit: (operations: EditOperation[], coalesceKey?: string) => void | boolean | Promise<void | boolean>;
   export let onmessage: (message: string, kind?: 'error' | 'success') => void;
   export let onviewchange: (view: { grid?: boolean; crosshair?: boolean; comparisonMode?: ComparisonMode; zoom?: number }) => void;
 
@@ -230,8 +234,8 @@
   }
 
   function persistWorkflows(next: Workflow[]) {
+    saveWorkflows(next);
     workflows = next;
-    saveWorkflows(workflows);
   }
 
   function recordWorkflow() {
@@ -239,6 +243,10 @@
       onmessage('Enter a workflow name and add at least one edit.', 'error'); return;
     }
     const value = createWorkflow(workflowName, operations, workflowFolder);
+    const errors = validateWorkflow(value);
+    if (errors.length) {
+      onmessage(errors.join(' '), 'error'); return;
+    }
     persistWorkflows(upsertWorkflow(workflows, value));
     selectedWorkflowId = value.id; batchWorkflowId = value.id; workflowName = '';
     onmessage('Workflow saved locally');
@@ -256,16 +264,27 @@
     workflowJson = JSON.stringify(workflow.operations, null, 2);
   }
 
-  function applyWorkflow(workflow: Workflow) {
-    oncommit(cloneOperations(workflow.operations));
-    onmessage(`${workflow.name} replayed as a typed edit pipeline`);
+  async function applyWorkflow(workflow: Workflow) {
+    try {
+      const accepted = await oncommit(cloneOperations(workflow.operations));
+      if (accepted === false) onmessage(`${workflow.name} was not applied.`, 'error');
+    } catch (error) {
+      onmessage(errorMessage(error), 'error');
+    }
   }
 
   function applyWorkflowJson() {
     try {
-      const parsed = JSON.parse(workflowJson) as EditOperation[];
+      if (workflowJson.length > MAX_WORKFLOW_JSON_CHARACTERS) throw new Error('Operation JSON exceeds the bounded limit.');
+      const parsed: unknown = JSON.parse(workflowJson);
       if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Operation JSON must be a non-empty array.');
-      updateSelected((workflow) => ({ ...workflow, operations: parsed }));
+      if (parsed.length > MAX_WORKFLOW_OPERATIONS) throw new Error('Operation JSON has too many operations.');
+      parsed.forEach((operation, index) => {
+        const error = validateEditOperation(operation);
+        if (error) throw new Error(`Operation ${index + 1}: ${error}`);
+      });
+      updateSelected((workflow) => ({ ...workflow, operations: structuredClone(parsed) as EditOperation[] }));
+      onmessage('Workflow definition updated locally');
     } catch (error) { onmessage(errorMessage(error), 'error'); }
   }
 
@@ -274,6 +293,9 @@
     if (typeof path !== 'string') return;
     try {
       const document = await invoke<WorkflowDocument>('import_workflow', { path });
+      if (!document || document.schemaVersion !== 1) throw new Error('Unsupported workflow schema version.');
+      const errors = validateWorkflow(document.workflow);
+      if (errors.length) throw new Error(errors.join(' '));
       persistWorkflows(upsertWorkflow(workflows, document.workflow));
       selectedWorkflowId = document.workflow.id;
       onmessage('Workflow imported and validated');

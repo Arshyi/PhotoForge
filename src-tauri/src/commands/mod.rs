@@ -13,9 +13,9 @@ pub use components::{
 pub use editor::{analyze_image, export_image, open_image, render_preview};
 pub use mask::{
     cancel_mask_operation, color_range_selection, compose_selection_masks, export_mask_file,
-    export_mask_png, import_mask_file, import_mask_png, inspect_selection_mask,
-    magic_wand_selection, rasterize_selection, refine_selection_mask, transform_selection_mask,
-    validate_mask_snapshot,
+    export_mask_png, get_mask_progress, import_mask_file, import_mask_png, inspect_selection_mask,
+    magic_wand_selection, rasterize_selection, refine_selection_mask, remap_selection_masks,
+    transform_selection_mask, validate_mask_snapshot,
 };
 pub use ollama::{
     cancel_ollama_plan, compare_planners, generate_ollama_plan, get_ollama_diagnostics,

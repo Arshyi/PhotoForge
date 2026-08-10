@@ -1,10 +1,11 @@
 use super::bitmap::MaskBitmap;
 use super::geometry::Point;
+use super::progress::MaskWorkContext;
 use crate::error::AppError;
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +42,20 @@ pub fn select(
     options: WandOptions,
     cancelled: Option<&AtomicBool>,
 ) -> Result<MaskBitmap, AppError> {
+    select_with_progress(
+        image,
+        point,
+        options,
+        MaskWorkContext::cancellation_only(cancelled),
+    )
+}
+
+pub(crate) fn select_with_progress(
+    image: &RgbaImage,
+    point: Point,
+    options: WandOptions,
+    context: MaskWorkContext<'_>,
+) -> Result<MaskBitmap, AppError> {
     options.validate()?;
     point.validate()?;
     if point.x < 0.0
@@ -56,12 +71,13 @@ pub fn select(
     let seed_y = point.y.floor() as u32;
     let sample = *image.get_pixel(seed_x, seed_y);
     let mut mask = MaskBitmap::empty(image.width(), image.height())?;
+    let pixels = u64::from(image.width()) * u64::from(image.height());
     let soft_limit = (options.tolerance + if options.anti_alias { 0.08 } else { 0.0 }).min(1.0);
 
     if !options.contiguous {
         for (index, pixel) in image.pixels().enumerate() {
             if index % 4_096 == 0 {
-                check_cancelled(cancelled)?;
+                context.report("wand_pixels", index as u64, pixels)?;
             }
             mask.coverage_mut()[index] = coverage(
                 color_distance(*pixel, sample),
@@ -69,6 +85,7 @@ pub fn select(
                 soft_limit,
             );
         }
+        context.report("wand_pixels", pixels, pixels)?;
         return Ok(mask);
     }
 
@@ -80,7 +97,7 @@ pub fn select(
     let mut processed = 0_usize;
     while let Some((x, y)) = queue.pop_front() {
         if processed % 4_096 == 0 {
-            check_cancelled(cancelled)?;
+            context.report("wand_region", 0, 0)?;
         }
         processed += 1;
         let distance = color_distance(*image.get_pixel(x, y), sample);
@@ -100,6 +117,7 @@ pub fn select(
             }
         }
     }
+    context.report("wand_region", 0, 0)?;
     Ok(mask)
 }
 
@@ -152,14 +170,6 @@ fn neighbors(
         }
     }
     result
-}
-
-fn check_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), AppError> {
-    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        Err(AppError::MaskCancelled)
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

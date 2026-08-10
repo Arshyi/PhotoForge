@@ -1,12 +1,31 @@
-import type { MaskDiagnostics, MaskSnapshot, NamedMask, SelectionState, SelectionTool } from './types';
+import type {
+  GeometryOperation,
+  MaskDiagnostics,
+  MaskSnapshot,
+  NamedMask,
+  SelectionState,
+  SelectionTool
+} from './types';
+import { geometryFingerprint } from './geometry';
 
 const MAX_HISTORY_BYTES = 64 * 1024 * 1024;
 const MAX_HISTORY_ENTRIES = 60;
+export const MAX_NAMED_MASKS = 100;
 
-export function createSelectionState(documentKey = ''): SelectionState {
+export function createSelectionState(
+  documentKey = '',
+  width?: number,
+  height?: number
+): SelectionState {
+  const canvas = initialCanvasDimensions(width, height);
+  const geometryOperations: GeometryOperation[] = [];
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     documentKey,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height,
+    geometryOperations,
+    geometryFingerprint: geometryFingerprint(geometryOperations),
     activeMask: null,
     activeDiagnostics: null,
     namedMasks: [],
@@ -23,6 +42,11 @@ export function createSelectionState(documentKey = ''): SelectionState {
       brushDiameter: 48,
       brushHardness: 0.75,
       brushOpacity: 1,
+      pressureEnabled: false,
+      pressureAffectsSize: true,
+      pressureAffectsOpacity: false,
+      pressureMinSizeFactor: 0.35,
+      pressureMinOpacityFactor: 0.25,
       wandTolerance: 0.12,
       wandConnectivity: 'eight',
       wandAntiAlias: true,
@@ -52,6 +76,14 @@ export class SelectionHistory {
   private undoBytes = 0;
   private coalesceKey: string | null = null;
   private coalesceAt = 0;
+  private pushedOnLastCommit = false;
+  private readonly maxEntries: number;
+  private readonly maxBytes: number;
+
+  constructor(options: { maxEntries?: number; maxBytes?: number } = {}) {
+    this.maxEntries = options.maxEntries ?? MAX_HISTORY_ENTRIES;
+    this.maxBytes = options.maxBytes ?? MAX_HISTORY_BYTES;
+  }
 
   get state(): SelectionState {
     return cloneSelectionState(this.current);
@@ -65,21 +97,39 @@ export class SelectionHistory {
     return this.redoStack.length > 0;
   }
 
+  get undoDepth(): number {
+    return this.undoStack.length;
+  }
+
+  get redoDepth(): number {
+    return this.redoStack.length;
+  }
+
+  get lastCommitCreatedEntry(): boolean {
+    return this.pushedOnLastCommit;
+  }
+
   replace(state: SelectionState): SelectionState {
     this.current = cloneSelectionState(state);
     this.undoStack = [];
     this.redoStack = [];
     this.undoBytes = 0;
+    this.pushedOnLastCommit = false;
     this.endCoalescing();
     return this.state;
   }
 
   commit(state: SelectionState, coalesceKey?: string, now = Date.now()): SelectionState {
-    const next = cloneSelectionState({ ...state, updatedAt: new Date(now).toISOString() });
-    if (JSON.stringify(next) === JSON.stringify(this.current)) return this.state;
+    this.pushedOnLastCommit = false;
+    const candidate = cloneSelectionState({ ...state, updatedAt: this.current.updatedAt });
+    if (JSON.stringify(candidate) === JSON.stringify(this.current)) return this.state;
+    const next = { ...candidate, updatedAt: new Date(now).toISOString() };
     const canCoalesce =
       coalesceKey !== undefined && this.coalesceKey === coalesceKey && now - this.coalesceAt <= 700;
-    if (!canCoalesce) this.pushUndo(this.current);
+    if (!canCoalesce) {
+      this.pushUndo(this.current);
+      this.pushedOnLastCommit = true;
+    }
     this.current = next;
     this.redoStack = [];
     this.coalesceKey = coalesceKey ?? null;
@@ -111,13 +161,30 @@ export class SelectionHistory {
     this.coalesceAt = 0;
   }
 
+  clearRedo(): void {
+    this.redoStack = [];
+  }
+
+  retainUndoDepth(depth: number): void {
+    const bounded = Math.max(0, Math.min(this.undoStack.length, Math.floor(depth)));
+    while (this.undoStack.length > bounded) {
+      const removed = this.undoStack.shift();
+      if (removed) this.undoBytes -= removed.bytes;
+    }
+  }
+
+  retainRedoDepth(depth: number): void {
+    const bounded = Math.max(0, Math.min(this.redoStack.length, Math.floor(depth)));
+    if (this.redoStack.length > bounded) this.redoStack.splice(0, this.redoStack.length - bounded);
+  }
+
   private pushUndo(state: SelectionState): void {
     const snapshot = entry(state);
     this.undoStack.push(snapshot);
     this.undoBytes += snapshot.bytes;
     while (
       this.undoStack.length > 1 &&
-      (this.undoStack.length > MAX_HISTORY_ENTRIES || this.undoBytes > MAX_HISTORY_BYTES)
+      (this.undoStack.length > this.maxEntries || this.undoBytes > this.maxBytes)
     ) {
       const removed = this.undoStack.shift();
       if (removed) this.undoBytes -= removed.bytes;
@@ -139,7 +206,7 @@ export function createNamedMask(
   now = new Date(),
   id = createMaskId()
 ): SelectionState {
-  if (!state.activeMask) return cloneSelectionState(state);
+  if (!state.activeMask || state.namedMasks.length >= MAX_NAMED_MASKS) return cloneSelectionState(state);
   const timestamp = now.toISOString();
   const named: NamedMask = {
     id,
@@ -173,6 +240,7 @@ export function duplicateNamedMask(
   now = new Date(),
   duplicateId = createMaskId()
 ): SelectionState {
+  if (state.namedMasks.length >= MAX_NAMED_MASKS) return cloneSelectionState(state);
   const index = state.namedMasks.findIndex((mask) => mask.id === id);
   if (index < 0) return cloneSelectionState(state);
   const timestamp = now.toISOString();
@@ -282,4 +350,20 @@ function normalizedName(name: string, fallback: number): string {
 
 function createMaskId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `mask-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function initialCanvasDimensions(
+  width: number | undefined,
+  height: number | undefined
+): { width: number; height: number } {
+  if (width === undefined && height === undefined) return { width: 0, height: 0 };
+  const pixels = Number(width) * Number(height);
+  if (
+    Number.isSafeInteger(width) && Number.isSafeInteger(height) &&
+    Number(width) > 0 && Number(height) > 0 &&
+    Number.isSafeInteger(pixels) && pixels <= 100_000_000
+  ) {
+    return { width: Number(width), height: Number(height) };
+  }
+  return { width: 0, height: 0 };
 }

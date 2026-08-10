@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { decodeCoverage, overlayPixels } from './overlays';
+import {
+  clearOverlayCoverageCache,
+  decodeCoverage,
+  overlayPixels,
+  overlayPixelsForMasks
+} from './overlays';
 import type { MaskSnapshot, OverlaySettings } from './types';
 
 const mask: MaskSnapshot = {
@@ -37,5 +42,40 @@ describe('mask overlays', () => {
     expect([...decodeCoverage({ ...mask, encoding: 'base64_rle_u8', data: encoded })]).toEqual([
       255, 255, 255, 255
     ]);
+  });
+
+  it('combines visible named masks by maximum coverage', () => {
+    clearOverlayCoverageCache();
+    const second = {
+      ...mask,
+      data: btoa(String.fromCharCode(255, 0, 0, 0)).replace(/=+$/, ''),
+      checksum: 'fnv1a64:fedcba9876543210'
+    };
+    const pixels = overlayPixelsForMasks([mask, second], settings, 2, 2);
+    expect([...pixels.slice(0, 4)]).toEqual([255, 0, 0, 128]);
+    expect([...pixels.slice(12, 16)]).toEqual([255, 0, 0, 128]);
+  });
+
+  it('rejects named masks from different geometry stages', () => {
+    clearOverlayCoverageCache();
+    expect(() => overlayPixelsForMasks([
+      mask,
+      { ...mask, width: 1, height: 4, checksum: 'fnv1a64:1111111111111111' }
+    ], settings, 2, 2)).toThrow(/canvas dimensions/);
+  });
+
+  it('combines one hundred visible RLE masks incrementally under the explicit limit', () => {
+    clearOverlayCoverageCache();
+    const width = 4096;
+    const visible = Array.from({ length: 100 }, (_, index): MaskSnapshot => ({
+      version: 1,
+      width,
+      height: 1,
+      encoding: 'base64_rle_u8',
+      data: btoa(String.fromCharCode(index, 0, 16, 0, 0)),
+      checksum: `fnv1a64:${index.toString(16).padStart(16, '0')}`
+    }));
+    expect([...overlayPixelsForMasks(visible, settings, 1, 1)]).toEqual([255, 0, 0, 50]);
+    expect(() => overlayPixelsForMasks([...visible, visible[0]], settings, 1, 1)).toThrow(/limited to 100/i);
   });
 });

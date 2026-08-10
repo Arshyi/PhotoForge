@@ -2,6 +2,8 @@
 
 PhotoForge 0.7.0 adds a reusable, deterministic selection and masking subsystem across Rust processing, typed Tauri commands, Svelte image-space tools, bounded history/session state, workflows, and local mask interchange. It adds no cloud service, telemetry, model download, generative editing, semantic recognition, or mandatory neural inference.
 
+> Historical record: this document describes the 0.7.0 release as validated on 2026-08-05. Phase 7.1 resolves several limitations below; see [phase-7.1-results.md](phase-7.1-results.md). The original claims are retained rather than rewritten.
+
 ## Delivered
 
 - Rectangle, ellipse, freehand lasso, polygon lasso, selection brush/eraser, color range, and contiguous/non-contiguous magic wand.
@@ -60,6 +62,18 @@ The NSIS installer exited successfully and registered PhotoForge 0.7.0 for the c
 | NSIS setup | 3,026,732 bytes | 3,179,582 bytes | +152,850 (+5.05%) | `4b4e9d6fbd7e8d6471076ff2c1ad7c4f3ee17de47e8dd0ce2fb9f5f503685aef` |
 | MSI | 4,435,968 bytes | 4,661,248 bytes | +225,280 (+5.08%) | `2f5d3c369fe89403d40aeef50d9d8e5db7a0258d35e0275ebb97f3baa3fee7b2` |
 
+### Artifact-size erratum
+
+The SHA-256 values above identify the intended 0.7.0 artifacts, but the decimal sizes copied into the original table were incorrect. Independent remeasurement of those exact hashed files found:
+
+| Artifact | Originally reported | Correct size |
+| --- | ---: | ---: |
+| Portable executable | 14,028,800 bytes | 14,059,008 bytes |
+| NSIS setup | 3,179,582 bytes | 3,198,691 bytes |
+| MSI | 4,661,248 bytes | 4,677,632 bytes |
+
+This erratum changes size reporting only; the published hashes and the historical functional claims are unchanged.
+
 The production frontend contains 153 modules and bundles to 237.83 kB JavaScript and 55.72 kB CSS (74.09 kB and 10.24 kB gzip). Phase 7 adds no npm or Cargo dependency; the lockfiles change only the PhotoForge package version. It adds no model weights, inference runtime, server, Python component, GPU requirement, or cloud client.
 
 ## Compatibility and safety
@@ -77,3 +91,7 @@ Mask operations accept finite coordinates/settings, cap dimensions at 100 millio
 - Color-range multi-sampling is expressed as sequential Add/Subtract clicks rather than a separate editable sample list.
 - There is a busy/cancel state but no numerical progress percentage. Pointer pressure is not used.
 - Automated packaged-UI interaction could not be completed because the Codex Windows-control runtime could not load its prescribed module from the desktop installation path. Selection components are covered by frontend tests and both portable/installed windows were observed responsive, but the full hands-on image/tool matrix is not claimed.
+
+## Resolution in 0.7.1
+
+Version 0.7.1 adds real thumbnails and visible named-mask overlays; transactional remapping for crop, exact rotation, horizontal reflection, straighten, and perspective; a dedicated Refine dialog; work-unit progress; optional resolved pen pressure; strict full-resolution mask-stage validation; and selection-session schema 2 with Phase 7 migration. Decontaminate Colors remains intentionally unshipped. Packaged lifecycle, manual-matrix, performance, network, test, and artifact results for the hardening release are reported separately in [phase-7.1-results.md](phase-7.1-results.md).

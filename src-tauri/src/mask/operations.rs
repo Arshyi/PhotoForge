@@ -1,9 +1,10 @@
 use super::bitmap::MaskBitmap;
-use super::feather::feather;
+use super::feather::feather_with_progress;
+use super::progress::MaskWorkContext;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -48,18 +49,67 @@ pub enum MaskOperation {
     },
 }
 
+pub(crate) fn work_units(operation: &MaskOperation, pixels: u64) -> u64 {
+    let feather_passes = |radius: u32| if radius == 0 { 1_u64 } else { 2 };
+    let morphology_passes = |radius: u32| if radius == 0 { 1_u64 } else { 2 };
+    let passes = match operation {
+        MaskOperation::SelectAll | MaskOperation::Deselect | MaskOperation::Invert => 1,
+        MaskOperation::Feather { radius } => feather_passes((*radius).min(256)),
+        MaskOperation::Expand { radius } | MaskOperation::Contract { radius } => {
+            morphology_passes((*radius).min(256))
+        }
+        MaskOperation::Smooth { radius } => feather_passes((*radius).min(128)) + 1,
+        MaskOperation::FillHoles | MaskOperation::RemoveSmallIslands { .. } => 1,
+        MaskOperation::Border { width } => 2 * morphology_passes((*width).min(256)) + 1,
+        MaskOperation::Refine {
+            smooth,
+            feather,
+            shift_edge,
+            ..
+        } => {
+            let smooth_passes = if *smooth == 0 {
+                0
+            } else {
+                feather_passes((*smooth).min(128)) + 1
+            };
+            let shift_passes = if *shift_edge == 0 { 0 } else { 2 };
+            let feather_passes = if *feather == 0 { 0 } else { 2 };
+            smooth_passes + shift_passes + feather_passes + 1
+        }
+    };
+    pixels.saturating_mul(passes)
+}
+
 pub fn compose(
     base: Option<&MaskBitmap>,
     incoming: &MaskBitmap,
     mode: CompositionMode,
 ) -> Result<MaskBitmap, AppError> {
+    compose_with_progress(
+        base,
+        incoming,
+        mode,
+        MaskWorkContext::cancellation_only(None),
+    )
+}
+
+pub(crate) fn compose_with_progress(
+    base: Option<&MaskBitmap>,
+    incoming: &MaskBitmap,
+    mode: CompositionMode,
+    context: MaskWorkContext<'_>,
+) -> Result<MaskBitmap, AppError> {
+    let pixels = incoming.coverage().len() as u64;
     let Some(base) = base else {
-        return Ok(match mode {
+        context.check_cancelled()?;
+        let result = match mode {
             CompositionMode::Subtract | CompositionMode::Intersect => {
                 MaskBitmap::empty(incoming.width(), incoming.height())?
             }
             CompositionMode::Replace | CompositionMode::Add => incoming.clone(),
-        });
+        };
+        context.report("compose_pixels", pixels, pixels)?;
+        return Ok(result);
     };
     if base.width() != incoming.width() || base.height() != incoming.height() {
         return Err(AppError::MaskDimensionMismatch {
@@ -69,19 +119,21 @@ pub fn compose(
             image_height: base.height(),
         });
     }
-    let coverage = base
-        .coverage()
-        .iter()
-        .zip(incoming.coverage())
-        .map(|(&left, &right)| match mode {
+    let mut coverage = Vec::with_capacity(incoming.coverage().len());
+    for (index, (&left, &right)) in base.coverage().iter().zip(incoming.coverage()).enumerate() {
+        if index % 4_096 == 0 {
+            context.report("compose_pixels", index as u64, pixels)?;
+        }
+        coverage.push(match mode {
             CompositionMode::Replace => right,
             CompositionMode::Add => left.max(right),
             CompositionMode::Subtract => {
                 ((u16::from(left) * u16::from(255 - right) + 127) / 255) as u8
             }
             CompositionMode::Intersect => ((u16::from(left) * u16::from(right) + 127) / 255) as u8,
-        })
-        .collect();
+        });
+    }
+    context.report("compose_pixels", pixels, pixels)?;
     MaskBitmap::from_coverage(base.width(), base.height(), coverage)
 }
 
@@ -90,41 +142,89 @@ pub fn apply(
     operation: &MaskOperation,
     cancelled: Option<&AtomicBool>,
 ) -> Result<MaskBitmap, AppError> {
+    apply_with_progress(
+        mask,
+        operation,
+        MaskWorkContext::cancellation_only(cancelled),
+    )
+}
+
+pub(crate) fn apply_with_progress(
+    mask: &MaskBitmap,
+    operation: &MaskOperation,
+    context: MaskWorkContext<'_>,
+) -> Result<MaskBitmap, AppError> {
+    let pixels = mask.coverage().len() as u64;
     match operation {
-        MaskOperation::SelectAll => MaskBitmap::full(mask.width(), mask.height()),
-        MaskOperation::Deselect => MaskBitmap::empty(mask.width(), mask.height()),
-        MaskOperation::Invert => MaskBitmap::from_coverage(
-            mask.width(),
-            mask.height(),
-            mask.coverage().iter().map(|value| 255 - value).collect(),
+        MaskOperation::SelectAll => {
+            context.check_cancelled()?;
+            let result = MaskBitmap::full(mask.width(), mask.height())?;
+            context.report("select_all_pixels", pixels, pixels)?;
+            Ok(result)
+        }
+        MaskOperation::Deselect => {
+            context.check_cancelled()?;
+            let result = MaskBitmap::empty(mask.width(), mask.height())?;
+            context.report("deselect_pixels", pixels, pixels)?;
+            Ok(result)
+        }
+        MaskOperation::Invert => invert(mask, context),
+        MaskOperation::Feather { radius } => {
+            feather_with_progress(mask, (*radius).min(256), context)
+        }
+        MaskOperation::Expand { radius } => morphology(
+            mask,
+            (*radius).min(256),
+            true,
+            context,
+            "expand_horizontal",
+            "expand_vertical",
         ),
-        MaskOperation::Feather { radius } => feather(mask, (*radius).min(256), cancelled),
-        MaskOperation::Expand { radius } => morphology(mask, (*radius).min(256), true, cancelled),
-        MaskOperation::Contract { radius } => {
-            morphology(mask, (*radius).min(256), false, cancelled)
-        }
+        MaskOperation::Contract { radius } => morphology(
+            mask,
+            (*radius).min(256),
+            false,
+            context,
+            "contract_horizontal",
+            "contract_vertical",
+        ),
         MaskOperation::Smooth { radius } => {
-            let softened = feather(mask, (*radius).min(128), cancelled)?;
-            Ok(contrast(&softened, 1.8))
+            let softened = feather_with_progress(mask, (*radius).min(128), context)?;
+            contrast(&softened, 1.8, context, "smooth_contrast")
         }
-        MaskOperation::FillHoles => fill_holes(mask, cancelled),
+        MaskOperation::FillHoles => fill_holes(mask, context),
         MaskOperation::RemoveSmallIslands { minimum_pixels } => {
-            remove_small_islands(mask, (*minimum_pixels).min(10_000_000), cancelled)
+            remove_small_islands(mask, (*minimum_pixels).min(10_000_000), context)
         }
         MaskOperation::Border { width } => {
             let width = (*width).min(256);
-            let outside = morphology(mask, width, true, cancelled)?;
-            let inside = morphology(mask, width, false, cancelled)?;
-            MaskBitmap::from_coverage(
-                mask.width(),
-                mask.height(),
-                outside
-                    .coverage()
-                    .iter()
-                    .zip(inside.coverage())
-                    .map(|(&outer, &inner)| outer.saturating_sub(inner))
-                    .collect(),
-            )
+            let outside = morphology(
+                mask,
+                width,
+                true,
+                context,
+                "border_outer_horizontal",
+                "border_outer_vertical",
+            )?;
+            let inside = morphology(
+                mask,
+                width,
+                false,
+                context,
+                "border_inner_horizontal",
+                "border_inner_vertical",
+            )?;
+            let mut coverage = Vec::with_capacity(mask.coverage().len());
+            for (index, (&outer, &inner)) in
+                outside.coverage().iter().zip(inside.coverage()).enumerate()
+            {
+                if index % 4_096 == 0 {
+                    context.report("border_combine", index as u64, pixels)?;
+                }
+                coverage.push(outer.saturating_sub(inner));
+            }
+            context.report("border_combine", pixels, pixels)?;
+            MaskBitmap::from_coverage(mask.width(), mask.height(), coverage)
         }
         MaskOperation::Refine {
             smooth,
@@ -140,56 +240,93 @@ pub fn apply(
             let mut result = if *smooth == 0 {
                 mask.clone()
             } else {
-                apply(
+                apply_with_progress(
                     mask,
                     &MaskOperation::Smooth {
                         radius: (*smooth).min(128),
                     },
-                    cancelled,
+                    context,
                 )?
             };
             if *shift_edge > 0 {
-                result = morphology(&result, (*shift_edge as u32).min(256), true, cancelled)?;
+                result = morphology(
+                    &result,
+                    (*shift_edge as u32).min(256),
+                    true,
+                    context,
+                    "refine_expand_horizontal",
+                    "refine_expand_vertical",
+                )?;
             } else if *shift_edge < 0 {
                 result = morphology(
                     &result,
                     shift_edge.unsigned_abs().min(256),
                     false,
-                    cancelled,
+                    context,
+                    "refine_contract_horizontal",
+                    "refine_contract_vertical",
                 )?;
             }
             if *feather_radius > 0 {
-                result = feather(&result, (*feather_radius).min(256), cancelled)?;
+                result = feather_with_progress(&result, (*feather_radius).min(256), context)?;
             }
-            Ok(contrast(&result, 1.0 + contrast_amount * 3.0))
+            contrast(
+                &result,
+                1.0 + contrast_amount * 3.0,
+                context,
+                "refine_contrast",
+            )
         }
     }
 }
 
-fn contrast(mask: &MaskBitmap, amount: f32) -> MaskBitmap {
+fn invert(mask: &MaskBitmap, context: MaskWorkContext<'_>) -> Result<MaskBitmap, AppError> {
+    let pixels = mask.coverage().len() as u64;
+    let mut coverage = Vec::with_capacity(mask.coverage().len());
+    for (index, value) in mask.coverage().iter().enumerate() {
+        if index % 4_096 == 0 {
+            context.report("invert_pixels", index as u64, pixels)?;
+        }
+        coverage.push(255 - value);
+    }
+    context.report("invert_pixels", pixels, pixels)?;
+    MaskBitmap::from_coverage(mask.width(), mask.height(), coverage)
+}
+
+fn contrast(
+    mask: &MaskBitmap,
+    amount: f32,
+    context: MaskWorkContext<'_>,
+    phase: &str,
+) -> Result<MaskBitmap, AppError> {
     let factor = amount.max(0.05);
-    MaskBitmap::from_coverage(
-        mask.width(),
-        mask.height(),
-        mask.coverage()
-            .iter()
-            .map(|value| {
-                ((*value as f32 - 127.5) * factor + 127.5)
-                    .round()
-                    .clamp(0.0, 255.0) as u8
-            })
-            .collect(),
-    )
-    .expect("dimensions were already validated")
+    let pixels = mask.coverage().len() as u64;
+    let mut coverage = Vec::with_capacity(mask.coverage().len());
+    for (index, value) in mask.coverage().iter().enumerate() {
+        if index % 4_096 == 0 {
+            context.report(phase, index as u64, pixels)?;
+        }
+        coverage.push(
+            ((*value as f32 - 127.5) * factor + 127.5)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+        );
+    }
+    context.report(phase, pixels, pixels)?;
+    MaskBitmap::from_coverage(mask.width(), mask.height(), coverage)
 }
 
 fn morphology(
     mask: &MaskBitmap,
     radius: u32,
     expand: bool,
-    cancelled: Option<&AtomicBool>,
+    context: MaskWorkContext<'_>,
+    horizontal_phase: &str,
+    vertical_phase: &str,
 ) -> Result<MaskBitmap, AppError> {
+    let pixels = mask.coverage().len() as u64;
     if radius == 0 {
+        context.report(horizontal_phase, pixels, pixels)?;
         return Ok(mask.clone());
     }
     let radius = radius as usize;
@@ -197,30 +334,53 @@ fn morphology(
     let height = mask.height() as usize;
     let mut horizontal = vec![0_u8; mask.coverage().len()];
     for y in 0..height {
-        check_cancelled(cancelled, y)?;
+        if y % 16 == 0 {
+            context.report(horizontal_phase, (y * width) as u64, pixels)?;
+        }
         let row = &mask.coverage()[y * width..(y + 1) * width];
         horizontal[y * width..(y + 1) * width]
-            .copy_from_slice(&sliding_extreme(row, radius, expand));
+            .copy_from_slice(&sliding_extreme(row, radius, expand, context)?);
     }
+    context.report(horizontal_phase, pixels, pixels)?;
     let mut output = MaskBitmap::empty(mask.width(), mask.height())?;
     for x in 0..width {
-        check_cancelled(cancelled, x)?;
-        let column: Vec<u8> = (0..height).map(|y| horizontal[y * width + x]).collect();
-        for (y, value) in sliding_extreme(&column, radius, expand)
+        if x % 16 == 0 {
+            context.report(vertical_phase, (x * height) as u64, pixels)?;
+        }
+        let mut column = Vec::with_capacity(height);
+        for y in 0..height {
+            if y % 4_096 == 0 {
+                context.check_cancelled()?;
+            }
+            column.push(horizontal[y * width + x]);
+        }
+        for (y, value) in sliding_extreme(&column, radius, expand, context)?
             .into_iter()
             .enumerate()
         {
+            if y % 4_096 == 0 {
+                context.check_cancelled()?;
+            }
             output.set(x as u32, y as u32, value);
         }
     }
+    context.report(vertical_phase, pixels, pixels)?;
     Ok(output)
 }
 
-fn sliding_extreme(values: &[u8], radius: usize, maximum: bool) -> Vec<u8> {
+fn sliding_extreme(
+    values: &[u8],
+    radius: usize,
+    maximum: bool,
+    context: MaskWorkContext<'_>,
+) -> Result<Vec<u8>, AppError> {
     let mut output = vec![0_u8; values.len()];
     let mut deque = VecDeque::<usize>::new();
     let mut next = 0_usize;
     for (index, target) in output.iter_mut().enumerate() {
+        if index % 4_096 == 0 {
+            context.check_cancelled()?;
+        }
         let end = (index + radius + 1).min(values.len());
         while next < end {
             while deque.back().is_some_and(|candidate| {
@@ -241,45 +401,54 @@ fn sliding_extreme(values: &[u8], radius: usize, maximum: bool) -> Vec<u8> {
         }
         *target = values[*deque.front().expect("sliding window is non-empty")];
     }
-    output
+    Ok(output)
 }
 
-fn fill_holes(mask: &MaskBitmap, cancelled: Option<&AtomicBool>) -> Result<MaskBitmap, AppError> {
+fn fill_holes(mask: &MaskBitmap, context: MaskWorkContext<'_>) -> Result<MaskBitmap, AppError> {
     let width = mask.width() as usize;
     let height = mask.height() as usize;
     let mut outside = vec![false; mask.coverage().len()];
     let mut queue = VecDeque::new();
     for x in 0..width {
+        if x % 4_096 == 0 {
+            context.check_cancelled()?;
+        }
         queue_background(mask, x, 0, &mut outside, &mut queue);
         queue_background(mask, x, height - 1, &mut outside, &mut queue);
     }
     for y in 0..height {
+        if y % 4_096 == 0 {
+            context.check_cancelled()?;
+        }
         queue_background(mask, 0, y, &mut outside, &mut queue);
         queue_background(mask, width - 1, y, &mut outside, &mut queue);
     }
     let mut visited = 0_usize;
     while let Some((x, y)) = queue.pop_front() {
-        check_cancelled(cancelled, visited)?;
+        if visited % 4_096 == 0 {
+            // The reachable exterior size is data-dependent, so this phase is
+            // deliberately phase-only rather than a fabricated percentage.
+            context.report("fill_holes_flood", 0, 0)?;
+        }
         visited += 1;
         for (next_x, next_y) in neighbors4(x, y, width, height) {
             queue_background(mask, next_x, next_y, &mut outside, &mut queue);
         }
     }
-    MaskBitmap::from_coverage(
-        mask.width(),
-        mask.height(),
-        mask.coverage()
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                if *value < 128 && !outside[index] {
-                    255
-                } else {
-                    *value
-                }
-            })
-            .collect(),
-    )
+    let pixels = mask.coverage().len() as u64;
+    let mut coverage = Vec::with_capacity(mask.coverage().len());
+    for (index, value) in mask.coverage().iter().enumerate() {
+        if index % 4_096 == 0 {
+            context.report("fill_holes_finalize", index as u64, pixels)?;
+        }
+        coverage.push(if *value < 128 && !outside[index] {
+            255
+        } else {
+            *value
+        });
+    }
+    context.report("fill_holes_finalize", pixels, pixels)?;
+    MaskBitmap::from_coverage(mask.width(), mask.height(), coverage)
 }
 
 fn queue_background(
@@ -299,9 +468,11 @@ fn queue_background(
 fn remove_small_islands(
     mask: &MaskBitmap,
     minimum_pixels: u32,
-    cancelled: Option<&AtomicBool>,
+    context: MaskWorkContext<'_>,
 ) -> Result<MaskBitmap, AppError> {
+    let pixels = mask.coverage().len() as u64;
     if minimum_pixels <= 1 {
+        context.report("remove_islands_scan", pixels, pixels)?;
         return Ok(mask.clone());
     }
     let width = mask.width() as usize;
@@ -310,7 +481,13 @@ fn remove_small_islands(
     let mut visited = vec![false; mask.coverage().len()];
     let mut counter = 0_usize;
     for y in 0..height {
+        if y % 16 == 0 {
+            context.report("remove_islands_scan", (y * width) as u64, pixels)?;
+        }
         for x in 0..width {
+            if x % 4_096 == 0 {
+                context.check_cancelled()?;
+            }
             let start = y * width + x;
             if visited[start] || mask.coverage()[start] < 128 {
                 continue;
@@ -319,7 +496,9 @@ fn remove_small_islands(
             let mut queue = VecDeque::from([(x, y)]);
             visited[start] = true;
             while let Some((current_x, current_y)) = queue.pop_front() {
-                check_cancelled(cancelled, counter)?;
+                if counter % 4_096 == 0 {
+                    context.check_cancelled()?;
+                }
                 counter += 1;
                 component.push(current_y * width + current_x);
                 for (next_x, next_y) in neighbors4(current_x, current_y, width, height) {
@@ -331,12 +510,16 @@ fn remove_small_islands(
                 }
             }
             if component.len() < minimum_pixels as usize {
-                for index in component {
+                for (component_index, index) in component.into_iter().enumerate() {
+                    if component_index % 4_096 == 0 {
+                        context.check_cancelled()?;
+                    }
                     output.coverage_mut()[index] = 0;
                 }
             }
         }
     }
+    context.report("remove_islands_scan", pixels, pixels)?;
     Ok(output)
 }
 
@@ -355,14 +538,6 @@ fn neighbors4(x: usize, y: usize, width: usize, height: usize) -> Vec<(usize, us
         neighbors.push((x, y + 1));
     }
     neighbors
-}
-
-fn check_cancelled(cancelled: Option<&AtomicBool>, counter: usize) -> Result<(), AppError> {
-    if counter % 4_096 == 0 && cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        Err(AppError::MaskCancelled)
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -440,5 +615,50 @@ mod tests {
         .unwrap();
         assert_eq!(cleaned.get(1, 1), 0);
         assert_eq!(cleaned.get(4, 4), 255);
+    }
+
+    #[test]
+    fn large_pixel_operation_reports_intermediate_work_and_cancels_by_chunk() {
+        use std::sync::Mutex;
+
+        let mask = MaskBitmap::full(10_000, 1).unwrap();
+        let reports = Mutex::new(Vec::new());
+        let callback = |phase: &str, completed: u64, total: u64| {
+            reports
+                .lock()
+                .unwrap()
+                .push((phase.to_owned(), completed, total));
+            Ok(())
+        };
+        apply_with_progress(
+            &mask,
+            &MaskOperation::Invert,
+            MaskWorkContext::new(None, Some(&callback)),
+        )
+        .unwrap();
+        let reports = reports.into_inner().unwrap();
+        assert!(reports
+            .iter()
+            .any(|(_, completed, total)| *completed > 0 && *completed < *total));
+        assert!(reports
+            .iter()
+            .all(|(_, completed, total)| completed <= total));
+        assert!(reports.iter().all(|(_, _, total)| *total == 10_000));
+
+        let cancelled = AtomicBool::new(false);
+        let cancel_callback = |_: &str, completed: u64, _: u64| {
+            if completed >= 4_096 {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(())
+        };
+        assert!(matches!(
+            apply_with_progress(
+                &mask,
+                &MaskOperation::Invert,
+                MaskWorkContext::new(Some(&cancelled), Some(&cancel_callback)),
+            ),
+            Err(AppError::MaskCancelled)
+        ));
     }
 }

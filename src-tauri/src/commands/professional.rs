@@ -6,7 +6,9 @@ use crate::domain::{
     WorkflowDocument, WorkspaceLayout,
 };
 use crate::error::AppError;
-use crate::image_processing::{apply_pipeline, calculate_histogram, inspect_pixel};
+use crate::image_processing::{
+    apply_pipeline, calculate_histogram, inspect_pixel, prepare_preview_operations,
+};
 use crate::infrastructure::{
     load_workflow, parse_workflow_json, save_image_with_profile, save_workflow,
 };
@@ -33,7 +35,7 @@ pub async fn generate_histogram(
     if state.latest_histogram_request.load(Ordering::Acquire) != request_id {
         return Ok(stale_histogram(document_id, request_id));
     }
-    let source = {
+    let (source, full_source_dimensions) = {
         let session = state
             .session
             .lock()
@@ -42,12 +44,16 @@ pub async fn generate_histogram(
         if session.document_id != document_id {
             return Ok(stale_histogram(document_id, request_id));
         }
-        session.source.preview.clone()
+        (
+            session.source.preview.clone(),
+            session.source.original.dimensions(),
+        )
     };
     let started = Instant::now();
     let (before, after) = tauri::async_runtime::spawn_blocking(move || {
         let before = calculate_histogram(source.as_ref());
-        let processed = apply_pipeline(source.as_ref(), &operations)?;
+        let processed =
+            apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
         let after = calculate_histogram(&processed);
         Ok::<_, AppError>((before, after))
     })
@@ -84,7 +90,7 @@ pub async fn inspect_image_pixel(
     document_id: u64,
     state: State<'_, AppState>,
 ) -> Result<PixelInspection, AppError> {
-    let source = {
+    let (source, full_source_dimensions) = {
         let session = state
             .session
             .lock()
@@ -93,15 +99,29 @@ pub async fn inspect_image_pixel(
         if session.document_id != document_id {
             return Err(AppError::NoImageOpen);
         }
-        session.source.preview.clone()
+        (
+            session.source.preview.clone(),
+            session.source.original.dimensions(),
+        )
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let processed = apply_pipeline(source.as_ref(), &operations)?;
+        let processed =
+            apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
         inspect_pixel(&processed, x, y)
             .ok_or_else(|| AppError::CropBounds("pixel coordinates are outside the image".into()))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("pixel inspector worker stopped".into()))?
+}
+
+fn apply_preview_pipeline(
+    source: &image::DynamicImage,
+    full_source_dimensions: (u32, u32),
+    operations: &[EditOperation],
+) -> Result<image::DynamicImage, AppError> {
+    let preview_operations =
+        prepare_preview_operations(operations, full_source_dimensions, source.dimensions())?;
+    apply_pipeline(source, &preview_operations)
 }
 
 #[tauri::command]
@@ -271,6 +291,29 @@ pub async fn export_with_profile(
 mod tests {
     use super::*;
     use crate::domain::{EditOperation, Workflow, WORKFLOW_SCHEMA_VERSION};
+    use crate::mask::{MaskBitmap, MaskSnapshot};
+
+    #[test]
+    fn professional_preview_resizes_a_rotated_full_mask_when_preview_aspect_rounds() {
+        let source = image::DynamicImage::new_rgba8(16, 11);
+        let operations = vec![
+            EditOperation::Rotate { degrees: 90 },
+            EditOperation::Masked {
+                operation: Box::new(EditOperation::Brightness { amount: 0.2 }),
+                mask: MaskSnapshot::encode(&MaskBitmap::full(40, 60).unwrap()),
+                invert: false,
+                mask_id: Some("full-selection".into()),
+            },
+        ];
+
+        let processed = apply_preview_pipeline(&source, (60, 40), &operations).unwrap();
+
+        assert_eq!(processed.dimensions(), (11, 16));
+        match &operations[1] {
+            EditOperation::Masked { mask, .. } => assert_eq!((mask.width, mask.height), (40, 60)),
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn validates_workflow_command_payload() {

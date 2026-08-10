@@ -1,13 +1,28 @@
+use super::progress::MaskWorkContext;
 use super::MaskBitmap;
 use crate::error::AppError;
 use image::RgbaImage;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 pub fn align_to_image_edges(
     mask: &MaskBitmap,
     image: &RgbaImage,
     strength: f32,
     cancelled: Option<&AtomicBool>,
+) -> Result<MaskBitmap, AppError> {
+    align_to_image_edges_with_progress(
+        mask,
+        image,
+        strength,
+        MaskWorkContext::cancellation_only(cancelled),
+    )
+}
+
+pub(crate) fn align_to_image_edges_with_progress(
+    mask: &MaskBitmap,
+    image: &RgbaImage,
+    strength: f32,
+    context: MaskWorkContext<'_>,
 ) -> Result<MaskBitmap, AppError> {
     if image.dimensions() != (mask.width(), mask.height()) {
         return Err(AppError::MaskDimensionMismatch {
@@ -23,15 +38,26 @@ pub fn align_to_image_edges(
         ));
     }
     if strength == 0.0 || mask.width() < 3 || mask.height() < 3 {
+        let pixels = u64::from(mask.width()) * u64::from(mask.height());
+        context.report("edge_alignment_pixels", pixels, pixels)?;
         return Ok(mask.clone());
     }
 
     let mut output = mask.clone();
+    let interior_width = u64::from(mask.width() - 2);
+    let pixels = interior_width * u64::from(mask.height() - 2);
     for y in 1..mask.height() - 1 {
-        if y % 64 == 0 && cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err(AppError::MaskCancelled);
+        if y % 16 == 1 {
+            context.report(
+                "edge_alignment_pixels",
+                u64::from(y - 1) * interior_width,
+                pixels,
+            )?;
         }
         for x in 1..mask.width() - 1 {
+            if x % 4_096 == 1 {
+                context.check_cancelled()?;
+            }
             let value = mask.get(x, y);
             if !is_boundary(mask, x, y, value) {
                 continue;
@@ -47,6 +73,7 @@ pub fn align_to_image_edges(
             );
         }
     }
+    context.report("edge_alignment_pixels", pixels, pixels)?;
     Ok(output)
 }
 
@@ -120,5 +147,35 @@ mod tests {
             align_to_image_edges(&mask, &image, 0.7, None).unwrap(),
             align_to_image_edges(&mask, &image, 0.7, None).unwrap()
         );
+    }
+
+    #[test]
+    fn edge_alignment_progress_uses_interior_pixel_units() {
+        use std::sync::Mutex;
+
+        let image = RgbaImage::from_pixel(10, 40, Rgba([100, 120, 140, 255]));
+        let mask = MaskBitmap::full(10, 40).unwrap();
+        let reports = Mutex::new(Vec::new());
+        let callback = |phase: &str, completed: u64, total: u64| {
+            reports
+                .lock()
+                .unwrap()
+                .push((phase.to_owned(), completed, total));
+            Ok(())
+        };
+        align_to_image_edges_with_progress(
+            &mask,
+            &image,
+            1.0,
+            MaskWorkContext::new(None, Some(&callback)),
+        )
+        .unwrap();
+        let reports = reports.into_inner().unwrap();
+        let expected = 8 * 38;
+        assert!(reports.iter().all(|(_, _, total)| *total == expected));
+        assert!(reports
+            .iter()
+            .any(|(_, completed, total)| *completed > 0 && *completed < *total));
+        assert_eq!(reports.last().unwrap().1, expected);
     }
 }

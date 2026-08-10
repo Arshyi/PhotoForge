@@ -4,7 +4,7 @@ use crate::domain::{
     AnalysisResult, EditOperation, EditPipeline, ExportResult, OpenImageResult, PreviewResult,
 };
 use crate::error::AppError;
-use crate::image_processing::analyze_image_quality;
+use crate::image_processing::{analyze_image_quality, prepare_preview_operations};
 use crate::infrastructure::{encode_preview, load_image, save_image};
 use image::GenericImageView;
 use std::path::PathBuf;
@@ -223,7 +223,7 @@ pub async fn render_preview(
         return Ok(stale_preview(request_id, operation_count));
     }
 
-    let source = {
+    let (source, full_source_dimensions, preview_source_dimensions) = {
         let session = state
             .session
             .lock()
@@ -232,7 +232,11 @@ pub async fn render_preview(
         if session.document_id != document_id {
             return Ok(stale_preview(request_id, operation_count));
         }
-        session.source.preview.clone()
+        (
+            session.source.preview.clone(),
+            session.source.original.dimensions(),
+            session.source.preview.dimensions(),
+        )
     };
     let engine = {
         let registry = state.components.lock().map_err(|_| {
@@ -243,7 +247,12 @@ pub async fn render_preview(
 
     let started = Instant::now();
     let processed = tauri::async_runtime::spawn_blocking(move || {
-        engine.process(source.as_ref(), &validated_operations)
+        let preview_operations = prepare_preview_operations(
+            &validated_operations,
+            full_source_dimensions,
+            preview_source_dimensions,
+        )?;
+        engine.process(source.as_ref(), &preview_operations)
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("preview worker stopped".into()))??;

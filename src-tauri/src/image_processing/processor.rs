@@ -131,7 +131,15 @@ fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaI
             invert,
             ..
         } => {
-            let decoded = mask.decode()?.resample_to(image.width(), image.height())?;
+            let decoded = mask.decode()?;
+            if (decoded.width(), decoded.height()) != image.dimensions() {
+                return Err(AppError::MaskDimensionMismatch {
+                    mask_width: decoded.width(),
+                    mask_height: decoded.height(),
+                    image_width: image.width(),
+                    image_height: image.height(),
+                });
+            }
             let adjusted = apply_operation(image, operation)?;
             blend_masked(image, &adjusted, &decoded, *invert)?
         }
@@ -568,5 +576,74 @@ mod tests {
             mask_id: None,
         };
         assert!(operation.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_stale_same_aspect_mask_after_crop() {
+        let source = image(8, 4, &[[10, 20, 30, 255]; 32]);
+        let stale_mask =
+            crate::mask::MaskSnapshot::encode(&crate::mask::MaskBitmap::full(8, 4).unwrap());
+        let result = apply_pipeline(
+            &source,
+            &[
+                EditOperation::Crop {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 0.5,
+                    aspect_ratio: None,
+                    overlay: crate::domain::CropOverlay::None,
+                },
+                EditOperation::Masked {
+                    operation: Box::new(EditOperation::Brightness { amount: 0.2 }),
+                    mask: stale_mask,
+                    invert: false,
+                    mask_id: None,
+                },
+            ],
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppError::MaskDimensionMismatch {
+                mask_width: 8,
+                mask_height: 4,
+                image_width: 4,
+                image_height: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn applies_valid_crop_then_exact_stage_mask() {
+        let source = image(4, 2, &[[10, 20, 30, 255]; 8]);
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 2, vec![255, 0, 0, 255]).unwrap();
+        let result = apply_pipeline(
+            &source,
+            &[
+                EditOperation::Crop {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 1.0,
+                    aspect_ratio: None,
+                    overlay: crate::domain::CropOverlay::None,
+                },
+                EditOperation::Masked {
+                    operation: Box::new(EditOperation::Brightness { amount: 0.2 }),
+                    mask: crate::mask::MaskSnapshot::encode(&mask),
+                    invert: false,
+                    mask_id: Some("cropped-subject".into()),
+                },
+            ],
+        )
+        .unwrap()
+        .to_rgba8();
+
+        assert_eq!(result.dimensions(), (2, 2));
+        assert_eq!(result.get_pixel(0, 0).0, [61, 71, 81, 255]);
+        assert_eq!(result.get_pixel(1, 0).0, [10, 20, 30, 255]);
+        assert_eq!(result.get_pixel(0, 1).0, [10, 20, 30, 255]);
+        assert_eq!(result.get_pixel(1, 1).0, [61, 71, 81, 255]);
     }
 }

@@ -8,6 +8,7 @@ function props() {
     state: createSelectionState('doc'),
     onstatechange: vi.fn(),
     onoperation: vi.fn(),
+    onrefine: vi.fn(),
     onnamedaction: vi.fn(),
     onimport: vi.fn(),
     onundo: vi.fn(),
@@ -57,7 +58,7 @@ describe('SelectionWorkspace', () => {
     expect(value.onnamedaction).toHaveBeenCalledWith('create', undefined, '');
   });
 
-  it('exposes refinement controls honestly as mask-only processing', async () => {
+  it('opens the dedicated refinement dialog without mutating the mask inline', async () => {
     const value = props();
     value.state.activeMask = {
       version: 1,
@@ -69,8 +70,40 @@ describe('SelectionWorkspace', () => {
     };
     render(SelectionWorkspace, { props: value });
     await fireEvent.click(screen.getByRole('button', { name: /Refine selection/ }));
-    expect(screen.getByText(/alter only mask coverage/i)).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Apply refinement' }));
-    expect(value.onoperation).toHaveBeenCalledWith(expect.objectContaining({ type: 'refine' }));
+    expect(value.onrefine).toHaveBeenCalledTimes(1);
+    expect(value.onoperation).not.toHaveBeenCalled();
+  });
+
+  it('exposes conservative optional pressure controls only for paint tools', async () => {
+    const value = props();
+    value.state = { ...value.state, tool: 'brush' };
+    render(SelectionWorkspace, { props: value });
+    const pressure = screen.getByRole('checkbox', { name: 'Pen pressure' });
+    expect((pressure as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(pressure);
+    expect(value.onstatechange).toHaveBeenCalledWith(
+      expect.objectContaining({ settings: expect.objectContaining({ pressureEnabled: true }) }),
+      undefined
+    );
+  });
+
+  it('renders determinate numerical progress only when the tracker reveals it', () => {
+    render(SelectionWorkspace, {
+      props: {
+        ...props(),
+        busy: true,
+        progress: {
+          documentId: 1,
+          requestId: 2,
+          label: 'Feather selection',
+          phase: 'Vertical pass',
+          percent: 64,
+          state: 'running',
+          visible: true
+        }
+      }
+    });
+    expect(screen.getByRole('progressbar', { name: 'Feather selection' }).getAttribute('aria-valuenow')).toBe('64');
+    expect(screen.getByText('64%')).toBeTruthy();
   });
 });

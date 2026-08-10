@@ -5,6 +5,7 @@ import {
   deleteNamedMask,
   duplicateNamedMask,
   loadNamedMask,
+  MAX_NAMED_MASKS,
   moveNamedMask,
   operationModeFromModifiers,
   renameNamedMask,
@@ -14,6 +15,7 @@ import {
   toggleNamedMask
 } from './state';
 import type { MaskSnapshot } from './types';
+import { geometryFingerprint } from './geometry';
 
 function mask(values = [0, 64, 128, 255]): MaskSnapshot {
   return {
@@ -27,6 +29,18 @@ function mask(values = [0, 64, 128, 255]): MaskSnapshot {
 }
 
 describe('selection state', () => {
+  it('creates schema-v2 identity geometry with optional original dimensions', () => {
+    expect(createSelectionState('doc', 640, 480)).toMatchObject({
+      schemaVersion: 2,
+      documentKey: 'doc',
+      canvasWidth: 640,
+      canvasHeight: 480,
+      geometryOperations: [],
+      geometryFingerprint: geometryFingerprint([])
+    });
+    expect(createSelectionState('unopened')).toMatchObject({ canvasWidth: 0, canvasHeight: 0 });
+  });
+
   it('maps keyboard modifiers to conventional composition modes', () => {
     expect(operationModeFromModifiers('replace', false, false)).toBe('replace');
     expect(operationModeFromModifiers('replace', true, false)).toBe('add');
@@ -60,6 +74,21 @@ describe('selection state', () => {
     expect(state.activeMask).toEqual(mask([255, 0, 0, 0]));
     expect(state.activeMask).not.toBe(state.namedMasks[0].mask);
   });
+
+  it('bounds named masks without discarding existing entries', () => {
+    let state = setActiveMask(createSelectionState('doc', 2, 2), mask(), null);
+    state.namedMasks = Array.from({ length: MAX_NAMED_MASKS }, (_, index) => ({
+      id: `mask-${index}`,
+      name: `Mask ${index}`,
+      mask: mask(),
+      visible: true,
+      locked: false,
+      createdAt: new Date(0).toISOString(),
+      modifiedAt: new Date(0).toISOString()
+    }));
+    expect(createNamedMask(state, 'Overflow').namedMasks).toHaveLength(MAX_NAMED_MASKS);
+    expect(duplicateNamedMask(state, 'mask-0').namedMasks).toHaveLength(MAX_NAMED_MASKS);
+  });
 });
 
 describe('selection history', () => {
@@ -82,5 +111,41 @@ describe('selection history', () => {
     history.commit({ ...history.state, overlay: { ...history.state.overlay, opacity: 0.3 } }, 'opacity', 200);
     expect(history.undo().overlay.opacity).toBe(initial.overlay.opacity);
     expect(history.canUndo).toBe(false);
+  });
+
+  it('does not create undo entries for semantic no-ops', () => {
+    const history = new SelectionHistory();
+    const initial = createSelectionState('doc');
+    history.replace(initial);
+    const result = history.commit(structuredClone(initial), undefined, 99_999);
+    expect(result.updatedAt).toBe(initial.updatedAt);
+    expect(history.canUndo).toBe(false);
+  });
+
+  it('reports coalescing and exposes bounded retention for atomic history alignment', () => {
+    const history = new SelectionHistory({ maxEntries: 2, maxBytes: 1_000_000 });
+    const initial = createSelectionState('doc');
+    history.replace(initial);
+    history.commit({ ...initial, mode: 'add' }, 'mode', 100);
+    expect(history.lastCommitCreatedEntry).toBe(true);
+    history.commit({ ...history.state, mode: 'subtract' }, 'mode', 200);
+    expect(history.lastCommitCreatedEntry).toBe(false);
+    history.endCoalescing();
+    history.commit({ ...history.state, tool: 'brush' });
+    history.commit({ ...history.state, tool: 'eraser' });
+    expect(history.undoDepth).toBe(2);
+    history.retainUndoDepth(1);
+    expect(history.undoDepth).toBe(1);
+  });
+
+  it('reports the surviving depth after byte-budget eviction', () => {
+    const history = new SelectionHistory({ maxEntries: 60, maxBytes: 1 });
+    const initial = createSelectionState('doc');
+    history.replace(initial);
+    history.commit({ ...initial, mode: 'add' });
+    history.commit({ ...history.state, mode: 'subtract' });
+    history.commit({ ...history.state, mode: 'intersect' });
+    expect(history.undoDepth).toBe(1);
+    expect(history.undo().mode).toBe('subtract');
   });
 });

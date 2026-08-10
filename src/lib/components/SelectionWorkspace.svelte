@@ -1,4 +1,6 @@
 <script lang="ts">
+  import MaskThumbnail from './MaskThumbnail.svelte';
+  import type { MaskProgressView } from '../selections/progress';
   import type {
     ApplyScope,
     CompositionMode,
@@ -13,8 +15,10 @@
   export let busy = false;
   export let canUndo = false;
   export let canRedo = false;
+  export let progress: MaskProgressView | null = null;
   export let onstatechange: (state: SelectionState, coalesceKey?: string) => void;
   export let onoperation: (operation: MaskOperation) => void;
+  export let onrefine: () => void = () => undefined;
   export let onnamedaction: (
     action: 'create' | 'rename' | 'duplicate' | 'delete' | 'visible' | 'locked' | 'up' | 'down' | 'load' | 'combine' | 'replace' | 'export' | 'export_png',
     id?: string,
@@ -28,11 +32,6 @@
   let operationRadius = 8;
   let minimumIsland = 32;
   let newMaskName = '';
-  let refineOpen = false;
-  let refineSmooth = 3;
-  let refineFeather = 2;
-  let refineContrast = 0;
-  let refineShift = 0;
 
   const tools: Array<{ id: SelectionTool; icon: string; label: string; shortcut: string }> = [
     { id: 'rectangle', icon: '▭', label: 'Rectangle', shortcut: 'M' },
@@ -73,15 +72,6 @@
     newMaskName = '';
   }
 
-  function applyRefine() {
-    onoperation({
-      type: 'refine',
-      smooth: refineSmooth,
-      feather: refineFeather,
-      contrast: refineContrast,
-      shift_edge: refineShift
-    });
-  }
 </script>
 
 <section class="tool-section selection-workspace" aria-labelledby="selection-heading">
@@ -101,6 +91,26 @@
       No active selection. Global adjustments remain unchanged.
     {/if}
   </p>
+  {#if state.activeMask && state.applyScope === 'global'}
+    <p class="selection-warning" role="note">An active selection exists, but new adjustments are set to Global.</p>
+  {/if}
+  {#if state.activeMask && !state.overlay.visible}
+    <p class="selection-warning" role="note">The active selection is preserved, but its overlay is hidden.</p>
+  {/if}
+
+  {#if progress?.visible}
+    <div
+      class="mask-progress"
+      role={progress.percent === null ? 'status' : 'progressbar'}
+      aria-label={progress.label}
+      aria-valuemin={progress.percent === null ? undefined : 0}
+      aria-valuemax={progress.percent === null ? undefined : 100}
+      aria-valuenow={progress.percent ?? undefined}
+    >
+      <div><strong>{progress.label}</strong><span>{progress.percent === null ? progress.phase : `${progress.percent}%`}</span></div>
+      <i class:indeterminate={progress.percent === null} style={progress.percent === null ? undefined : `--mask-progress:${progress.percent}%`}></i>
+    </div>
+  {/if}
 
   <div class="tool-grid" aria-label="Selection tools">
     {#each tools as tool}
@@ -118,7 +128,7 @@
 
   <div class="composition" aria-label="Selection composition mode">
     {#each modes as mode}
-      <button type="button" class:active={state.mode === mode.id} aria-pressed={state.mode === mode.id} on:click={() => update({ mode: mode.id })}>{mode.label}</button>
+      <button type="button" class:active={state.mode === mode.id} aria-pressed={state.mode === mode.id} disabled={busy} on:click={() => update({ mode: mode.id })}>{mode.label}</button>
     {/each}
   </div>
   <p class="modifier-note">Shift adds · Alt subtracts · Shift+Alt intersects</p>
@@ -132,6 +142,22 @@
     <label class="range-row"><span>Diameter <output>{state.settings.brushDiameter}px</output></span><input aria-label="Selection brush diameter" type="range" min="1" max="512" step="1" value={state.settings.brushDiameter} on:input={(event) => updateSettings({ brushDiameter: Number(event.currentTarget.value) }, 'brush-diameter')} /></label>
     <label class="range-row"><span>Hardness <output>{Math.round(state.settings.brushHardness * 100)}%</output></span><input aria-label="Selection brush hardness" type="range" min="0" max="1" step="0.01" value={state.settings.brushHardness} on:input={(event) => updateSettings({ brushHardness: Number(event.currentTarget.value) }, 'brush-hardness')} /></label>
     <label class="range-row"><span>Opacity <output>{Math.round(state.settings.brushOpacity * 100)}%</output></span><input aria-label="Selection brush opacity" type="range" min="0.01" max="1" step="0.01" value={state.settings.brushOpacity} on:input={(event) => updateSettings({ brushOpacity: Number(event.currentTarget.value) }, 'brush-opacity')} /></label>
+    <div class="pressure-controls">
+      <label><input type="checkbox" checked={state.settings.pressureEnabled} disabled={busy} on:change={(event) => updateSettings({ pressureEnabled: event.currentTarget.checked })} /> Pen pressure</label>
+      {#if state.settings.pressureEnabled}
+        <div class="option-row">
+          <label><input type="checkbox" checked={state.settings.pressureAffectsSize} disabled={busy} on:change={(event) => updateSettings({ pressureAffectsSize: event.currentTarget.checked })} /> Size</label>
+          <label><input type="checkbox" checked={state.settings.pressureAffectsOpacity} disabled={busy} on:change={(event) => updateSettings({ pressureAffectsOpacity: event.currentTarget.checked })} /> Opacity</label>
+        </div>
+        {#if state.settings.pressureAffectsSize}
+          <label class="range-row compact"><span>Minimum size <output>{Math.round(state.settings.pressureMinSizeFactor * 100)}%</output></span><input aria-label="Minimum pressure brush size" type="range" min="0.05" max="1" step="0.05" value={state.settings.pressureMinSizeFactor} disabled={busy} on:input={(event) => updateSettings({ pressureMinSizeFactor: Number(event.currentTarget.value) }, 'pressure-min-size')} /></label>
+        {/if}
+        {#if state.settings.pressureAffectsOpacity}
+          <label class="range-row compact"><span>Minimum opacity <output>{Math.round(state.settings.pressureMinOpacityFactor * 100)}%</output></span><input aria-label="Minimum pressure brush opacity" type="range" min="0.01" max="1" step="0.05" value={state.settings.pressureMinOpacityFactor} disabled={busy} on:input={(event) => updateSettings({ pressureMinOpacityFactor: Number(event.currentTarget.value) }, 'pressure-min-opacity')} /></label>
+        {/if}
+        <p class="modifier-note">Resolved pen size and opacity are stored in the mask result. Mouse and touch remain uniform.</p>
+      {/if}
+    </div>
   {:else if state.tool === 'magic_wand'}
     <label class="range-row"><span>Tolerance <output>{Math.round(state.settings.wandTolerance * 100)}%</output></span><input aria-label="Magic wand tolerance" type="range" min="0" max="1" step="0.01" value={state.settings.wandTolerance} on:input={(event) => updateSettings({ wandTolerance: Number(event.currentTarget.value) }, 'wand-tolerance')} /></label>
     <div class="option-row">
@@ -152,7 +178,7 @@
 
   <div class="scope-row">
     <label for="selection-scope">New adjustments</label>
-    <select id="selection-scope" value={state.applyScope} on:change={(event) => update({ applyScope: event.currentTarget.value as ApplyScope })}>
+    <select id="selection-scope" value={state.applyScope} disabled={busy} on:change={(event) => update({ applyScope: event.currentTarget.value as ApplyScope })}>
       <option value="global">Global</option>
       <option value="inside" disabled={!state.activeMask}>Inside selection</option>
       <option value="outside" disabled={!state.activeMask}>Outside selection</option>
@@ -174,17 +200,7 @@
     <button type="button" disabled={!state.activeMask || busy} on:click={() => onoperation({ type: 'smooth', radius: operationRadius })}>Smooth</button>
     <button type="button" disabled={!state.activeMask || busy} on:click={() => onoperation({ type: 'border', width: operationRadius })}>Border</button>
   </div>
-  <button class="refine-toggle" type="button" disabled={!state.activeMask} aria-expanded={refineOpen} on:click={() => (refineOpen = !refineOpen)}>Refine selection <span>{refineOpen ? '−' : '+'}</span></button>
-  {#if refineOpen}
-    <div class="refine-panel">
-      <label>Smooth <input type="number" min="0" max="128" bind:value={refineSmooth} /></label>
-      <label>Feather <input type="number" min="0" max="256" bind:value={refineFeather} /></label>
-      <label>Contrast <input type="number" min="-1" max="1" step="0.05" bind:value={refineContrast} /></label>
-      <label>Shift edge <input type="number" min="-256" max="256" bind:value={refineShift} /></label>
-      <button type="button" disabled={busy} on:click={applyRefine}>Apply refinement</button>
-      <p>Classical smoothing, morphology, and local image gradients alter only mask coverage.</p>
-    </div>
-  {/if}
+  <button class="refine-toggle" type="button" disabled={!state.activeMask || busy} on:click={onrefine}>Refine selection <span>↗</span></button>
 
   <div class="overlay-controls">
     <label><input type="checkbox" checked={state.overlay.visible} on:change={(event) => updateOverlay({ visible: event.currentTarget.checked })} /> Show overlay (Q)</label>
@@ -195,26 +211,26 @@
     <label class="color-control">Color <input aria-label="Overlay color" type="color" value={state.overlay.color} on:input={(event) => updateOverlay({ color: event.currentTarget.value }, 'overlay-color')} /></label>
   </div>
 
-  <div class="masks-heading"><div><strong>Named masks</strong><small>{state.namedMasks.length}</small></div><div><button type="button" title="Import PhotoForge mask" on:click={() => onimport('json')}>JSON</button><button type="button" title="Import grayscale PNG" on:click={() => onimport('png')}>PNG</button></div></div>
-  <div class="create-mask"><input aria-label="New mask name" placeholder={`Mask ${state.namedMasks.length + 1}`} bind:value={newMaskName} on:keydown={(event) => event.key === 'Enter' && createMask()} /><button type="button" disabled={!state.activeMask} on:click={createMask}>Save active</button></div>
+  <div class="masks-heading"><div><strong>Named masks</strong><small>{state.namedMasks.length}</small></div><div><button type="button" title="Import PhotoForge mask" disabled={busy} on:click={() => onimport('json')}>JSON</button><button type="button" title="Import grayscale PNG" disabled={busy} on:click={() => onimport('png')}>PNG</button></div></div>
+  <div class="create-mask"><input aria-label="New mask name" placeholder={`Mask ${state.namedMasks.length + 1}`} disabled={busy} bind:value={newMaskName} on:keydown={(event) => event.key === 'Enter' && createMask()} /><button type="button" disabled={!state.activeMask || busy} on:click={createMask}>Save active</button></div>
   {#if state.namedMasks.length}
     <ol class="mask-list">
       {#each state.namedMasks as mask, index (mask.id)}
         <li class:locked={mask.locked}>
-          <span class="mask-thumbnail" style={`--coverage:${Math.round((mask.mask.data.length / Math.max(1, mask.mask.width * mask.mask.height)) * 40)}%`}>◐</span>
-          <input aria-label={`Rename ${mask.name}`} value={mask.name} disabled={mask.locked} on:change={(event) => onnamedaction('rename', mask.id, event.currentTarget.value)} />
+          <span class="mask-thumbnail-cell"><MaskThumbnail mask={mask.mask} label={mask.name} /></span>
+          <input aria-label={`Rename ${mask.name}`} value={mask.name} disabled={mask.locked || busy} on:change={(event) => onnamedaction('rename', mask.id, event.currentTarget.value)} />
           <div class="mask-item-actions">
-            <button type="button" title="Load as active selection" on:click={() => onnamedaction('load', mask.id)}>↙</button>
-            <button type="button" title={`Combine using ${state.mode}`} disabled={!state.activeMask} on:click={() => onnamedaction('combine', mask.id)}>⊕</button>
-            <button type="button" title="Replace from active selection" disabled={mask.locked || !state.activeMask} on:click={() => onnamedaction('replace', mask.id)}>↥</button>
-            <button type="button" title={mask.visible ? 'Hide mask' : 'Show mask'} on:click={() => onnamedaction('visible', mask.id)}>{mask.visible ? '◉' : '○'}</button>
-            <button type="button" title={mask.locked ? 'Unlock mask' : 'Lock mask'} on:click={() => onnamedaction('locked', mask.id)}>{mask.locked ? '▣' : '□'}</button>
-            <button type="button" title="Move mask up" disabled={index === 0} on:click={() => onnamedaction('up', mask.id)}>↑</button>
-            <button type="button" title="Move mask down" disabled={index === state.namedMasks.length - 1} on:click={() => onnamedaction('down', mask.id)}>↓</button>
-            <button type="button" title="Duplicate mask" on:click={() => onnamedaction('duplicate', mask.id)}>⧉</button>
-            <button type="button" title="Export PhotoForge mask" on:click={() => onnamedaction('export', mask.id)}>⇩</button>
-            <button type="button" title="Export grayscale PNG" on:click={() => onnamedaction('export_png', mask.id)}>▧</button>
-            <button type="button" title="Delete mask" disabled={mask.locked} on:click={() => onnamedaction('delete', mask.id)}>×</button>
+            <button type="button" title="Load as active selection" disabled={busy} on:click={() => onnamedaction('load', mask.id)}>↙</button>
+            <button type="button" title={`Combine using ${state.mode}`} disabled={!state.activeMask || busy} on:click={() => onnamedaction('combine', mask.id)}>⊕</button>
+            <button type="button" title="Replace from active selection" disabled={mask.locked || !state.activeMask || busy} on:click={() => onnamedaction('replace', mask.id)}>↥</button>
+            <button type="button" title={mask.visible ? 'Hide mask' : 'Show mask'} disabled={busy} on:click={() => onnamedaction('visible', mask.id)}>{mask.visible ? '◉' : '○'}</button>
+            <button type="button" title={mask.locked ? 'Unlock mask' : 'Lock mask'} disabled={busy} on:click={() => onnamedaction('locked', mask.id)}>{mask.locked ? '▣' : '□'}</button>
+            <button type="button" title="Move mask up" disabled={index === 0 || busy} on:click={() => onnamedaction('up', mask.id)}>↑</button>
+            <button type="button" title="Move mask down" disabled={index === state.namedMasks.length - 1 || busy} on:click={() => onnamedaction('down', mask.id)}>↓</button>
+            <button type="button" title="Duplicate mask" disabled={busy} on:click={() => onnamedaction('duplicate', mask.id)}>⧉</button>
+            <button type="button" title="Export PhotoForge mask" disabled={busy} on:click={() => onnamedaction('export', mask.id)}>⇩</button>
+            <button type="button" title="Export grayscale PNG" disabled={busy} on:click={() => onnamedaction('export_png', mask.id)}>▧</button>
+            <button type="button" title="Delete mask" disabled={mask.locked || busy} on:click={() => onnamedaction('delete', mask.id)}>×</button>
           </div>
         </li>
       {/each}
@@ -231,8 +247,15 @@
   .mini-actions { display: flex; gap: 4px; }
   .mini-actions button, .masks-heading button { min-width: 28px; padding: 5px 7px; }
   .mini-actions .cancel { color: #f2a6a6; }
-  .selection-summary, .modifier-note, .empty-masks, .refine-panel p { margin: 0; color: var(--ink-faint); font-size: .66rem; line-height: 1.45; }
+  .mask-progress { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: rgba(192,231,126,.04); }
+  .mask-progress div { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-soft); font-size: .62rem; }
+  .mask-progress strong { color: var(--ink); }
+  .mask-progress i { position: relative; height: 4px; overflow: hidden; border-radius: 99px; background: var(--surface-raised); }
+  .mask-progress i::after { content: ''; position: absolute; inset: 0; width: var(--mask-progress, 0%); background: var(--accent); transition: width 100ms linear; }
+  .mask-progress i.indeterminate::after { width: 35%; animation: mask-progress-slide 1s ease-in-out infinite; }
+  .selection-summary, .modifier-note, .empty-masks { margin: 0; color: var(--ink-faint); font-size: .66rem; line-height: 1.45; }
   .selection-summary strong { color: var(--accent); }
+  .selection-warning { margin: 0; padding: 7px 8px; border-left: 2px solid #e2b96f; color: #e8ca94; background: rgba(226,185,111,.06); font-size: .62rem; line-height: 1.4; }
   .tool-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
   .tool-grid button { min-width: 0; display: grid; place-items: center; gap: 3px; padding: 8px 3px 6px; }
   .tool-grid button span { font-size: 1rem; }
@@ -244,6 +267,8 @@
   .composition button:last-child { border-radius: 0 6px 6px 0; }
   .option-row { display: flex; flex-wrap: wrap; gap: 12px; }
   .option-row label, .sample-merged, .overlay-controls > label { color: var(--ink-soft); font-size: .65rem; }
+  .pressure-controls { display: grid; gap: 7px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; }
+  .pressure-controls > label { color: var(--ink-soft); font-size: .65rem; }
   .range-row { display: grid; gap: 4px; color: var(--ink-soft); font-size: .65rem; }
   .range-row output { color: var(--ink); font-family: var(--font-mono); }
   .range-row input { width: 100%; }
@@ -257,9 +282,6 @@
   .numeric-operations { display: grid; grid-template-columns: 52px repeat(5, 1fr); gap: 4px; }
   .numeric-operations input { width: 100%; box-sizing: border-box; }
   .refine-toggle { display: flex; justify-content: space-between; width: 100%; }
-  .refine-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; }
-  .refine-panel label { display: grid; gap: 3px; color: var(--ink-faint); font-size: .58rem; }
-  .refine-panel button, .refine-panel p { grid-column: 1 / -1; }
   .overlay-controls { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; }
   .color-control input { width: 38px; height: 22px; padding: 0; border: 0; background: none; }
   .masks-heading { margin-top: 4px; }
@@ -269,10 +291,11 @@
   .create-mask { display: grid; grid-template-columns: 1fr auto; gap: 5px; }
   .create-mask input, .mask-list input { padding: 7px; }
   .mask-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-  .mask-list li { display: grid; grid-template-columns: 28px 1fr; gap: 5px; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.015); }
+  .mask-list li { display: grid; grid-template-columns: 40px 1fr; gap: 5px; padding: 7px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.015); }
   .mask-list li.locked { opacity: .78; }
-  .mask-thumbnail { grid-row: 1 / 3; display: grid; place-items: center; border-radius: 5px; color: var(--accent); background: linear-gradient(135deg, rgba(192,231,126,.25), rgba(255,255,255,.03)); }
+  .mask-thumbnail-cell { grid-row: 1 / 3; display: grid; place-items: center; }
   .mask-item-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 3px; }
   .mask-item-actions button { min-width: 24px; padding: 4px; }
+  @keyframes mask-progress-slide { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
   @media (max-width: 900px) { .tool-grid { grid-template-columns: repeat(4, minmax(48px, 1fr)); } }
 </style>

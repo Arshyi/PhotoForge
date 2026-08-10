@@ -5,6 +5,11 @@ export interface Point {
   y: number;
 }
 
+export interface ResolvedBrushSample extends Point {
+  diameter: number;
+  opacity: number;
+}
+
 export interface MaskSnapshot {
   version: number;
   width: number;
@@ -55,6 +60,11 @@ export interface SelectionSettings {
   brushDiameter: number;
   brushHardness: number;
   brushOpacity: number;
+  pressureEnabled: boolean;
+  pressureAffectsSize: boolean;
+  pressureAffectsOpacity: boolean;
+  pressureMinSizeFactor: number;
+  pressureMinOpacityFactor: number;
   wandTolerance: number;
   wandConnectivity: 'four' | 'eight';
   wandAntiAlias: boolean;
@@ -79,9 +89,35 @@ export interface NamedMask {
   sourceTool?: SelectionTool;
 }
 
+export interface GeometryPerspectiveCorners {
+  topLeft: [number, number];
+  topRight: [number, number];
+  bottomRight: [number, number];
+  bottomLeft: [number, number];
+}
+
+export type GeometryOperation =
+  | {
+      type: 'crop';
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      aspect_ratio: string | null;
+      overlay: 'none' | 'rule_of_thirds' | 'golden_ratio';
+    }
+  | { type: 'rotate'; degrees: number }
+  | { type: 'reflect_horizontal' }
+  | { type: 'straighten'; degrees: number }
+  | { type: 'perspective'; corners: GeometryPerspectiveCorners };
+
 export interface SelectionState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   documentKey: string;
+  canvasWidth: number;
+  canvasHeight: number;
+  geometryOperations: GeometryOperation[];
+  geometryFingerprint: string;
   activeMask: MaskSnapshot | null;
   activeDiagnostics: MaskDiagnostics | null;
   namedMasks: NamedMask[];
@@ -105,6 +141,11 @@ export type SelectionShape =
       diameter: number;
       hardness: number;
       opacity: number;
+    }
+  | {
+      type: 'resolved_brush';
+      samples: ResolvedBrushSample[];
+      hardness: number;
     };
 
 export type MaskOperation =
@@ -129,6 +170,7 @@ export type MaskOperation =
 export interface SelectionGesture {
   tool: SelectionTool;
   points: Point[];
+  resolvedBrushSamples?: ResolvedBrushSample[];
   shiftKey: boolean;
   altKey: boolean;
 }
@@ -140,6 +182,24 @@ export interface MaskResult {
   requestId: number;
   processingTimeMs: number;
   isCurrent: boolean;
+}
+
+export type MaskProgressState =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface MaskProgress {
+  documentId: number;
+  requestId: number;
+  operation: string;
+  phase: string;
+  completedUnits: number;
+  totalUnits: number;
+  state: MaskProgressState;
 }
 
 export interface ColorRangeOptions {
