@@ -187,5 +187,6 @@ Artifact audit: the three release binaries match their Tauri build outputs byte 
 
 ## Git publication
 
-- Commit: this record is included in the 0.7.1 publication commit named `Complete and harden Phase 7 selections and masking`; the immutable hash is reported in the post-push release handoff rather than embedded self-referentially here.
-- Publication target: `main` on `origin`. Local/remote hash equality and live-branch confirmation are recorded after the push in the release handoff.
+- Implementation commit: `0b98a53510853523be5e84525b0df32dd26d31da` (`Complete and harden Phase 7 selections`).
+- Publication record: this correction is committed with the requested release title `Complete and harden Phase 7 selections and masking`; its immutable hash is reported in the post-push release handoff rather than embedded self-referentially here.
+- Publication target: `main` on `origin`. The follow-up preserves the already-published implementation commit instead of rewriting shared history; final local/remote hash equality is recorded in the release handoff.
