@@ -56,4 +56,38 @@ describe('MaskProgressTracker', () => {
     tracker.finish(2, 7);
     expect(tracker.view(3)).toBeNull();
   });
+
+  it.each(['completed', 'cancelled', 'failed'] as const)(
+    'returns one %s acknowledgement and then releases terminal request state',
+    (state) => {
+      const tracker = new MaskProgressTracker(0);
+      tracker.begin(2, 7, 'Mask file I/O', 0);
+      const terminal = tracker.ingest(
+        progress({ state, completedUnits: state === 'completed' ? 100 : 55 }),
+        1
+      );
+      expect(terminal?.state).toBe(state);
+      expect(terminal?.visible).toBe(false);
+      expect(tracker.view(2)).toBeNull();
+    }
+  );
+
+  it('does not let a stale terminal update clear the active request', () => {
+    const tracker = new MaskProgressTracker(0);
+    tracker.begin(2, 7, 'Current import', 0);
+    tracker.ingest(progress({ completedUnits: 25 }), 1);
+    expect(tracker.ingest(progress({ requestId: 6, state: 'failed' }), 2)?.percent).toBe(25);
+    expect(tracker.view(3)?.requestId).toBe(7);
+  });
+
+  it('completes zero-unit indeterminate work without inventing a percentage', () => {
+    const tracker = new MaskProgressTracker(0);
+    tracker.begin(2, 7, 'Parse mask file', 0);
+    const terminal = tracker.ingest(
+      progress({ phase: 'completed', completedUnits: 0, totalUnits: 0, state: 'completed' }),
+      1
+    );
+    expect(terminal?.percent).toBeNull();
+    expect(tracker.view(2)).toBeNull();
+  });
 });

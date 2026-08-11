@@ -4,13 +4,13 @@ use crate::error::AppError;
 use crate::image_processing::apply_pipeline;
 use crate::mask::{
     align_to_image_edges_with_progress, apply_mask_operation_with_progress, checked_mask_length,
-    compose_with_progress, export_png, import_png, load_mask, mask_diagnostics,
-    mask_operation_work_units, mask_progress_snapshot, rasterize,
-    remap_between_chains_with_progress, request_mask_progress_cancel, save_mask,
-    select_color_range_with_progress, select_magic_wand_with_progress, ColorRangeOptions,
-    CompositionMode, GeometryChain, GeometryStep, MaskDiagnostics, MaskFile, MaskOperation,
-    MaskProgress, MaskProgressHandle, MaskSnapshot, MaskWorkContext, Point, SelectionShape,
-    WandOptions,
+    compose_with_progress, export_png_snapshot_with_progress, import_png_snapshot_with_progress,
+    load_mask_with_progress, mask_diagnostics, mask_operation_work_units, mask_progress_snapshot,
+    rasterize, remap_between_chains_with_progress, request_mask_progress_cancel,
+    save_mask_with_progress, select_color_range_with_progress, select_magic_wand_with_progress,
+    ColorRangeOptions, CompositionMode, GeometryChain, GeometryStep, MaskDiagnostics, MaskFile,
+    MaskOperation, MaskProgress, MaskProgressHandle, MaskSnapshot, MaskWorkContext, Point,
+    SelectionShape, WandOptions,
 };
 use image::GenericImageView;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,20 @@ pub struct MaskResult {
     pub request_id: u64,
     pub processing_time_ms: f64,
     pub is_current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedMaskFileResult {
+    pub document: MaskFile,
+    pub diagnostics: MaskDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedMaskPngResult {
+    pub mask: MaskSnapshot,
+    pub diagnostics: MaskDiagnostics,
 }
 
 pub const MAX_REMAP_ITEMS: usize = 256;
@@ -390,24 +404,119 @@ pub fn validate_mask_snapshot(mask: MaskSnapshot) -> Result<MaskSnapshot, AppErr
 }
 
 #[tauri::command]
-pub fn import_mask_file(path: String) -> Result<MaskFile, AppError> {
-    load_mask(&PathBuf::from(path))
+pub async fn import_mask_file(
+    path: String,
+    document_id: u64,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ImportedMaskFileResult, AppError> {
+    let progress = begin_request(&state, document_id, request_id, "import_mask_file")?;
+    let outcome = async {
+        let _permit = state.mask_gate.lock().await;
+        prepare_request(&state, &progress, document_id, request_id)?;
+        let cancelled = state.mask_cancelled.clone();
+        let worker_progress = progress.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            load_mask_with_progress(&PathBuf::from(path), &worker_progress, cancelled.as_ref()).map(
+                |(document, diagnostics)| ImportedMaskFileResult {
+                    document,
+                    diagnostics,
+                },
+            )
+        })
+        .await
+        .map_err(|_| AppError::ProcessingFailure("mask-file import worker stopped".into()))?
+    }
+    .await;
+    finish_request(&state, &progress, outcome)
 }
 
 #[tauri::command]
-pub fn export_mask_file(path: String, document: MaskFile) -> Result<String, AppError> {
-    save_mask(&PathBuf::from(path), &document).map(|value| value.to_string_lossy().into_owned())
+pub async fn export_mask_file(
+    path: String,
+    document: MaskFile,
+    document_id: u64,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    let progress = begin_request(&state, document_id, request_id, "export_mask_file")?;
+    let outcome = async {
+        let _permit = state.mask_gate.lock().await;
+        prepare_request(&state, &progress, document_id, request_id)?;
+        let cancelled = state.mask_cancelled.clone();
+        let worker_progress = progress.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            save_mask_with_progress(
+                &PathBuf::from(path),
+                &document,
+                &worker_progress,
+                cancelled.as_ref(),
+            )
+            .map(|value| value.to_string_lossy().into_owned())
+        })
+        .await
+        .map_err(|_| AppError::ProcessingFailure("mask-file export worker stopped".into()))?
+    }
+    .await;
+    finish_request(&state, &progress, outcome)
 }
 
 #[tauri::command]
-pub fn import_mask_png(path: String) -> Result<MaskSnapshot, AppError> {
-    Ok(MaskSnapshot::encode(&import_png(&PathBuf::from(path))?))
+pub async fn import_mask_png(
+    path: String,
+    document_id: u64,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ImportedMaskPngResult, AppError> {
+    let progress = begin_request(&state, document_id, request_id, "import_mask_png")?;
+    let outcome = async {
+        let _permit = state.mask_gate.lock().await;
+        prepare_request(&state, &progress, document_id, request_id)?;
+        let cancelled = state.mask_cancelled.clone();
+        let worker_progress = progress.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            import_png_snapshot_with_progress(
+                &PathBuf::from(path),
+                &worker_progress,
+                cancelled.as_ref(),
+            )
+            .map(|(mask, diagnostics)| ImportedMaskPngResult { mask, diagnostics })
+        })
+        .await
+        .map_err(|_| AppError::ProcessingFailure("mask PNG import worker stopped".into()))?
+    }
+    .await;
+    finish_request(&state, &progress, outcome)
 }
 
 #[tauri::command]
-pub fn export_mask_png(path: String, mask: MaskSnapshot) -> Result<String, AppError> {
-    let bitmap = mask.decode()?;
-    export_png(&PathBuf::from(path), &bitmap).map(|value| value.to_string_lossy().into_owned())
+pub async fn export_mask_png(
+    path: String,
+    mask: MaskSnapshot,
+    document_id: u64,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    let progress = begin_request(&state, document_id, request_id, "export_mask_png")?;
+    let outcome = async {
+        let _permit = state.mask_gate.lock().await;
+        prepare_request(&state, &progress, document_id, request_id)?;
+        let cancelled = state.mask_cancelled.clone();
+        let worker_progress = progress.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            export_png_snapshot_with_progress(
+                &PathBuf::from(path),
+                &mask,
+                &worker_progress,
+                cancelled.as_ref(),
+            )
+            .map(|value| value.to_string_lossy().into_owned())
+        })
+        .await
+        .map_err(|_| AppError::ProcessingFailure("mask PNG export worker stopped".into()))?
+    }
+    .await;
+    finish_request(&state, &progress, outcome)
 }
 
 fn begin_request(
@@ -514,17 +623,21 @@ fn rendered_source(
     }
     let geometry: Vec<_> = operations
         .iter()
-        .filter(|operation| {
-            matches!(
-                operation,
-                EditOperation::ReflectHorizontal
-                    | EditOperation::Rotate { .. }
-                    | EditOperation::Crop { .. }
-                    | EditOperation::Straighten { .. }
-                    | EditOperation::Perspective { .. }
-            )
+        .filter_map(|operation| match operation {
+            EditOperation::ReflectHorizontal
+            | EditOperation::Rotate { .. }
+            | EditOperation::Crop { .. }
+            | EditOperation::Straighten { .. }
+            | EditOperation::Perspective { .. } => Some(operation.clone()),
+            EditOperation::LensCorrection { distortion, .. } => {
+                Some(EditOperation::LensCorrection {
+                    distortion: *distortion,
+                    vignetting: 0.0,
+                    chromatic_aberration: 0.0,
+                })
+            }
+            _ => None,
         })
-        .cloned()
         .collect();
     apply_pipeline(source, &geometry)
 }
@@ -753,6 +866,58 @@ mod tests {
         assert_eq!(rendered.dimensions(), (2, 3));
         assert!(rendered.pixels().all(|pixel| pixel[0] < 200));
         assert!(rendered.pixels().any(|pixel| pixel[0] == 70));
+    }
+
+    #[test]
+    fn geometry_only_source_keeps_lens_distortion_but_excludes_color_components() {
+        let mut image = RgbaImage::new(31, 23);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = Rgba([
+                ((x * 31 + y * 7) % 256) as u8,
+                ((x * 11 + y * 47) % 256) as u8,
+                ((x * 23 + y * 19) % 256) as u8,
+                255,
+            ]);
+        }
+        let source = DynamicImage::ImageRgba8(image);
+        let distortion_only = EditOperation::LensCorrection {
+            distortion: 0.2,
+            vignetting: 0.0,
+            chromatic_aberration: 0.0,
+        };
+        let full_lens = EditOperation::LensCorrection {
+            distortion: 0.2,
+            vignetting: 0.8,
+            chromatic_aberration: 0.8,
+        };
+        let with_vignetting = EditOperation::LensCorrection {
+            distortion: 0.2,
+            vignetting: 0.8,
+            chromatic_aberration: 0.0,
+        };
+        let with_chromatic_aberration = EditOperation::LensCorrection {
+            distortion: 0.2,
+            vignetting: 0.0,
+            chromatic_aberration: 0.8,
+        };
+        let expected = apply_pipeline(&source, std::slice::from_ref(&distortion_only)).unwrap();
+        let rendered = rendered_source(
+            &source,
+            &[EditOperation::Brightness { amount: 1.0 }, full_lens.clone()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(rendered, expected);
+        assert_ne!(rendered, source);
+        assert_ne!(
+            rendered,
+            apply_pipeline(&source, &[with_vignetting]).unwrap()
+        );
+        assert_ne!(
+            rendered,
+            apply_pipeline(&source, &[with_chromatic_aberration]).unwrap()
+        );
+        assert_ne!(rendered, apply_pipeline(&source, &[full_lens]).unwrap());
     }
 
     fn test_state(dimensions: (u32, u32), document_id: u64, request_id: u64) -> AppState {

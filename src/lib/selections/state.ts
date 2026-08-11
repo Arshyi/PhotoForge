@@ -119,13 +119,19 @@ export class SelectionHistory {
     return this.state;
   }
 
-  commit(state: SelectionState, coalesceKey?: string, now = Date.now()): SelectionState {
+  commit(
+    state: SelectionState,
+    coalesceKey?: string,
+    now = Date.now(),
+    forceMatchingCoalesce = false
+  ): SelectionState {
     this.pushedOnLastCommit = false;
     const candidate = cloneSelectionState({ ...state, updatedAt: this.current.updatedAt });
     if (JSON.stringify(candidate) === JSON.stringify(this.current)) return this.state;
     const next = { ...candidate, updatedAt: new Date(now).toISOString() };
     const canCoalesce =
-      coalesceKey !== undefined && this.coalesceKey === coalesceKey && now - this.coalesceAt <= 700;
+      coalesceKey !== undefined && this.coalesceKey === coalesceKey &&
+      (forceMatchingCoalesce || now - this.coalesceAt <= 700);
     if (!canCoalesce) {
       this.pushUndo(this.current);
       this.pushedOnLastCommit = true;

@@ -181,6 +181,45 @@ mod tests {
     }
 
     #[test]
+    fn prepares_decontamination_for_preview_without_mutating_full_mask_or_settings() {
+        let full_mask =
+            MaskBitmap::from_coverage(4, 2, vec![255, 255, 128, 0, 255, 255, 128, 0]).unwrap();
+        let operation = EditOperation::Masked {
+            operation: Box::new(EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: 0.75,
+                radius: 3,
+            }),
+            mask: MaskSnapshot::encode(&full_mask),
+            invert: true,
+            mask_id: Some("edge-cleanup".into()),
+        };
+
+        let prepared =
+            prepare_preview_operations(std::slice::from_ref(&operation), (4, 2), (2, 1)).unwrap();
+        let preview_mask = prepared_mask(&prepared[0]);
+        assert_eq!((preview_mask.width(), preview_mask.height()), (2, 1));
+        assert_eq!(prepared_mask(&operation), full_mask);
+        assert!(matches!(
+            &prepared[0],
+            EditOperation::Masked {
+                operation,
+                invert: true,
+                mask_id: Some(mask_id),
+                ..
+            } if mask_id == "edge-cleanup"
+                && matches!(
+                    operation.as_ref(),
+                    EditOperation::DecontaminateColors {
+                        enabled: true,
+                        strength: 0.75,
+                        radius: 3,
+                    }
+                )
+        ));
+    }
+
+    #[test]
     fn tracks_rotate_and_crop_stages_for_full_and_preview_images() {
         let operations = vec![
             EditOperation::Rotate { degrees: 90 },

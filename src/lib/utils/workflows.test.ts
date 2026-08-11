@@ -107,10 +107,21 @@ describe('workflow system', () => {
     [{ type: 'unknown' }, /unsupported operation type/],
     [{ type: 'brightness', amount: Number.NaN }, /parameters are invalid/],
     [{ type: 'local_contrast', strength: 0.5, tile_size: 129, clip_limit: 1 }, /parameters are invalid/],
+    [{ type: 'lens_correction', distortion: -0.17, vignetting: 0, chromatic_aberration: 0 }, /parameters are invalid/],
+    [{ type: 'decontaminate_colors', enabled: true, strength: 1.1, radius: 4 }, /parameters are invalid/],
+    [{ type: 'decontaminate_colors', enabled: true, strength: 0.5, radius: 0 }, /parameters are invalid/],
+    [{ type: 'decontaminate_colors', enabled: true, strength: 0.5, radius: 4 }, /requires an embedded selection mask/],
     [{ type: 'perspective', corners: { topLeft: [1, 0], topRight: [0, 0], bottomRight: [1, 1], bottomLeft: [0, 1] } }, /parameters are invalid/],
     [{ type: 'masked', operation: { type: 'crop', x: 0, y: 0, width: 1, height: 1, aspect_ratio: null, overlay: 'none' }, mask: validMask, invert: false, mask_id: null }, /cannot be masked/]
   ])('rejects malformed operation %#', (operation, message) => {
     expect(validateEditOperation(operation)).toMatch(message);
+  });
+
+  it('accepts Decontaminate Colors only as a bounded masked image edit', () => {
+    expect(validateEditOperation({
+      ...maskedOperation,
+      operation: { type: 'decontaminate_colors', enabled: true, strength: 0.5, radius: 4 }
+    })).toBeNull();
   });
 
   it.each([

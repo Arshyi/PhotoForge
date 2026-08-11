@@ -1,4 +1,6 @@
 use super::bitmap::MaskBitmap;
+use super::progress::{MaskWorkContext, IO_PROGRESS_CHUNK_PIXELS};
+use crate::error::AppError;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -14,6 +16,14 @@ pub struct MaskDiagnostics {
 }
 
 pub fn inspect(mask: &MaskBitmap) -> MaskDiagnostics {
+    inspect_with_progress(mask, MaskWorkContext::new(None, None))
+        .expect("mask diagnostics without cancellation is infallible")
+}
+
+pub(crate) fn inspect_with_progress(
+    mask: &MaskBitmap,
+    context: MaskWorkContext<'_>,
+) -> Result<MaskDiagnostics, AppError> {
     let mut selected = 0_u64;
     let mut fully_selected = 0_u64;
     let mut coverage_sum = 0_u64;
@@ -21,6 +31,9 @@ pub fn inspect(mask: &MaskBitmap) -> MaskDiagnostics {
     let mut top = mask.height();
     let mut right = 0_u32;
     let mut bottom = 0_u32;
+    let total = mask.coverage().len() as u64;
+    context.report("inspect_mask_pixels", 0, total)?;
+    let mut completed = 0_u64;
     for y in 0..mask.height() {
         for x in 0..mask.width() {
             let value = mask.get(x, y);
@@ -33,9 +46,13 @@ pub fn inspect(mask: &MaskBitmap) -> MaskDiagnostics {
                 right = right.max(x);
                 bottom = bottom.max(y);
             }
+            completed += 1;
+            if completed % IO_PROGRESS_CHUNK_PIXELS == 0 || completed == total {
+                context.report("inspect_mask_pixels", completed, total)?;
+            }
         }
     }
-    MaskDiagnostics {
+    Ok(MaskDiagnostics {
         width: mask.width(),
         height: mask.height(),
         selected_pixels: selected,
@@ -43,7 +60,7 @@ pub fn inspect(mask: &MaskBitmap) -> MaskDiagnostics {
         average_coverage: coverage_sum as f64 / mask.coverage().len() as f64 / 255.0,
         bounds: (selected > 0).then_some([left, top, right + 1, bottom + 1]),
         memory_bytes: mask.coverage().len() as u64,
-    }
+    })
 }
 
 #[cfg(test)]

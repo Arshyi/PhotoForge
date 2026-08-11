@@ -58,6 +58,30 @@ describe('geometry mask transactions', () => {
     expect(plan.items[0]).toMatchObject({ key: 'embedded:1', oldStage: 0, newStage: 1 });
   });
 
+  it('plans active, named, and embedded masks through lens distortion at their exact stages', () => {
+    const selection = state(mask(4, 2, 'fnv1a64:0000000000000001'));
+    selection.namedMasks = [{
+      id: 'subject', name: 'Subject', mask: mask(4, 2, 'fnv1a64:0000000000000002'),
+      visible: true, locked: false, createdAt: 'a', modifiedAt: 'b'
+    }];
+    const embedded: EditOperation = {
+      type: 'masked', operation: { type: 'brightness', amount: 0.1 },
+      mask: mask(4, 2, 'fnv1a64:0000000000000003'), invert: false, mask_id: 'subject'
+    };
+    const lens: EditOperation = {
+      type: 'lens_correction', distortion: 0.2, vignetting: 0.1,
+      chromatic_aberration: -0.05
+    };
+    const plan = planGeometryRemap(4, 2, [embedded], [lens, embedded], selection);
+    expect(plan.items).toEqual([
+      expect.objectContaining({ key: 'active', oldStage: 0, newStage: 1 }),
+      expect.objectContaining({ key: 'named:0', oldStage: 0, newStage: 1 }),
+      expect.objectContaining({ key: 'embedded:1', oldStage: 0, newStage: 1 })
+    ]);
+    expect(plan.newGeometry).toEqual([lens]);
+    expect([plan.finalWidth, plan.finalHeight]).toEqual([4, 2]);
+  });
+
   it('accepts a new workflow mask only when it matches the new stage', () => {
     const workflow: EditOperation[] = [
       { type: 'rotate', degrees: 90 },

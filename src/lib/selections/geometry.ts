@@ -61,6 +61,8 @@ export function computeStageDimensions(
       height = Math.min(height - top, Math.max(1, Math.round(f32Product(operation.height, height))));
     } else if (operation.type === 'rotate' && (operation.degrees === 90 || operation.degrees === 270)) {
       [width, height] = [height, width];
+    } else if (operation.type === 'lens_correction') {
+      validateLensMapping(width, height, operation.distortion);
     }
     validateCanvasDimensions(width, height);
   }
@@ -133,6 +135,22 @@ function canonicalGeometryOperation(value: unknown): GeometryOperation | null {
     const corners = canonicalCorners(candidate.corners);
     return corners ? { type: 'perspective', corners } : null;
   }
+  if (candidate.type === 'lens_correction') {
+    if (!hasOnlyKeys(candidate, [
+      'type', 'distortion', 'vignetting', 'chromatic_aberration'
+    ])) return null;
+    if (
+      !finiteRange(candidate.distortion, -0.16, 1) ||
+      !finiteRange(candidate.vignetting, -1, 1) ||
+      !finiteRange(candidate.chromatic_aberration, -1, 1)
+    ) return null;
+    return {
+      type: 'lens_correction',
+      distortion: normalizedNumber(Number(candidate.distortion)),
+      vignetting: normalizedNumber(Number(candidate.vignetting)),
+      chromatic_aberration: normalizedNumber(Number(candidate.chromatic_aberration))
+    };
+  }
   return null;
 }
 
@@ -177,7 +195,7 @@ function hasOnlyKeys(value: Record<string, unknown>, expected: string[]): boolea
 
 function isGeometryType(value: string): value is GeometryOperation['type'] {
   return value === 'crop' || value === 'rotate' || value === 'reflect_horizontal' ||
-    value === 'straighten' || value === 'perspective';
+    value === 'straighten' || value === 'perspective' || value === 'lens_correction';
 }
 
 function validateCanvasDimensions(width: number, height: number): void {
@@ -186,4 +204,15 @@ function validateCanvasDimensions(width: number, height: number): void {
     !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
     width < 1 || height < 1 || !Number.isSafeInteger(pixels) || pixels > MAX_CANVAS_PIXELS
   ) throw new Error('Canvas dimensions are invalid or exceed the bounded limit.');
+}
+
+function validateLensMapping(width: number, height: number, value: number): void {
+  const distortion = Math.fround(value);
+  if (distortion >= 0) return;
+  const maximumRadiusSquared = Number(width > 1) + Number(height > 1);
+  const tangentialJacobian = 1 + distortion * maximumRadiusSquared;
+  const radialJacobian = 1 + 3 * distortion * maximumRadiusSquared;
+  if (tangentialJacobian <= 1e-6 || radialJacobian <= 1e-6) {
+    throw new Error('Lens distortion folds the canvas or is too close to singular.');
+  }
 }

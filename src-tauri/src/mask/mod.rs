@@ -30,6 +30,10 @@ pub use persistence::{
     export_png, import_png, load_mask, save_mask, MaskFile, MaskMetadata, MaskSnapshot,
     MASK_FORMAT_VERSION,
 };
+pub(crate) use persistence::{
+    export_png_snapshot_with_progress, import_png_snapshot_with_progress, load_mask_with_progress,
+    save_mask_with_progress,
+};
 pub use progress::{
     request_cancel as request_mask_progress_cancel, snapshot as mask_progress_snapshot,
     MaskProgress, MaskProgressCallback, MaskProgressHandle, MaskProgressState, MaskWorkContext,

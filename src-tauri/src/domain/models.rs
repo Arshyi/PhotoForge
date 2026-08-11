@@ -207,6 +207,14 @@ pub enum EditOperation {
         width: f32,
         adjustment: SelectiveColorAdjustment,
     },
+    DecontaminateColors {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default = "default_decontaminate_strength")]
+        strength: f32,
+        #[serde(default = "default_decontaminate_radius")]
+        radius: u32,
+    },
     Masked {
         operation: Box<EditOperation>,
         mask: MaskSnapshot,
@@ -347,7 +355,7 @@ impl EditOperation {
                 distortion.is_finite()
                     && vignetting.is_finite()
                     && chromatic_aberration.is_finite()
-                    && (-1.0..=1.0).contains(distortion)
+                    && (-0.16..=1.0).contains(distortion)
                     && (-1.0..=1.0).contains(vignetting)
                     && (-1.0..=1.0).contains(chromatic_aberration)
             }
@@ -375,6 +383,11 @@ impl EditOperation {
                     ]
                     .iter()
                     .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
+            }
+            Self::DecontaminateColors {
+                strength, radius, ..
+            } => {
+                strength.is_finite() && (0.0..=1.0).contains(strength) && (1..=32).contains(radius)
             }
             Self::Masked { .. } => unreachable!("masked operations return after validation"),
         };
@@ -432,9 +445,18 @@ impl EditOperation {
             Self::Hsl { .. } => "hsl",
             Self::TemperatureTint { .. } => "temperature_tint",
             Self::SelectiveColor { .. } => "selective_color",
+            Self::DecontaminateColors { .. } => "decontaminate_colors",
             Self::Masked { .. } => "masked",
         }
     }
+}
+
+const fn default_decontaminate_strength() -> f32 {
+    0.5
+}
+
+const fn default_decontaminate_radius() -> u32 {
+    4
 }
 
 fn validate_curve(points: &[CurvePoint]) -> bool {
@@ -638,6 +660,54 @@ mod tests {
         assert!(json.contains("document_enhance"));
     }
 
+    #[test]
+    fn decontaminate_colors_wire_defaults_are_safe_and_off() {
+        let operation: EditOperation =
+            serde_json::from_str(r#"{"type":"decontaminate_colors"}"#).unwrap();
+        assert_eq!(
+            operation,
+            EditOperation::DecontaminateColors {
+                enabled: false,
+                strength: 0.5,
+                radius: 4,
+            }
+        );
+        operation.validate().unwrap();
+        assert!(operation.supports_masking());
+        assert_eq!(operation.kind(), "decontaminate_colors");
+    }
+
+    #[test]
+    fn decontaminate_colors_rejects_non_finite_or_out_of_range_settings() {
+        for operation in [
+            EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: f32::NAN,
+                radius: 4,
+            },
+            EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: 1.01,
+                radius: 4,
+            },
+            EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: 0.5,
+                radius: 0,
+            },
+            EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: 0.5,
+                radius: 33,
+            },
+        ] {
+            assert!(matches!(
+                operation.validate(),
+                Err(AppError::InvalidOperation(_))
+            ));
+        }
+    }
+
     macro_rules! valid_operation_test {
         ($name:ident, $operation:expr) => {
             #[test]
@@ -715,7 +785,7 @@ mod tests {
     valid_operation_test!(
         accepts_lens_correction_bounds,
         EditOperation::LensCorrection {
-            distortion: -1.0,
+            distortion: -0.16,
             vignetting: 1.0,
             chromatic_aberration: 0.25
         }
@@ -816,6 +886,14 @@ mod tests {
         rejects_excessive_lens_distortion,
         EditOperation::LensCorrection {
             distortion: 1.1,
+            vignetting: 0.0,
+            chromatic_aberration: 0.0
+        }
+    );
+    invalid_operation_test!(
+        rejects_folded_negative_lens_distortion,
+        EditOperation::LensCorrection {
+            distortion: -0.17,
             vignetting: 0.0,
             chromatic_aberration: 0.0
         }

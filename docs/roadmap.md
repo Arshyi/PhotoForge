@@ -16,13 +16,13 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 
 ## Phase 7.1 — Phase 7 completion and hardening (complete)
 
-- Transactional active, named, and embedded workflow-mask remapping for crop, exact rotation, horizontal reflection, straighten, and perspective
+- Transactional active, named, and embedded workflow-mask remapping for crop, exact rotation, horizontal reflection, straighten, perspective, and bounded lens distortion
 - Lazy real-coverage grayscale thumbnails, visible named-mask overlays, bounded caches, and stricter full-resolution stage alignment
-- Work-unit numerical progress with delayed display, stale-request filtering, cooperative cancelling state, and terminal cleanup
+- Work-unit numerical progress with delayed display, stale-request filtering, cooperative cancelling state, terminal cleanup, and asynchronous JSON/PNG mask interchange
 - Optional pen pressure resolved into deterministic brush samples, disabled by default with unchanged mouse behavior
-- Dedicated preview-only Refine Selection comparison dialog with split/toggle and four background modes
+- Dedicated Refine Selection comparison dialog with split/toggle, four background modes, and optional deterministic masked edge-color decontamination
 - Versioned selection-session schema 2 with read-only Phase 7 migration; standalone mask and workflow file schemas remain compatible
-- Decontaminate Colors remains unshipped because the reviewed refinement contract changes coverage only
+- Masked-only Decontaminate Colors with safe-off defaults, bounded foreground sampling, alpha preservation, representative dialog preview, and compound selection/edit history
 
 ## Phase 0 — Foundation (complete)
 

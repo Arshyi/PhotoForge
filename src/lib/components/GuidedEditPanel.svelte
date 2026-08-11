@@ -36,7 +36,9 @@
   export let disabled = false;
   export let settings: GuidedSettings = defaultGuidedSettings;
   export let configurationRevision = 0;
-  export let onapply: (operations: EditOperation[]) => void = () => undefined;
+  export let onapply: (
+    operations: EditOperation[]
+  ) => boolean | void | Promise<boolean | void> = () => undefined;
   export let onmessage: (message: string, kind?: 'error' | 'success') => void = () => undefined;
 
   let request = '';
@@ -178,11 +180,15 @@
   }
 
   async function applyPlan() {
-    if (!plan || applying || plan.operations.length === 0) return;
+    if (!plan || applying || disabled || plan.operations.length === 0) return;
     applying = true;
     try {
       const validated = await invoke<EditPlan>('validate_guided_plan', { plan });
-      onapply(validated.operations);
+      const accepted = await onapply(validated.operations);
+      if (accepted === false) {
+        onmessage('The reviewed guided edits were not applied because the workspace is busy.', 'error');
+        return;
+      }
       onmessage(`Applied ${validated.operations.length} reviewed guided edits.`);
       plan = null;
       inspectorOpen = false;
@@ -510,7 +516,7 @@
 
       {#if plan.operations.length === 0}<p class="empty-plan" role="alert">Add a new request or cancel; an empty plan cannot be applied.</p>{/if}
       <footer>
-        <button type="button" class="apply-plan" disabled={applying || plan.operations.length === 0} on:click={applyPlan}>
+        <button type="button" class="apply-plan" disabled={disabled || applying || plan.operations.length === 0} on:click={applyPlan}>
           {applying ? 'Validating…' : 'Apply'}
         </button>
         <button type="button" on:click={cancelPlan}>Cancel</button>

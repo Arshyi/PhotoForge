@@ -8,9 +8,12 @@ use std::sync::atomic::AtomicBool;
 pub const MAX_GEOMETRY_STEPS: usize = 200;
 
 const MIN_PERSPECTIVE_JACOBIAN: f64 = 1.0e-6;
+const MIN_LENS_JACOBIAN: f64 = 1.0e-6;
 const INVERSE_RESIDUAL_TOLERANCE: f64 = 1.0e-8;
+const LENS_INVERSE_RESIDUAL_TOLERANCE: f64 = 1.0e-12;
 const INVERSE_DOMAIN_TOLERANCE: f64 = 1.0e-7;
 const MAX_INVERSE_ITERATIONS: usize = 20;
+const MAX_LENS_INVERSE_ITERATIONS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -30,6 +33,15 @@ pub enum GeometryStep {
     },
     Perspective {
         corners: PerspectiveCorners,
+    },
+    /// Spatially follows the center (green/alpha) sample used by the image lens operation.
+    /// Vignetting is intensity-only. Chromatic aberration has distinct red/blue offsets that a
+    /// single-channel mask cannot represent, so those values participate in serialization and
+    /// workflow identity but do not alter the mask coordinate map.
+    LensCorrection {
+        distortion: f32,
+        vignetting: f32,
+        chromatic_aberration: f32,
     },
 }
 
@@ -66,6 +78,15 @@ struct BilinearMap {
     horizontal: Coordinate,
     vertical: Coordinate,
     cross: Coordinate,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LensMap {
+    center: Coordinate,
+    pixel_scale: Coordinate,
+    distortion: f64,
+    active_x: bool,
+    active_y: bool,
 }
 
 impl GeometryChain {
@@ -121,20 +142,18 @@ impl GeometryChain {
         self.dimensions_value(old_stage)?;
         let target = new_chain.dimensions_value(new_stage)?;
         if old_stage <= new_stage
-            && self.steps[..old_stage] == new_chain.steps[..old_stage]
-            && new_chain.steps[old_stage..new_stage].iter().all(|step| {
-                matches!(
-                    step,
-                    GeometryStep::Crop { .. }
-                        | GeometryStep::Rotate { .. }
-                        | GeometryStep::ReflectHorizontal
-                )
-            })
+            && spatially_equal(&self.steps[..old_stage], &new_chain.steps[..old_stage])
+            && new_chain.steps[old_stage..new_stage]
+                .iter()
+                .all(|step| step.has_exact_mask_mapping())
         {
             Ok((old_stage..new_stage)
                 .map(|index| match new_chain.steps[index] {
                     GeometryStep::Crop { .. } => u64::from(new_chain.dimensions[index + 1].height),
                     GeometryStep::Rotate { .. } | GeometryStep::ReflectHorizontal => {
+                        u64::from(new_chain.dimensions[index].height)
+                    }
+                    GeometryStep::LensCorrection { .. } => {
                         u64::from(new_chain.dimensions[index].height)
                     }
                     GeometryStep::Straighten { .. } | GeometryStep::Perspective { .. } => 0,
@@ -223,7 +242,42 @@ impl GeometryStep {
                 validate_perspective(&corners)?;
                 Ok(input)
             }
+            Self::LensCorrection {
+                distortion,
+                vignetting,
+                chromatic_aberration,
+            } => {
+                validate_lens_correction(input, distortion, vignetting, chromatic_aberration)?;
+                Ok(input)
+            }
         }
+    }
+
+    fn spatially_equivalent(self, other: Self) -> bool {
+        match (self, other) {
+            (
+                Self::LensCorrection {
+                    distortion: left, ..
+                },
+                Self::LensCorrection {
+                    distortion: right, ..
+                },
+            ) => left == right,
+            _ => self == other,
+        }
+    }
+
+    fn has_exact_mask_mapping(self) -> bool {
+        matches!(
+            self,
+            Self::Crop { .. } | Self::Rotate { .. } | Self::ReflectHorizontal
+        ) || matches!(
+            self,
+            Self::LensCorrection {
+                distortion: 0.0,
+                ..
+            }
+        )
     }
 
     fn output_to_input(
@@ -285,6 +339,9 @@ impl GeometryStep {
                     x: denormalize(mapped.x, input.width),
                     y: denormalize(mapped.y, input.height),
                 })
+            }
+            Self::LensCorrection { distortion, .. } => {
+                Some(LensMap::new(input, distortion).evaluate(point))
             }
         }
     }
@@ -370,7 +427,132 @@ impl GeometryStep {
                     y: denormalize(v, output.height),
                 })
             }
+            Self::LensCorrection { distortion, .. } => {
+                LensMap::new(input, distortion).invert(point)
+            }
         }
+    }
+}
+
+impl LensMap {
+    fn new(dimensions: Dimensions, distortion: f32) -> Self {
+        let center = Coordinate {
+            x: (f64::from(dimensions.width) - 1.0) * 0.5,
+            y: (f64::from(dimensions.height) - 1.0) * 0.5,
+        };
+        Self {
+            center,
+            pixel_scale: Coordinate {
+                x: center.x.max(1.0),
+                y: center.y.max(1.0),
+            },
+            distortion: f64::from(distortion),
+            active_x: dimensions.width > 1,
+            active_y: dimensions.height > 1,
+        }
+    }
+
+    fn normalize(self, point: Coordinate) -> Coordinate {
+        Coordinate {
+            x: if self.active_x {
+                (point.x - self.center.x) / self.pixel_scale.x
+            } else {
+                0.0
+            },
+            y: if self.active_y {
+                (point.y - self.center.y) / self.pixel_scale.y
+            } else {
+                0.0
+            },
+        }
+    }
+
+    fn denormalize(self, point: Coordinate) -> Coordinate {
+        Coordinate {
+            x: self.center.x + point.x * self.pixel_scale.x,
+            y: self.center.y + point.y * self.pixel_scale.y,
+        }
+    }
+
+    fn evaluate_normalized(self, point: Coordinate) -> Coordinate {
+        let radius_squared = point.x * point.x + point.y * point.y;
+        scale(point, 1.0 + self.distortion * radius_squared)
+    }
+
+    fn evaluate(self, point: Coordinate) -> Coordinate {
+        self.denormalize(self.evaluate_normalized(self.normalize(point)))
+    }
+
+    fn invert(self, target: Coordinate) -> Option<Coordinate> {
+        let target = self.normalize(target);
+        if !target.x.is_finite() || !target.y.is_finite() {
+            return None;
+        }
+        let target_radius = target.x.hypot(target.y);
+        if target_radius <= LENS_INVERSE_RESIDUAL_TOLERANCE {
+            return Some(self.center);
+        }
+
+        let direction = scale(target, 1.0 / target_radius);
+        let mut maximum_radius = f64::INFINITY;
+        if self.active_x && direction.x.abs() > LENS_INVERSE_RESIDUAL_TOLERANCE {
+            maximum_radius = maximum_radius.min(1.0 / direction.x.abs());
+        }
+        if self.active_y && direction.y.abs() > LENS_INVERSE_RESIDUAL_TOLERANCE {
+            maximum_radius = maximum_radius.min(1.0 / direction.y.abs());
+        }
+        if !maximum_radius.is_finite() {
+            return Some(self.center);
+        }
+
+        let radial =
+            |radius: f64| radius * (1.0 + self.distortion * radius * radius) - target_radius;
+        if radial(maximum_radius) < -LENS_INVERSE_RESIDUAL_TOLERANCE {
+            return None;
+        }
+
+        let mut low = 0.0;
+        let mut high = maximum_radius;
+        let mut radius = target_radius.clamp(low, high);
+        let mut converged = false;
+        for _ in 0..MAX_LENS_INVERSE_ITERATIONS {
+            let residual = radial(radius);
+            if residual.abs() <= LENS_INVERSE_RESIDUAL_TOLERANCE {
+                converged = true;
+                break;
+            }
+            if residual > 0.0 {
+                high = radius;
+            } else {
+                low = radius;
+            }
+            let derivative = 1.0 + 3.0 * self.distortion * radius * radius;
+            if !derivative.is_finite() || derivative <= MIN_LENS_JACOBIAN {
+                return None;
+            }
+            let newton = radius - residual / derivative;
+            radius = if newton > low && newton < high && newton.is_finite() {
+                newton
+            } else {
+                (low + high) * 0.5
+            };
+        }
+        if !converged && radial(radius).abs() > LENS_INVERSE_RESIDUAL_TOLERANCE {
+            return None;
+        }
+
+        let normalized = scale(direction, radius);
+        if normalized.x < -1.0 - INVERSE_DOMAIN_TOLERANCE
+            || normalized.x > 1.0 + INVERSE_DOMAIN_TOLERANCE
+            || normalized.y < -1.0 - INVERSE_DOMAIN_TOLERANCE
+            || normalized.y > 1.0 + INVERSE_DOMAIN_TOLERANCE
+        {
+            return None;
+        }
+        Some(self.denormalize(Coordinate {
+            x: normalized.x.clamp(-1.0, 1.0),
+            y: normalized.y.clamp(-1.0, 1.0),
+        }))
     }
 }
 
@@ -503,15 +685,10 @@ pub(crate) fn remap_between_chains_with_progress(
     }
 
     if old_stage <= new_stage
-        && old_chain.steps[..old_stage] == new_chain.steps[..old_stage]
-        && new_chain.steps[old_stage..new_stage].iter().all(|step| {
-            matches!(
-                step,
-                GeometryStep::Crop { .. }
-                    | GeometryStep::Rotate { .. }
-                    | GeometryStep::ReflectHorizontal
-            )
-        })
+        && spatially_equal(&old_chain.steps[..old_stage], &new_chain.steps[..old_stage])
+        && new_chain.steps[old_stage..new_stage]
+            .iter()
+            .all(|step| step.has_exact_mask_mapping())
     {
         let mut output = mask.clone();
         for index in old_stage..new_stage {
@@ -627,9 +804,17 @@ fn apply_exact_step(
             context.report(phase, u64::from(mask.height()), u64::from(mask.height()))?;
             Ok(output)
         }
-        GeometryStep::Straighten { .. } | GeometryStep::Perspective { .. } => Err(
-            AppError::InvalidMask("interpolated geometry cannot use the exact mask path".into()),
-        ),
+        GeometryStep::LensCorrection {
+            distortion: 0.0, ..
+        } => {
+            context.report(phase, u64::from(mask.height()), u64::from(mask.height()))?;
+            Ok(mask.clone())
+        }
+        GeometryStep::Straighten { .. }
+        | GeometryStep::Perspective { .. }
+        | GeometryStep::LensCorrection { .. } => Err(AppError::InvalidMask(
+            "interpolated geometry cannot use the exact mask path".into(),
+        )),
     }
 }
 
@@ -739,6 +924,47 @@ fn validate_perspective(corners: &PerspectiveCorners) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_lens_correction(
+    dimensions: Dimensions,
+    distortion: f32,
+    vignetting: f32,
+    chromatic_aberration: f32,
+) -> Result<(), AppError> {
+    if !distortion.is_finite()
+        || !(-0.16..=1.0).contains(&distortion)
+        || ![vignetting, chromatic_aberration]
+            .iter()
+            .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
+    {
+        return Err(AppError::InvalidMask(
+            "lens distortion must be between -0.16 and 1; vignetting and chromatic aberration must be between -1 and 1".into(),
+        ));
+    }
+
+    let maximum_radius_squared =
+        f64::from(u8::from(dimensions.width > 1) + u8::from(dimensions.height > 1));
+    if maximum_radius_squared > 0.0 && distortion < 0.0 {
+        let distortion = f64::from(distortion);
+        let tangential = 1.0 + distortion * maximum_radius_squared;
+        let radial = 1.0 + 3.0 * distortion * maximum_radius_squared;
+        if tangential <= MIN_LENS_JACOBIAN || radial <= MIN_LENS_JACOBIAN {
+            return Err(AppError::InvalidMask(
+                "lens distortion folds the canvas or is too close to singular for a deterministic mask inverse"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn spatially_equal(left: &[GeometryStep], right: &[GeometryStep]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.spatially_equivalent(*right))
+}
+
 fn contains(point: Coordinate, dimensions: Dimensions) -> bool {
     point.x.is_finite()
         && point.y.is_finite()
@@ -830,6 +1056,14 @@ mod tests {
 
     fn rotate(degrees: i32) -> GeometryStep {
         GeometryStep::Rotate { degrees }
+    }
+
+    fn lens(distortion: f32, vignetting: f32, chromatic_aberration: f32) -> GeometryStep {
+        GeometryStep::LensCorrection {
+            distortion,
+            vignetting,
+            chromatic_aberration,
+        }
     }
 
     #[test]
@@ -938,6 +1172,158 @@ mod tests {
         assert_eq!((output.width(), output.height()), (5, 5));
         assert_ne!(output, source);
         assert!(output.coverage().iter().any(|value| *value > 0));
+    }
+
+    #[test]
+    fn lens_identity_and_non_spatial_changes_preserve_coverage_exactly() {
+        let source =
+            MaskBitmap::from_coverage(5, 3, (0..15).map(|value| value * 17).collect()).unwrap();
+        let original = chain(5, 3, vec![]);
+        let identity = chain(5, 3, vec![lens(0.0, 1.0, -1.0)]);
+        assert_eq!(remap(&source, &original, 0, &identity, 1), source);
+
+        let old = chain(5, 3, vec![lens(0.1, -0.7, -0.4)]);
+        let new = chain(5, 3, vec![lens(0.1, 0.8, 0.9)]);
+        assert_eq!(old.remap_work_units(1, &new, 1).unwrap(), 0);
+        assert_eq!(remap(&source, &old, 1, &new, 1), source);
+    }
+
+    #[test]
+    fn lens_forward_and_inverse_match_the_image_center_sample_mapping() {
+        let dimensions = Dimensions {
+            width: 5,
+            height: 5,
+        };
+        let mapping = LensMap::new(dimensions, 0.25);
+        let horizontal_edge = mapping.evaluate(Coordinate { x: 4.0, y: 2.0 });
+        assert!((horizontal_edge.x - 4.5).abs() < 1.0e-12);
+        assert!((horizontal_edge.y - 2.0).abs() < 1.0e-12);
+
+        for distortion in [0.6, -0.1] {
+            let mapping = LensMap::new(
+                Dimensions {
+                    width: 101,
+                    height: 61,
+                },
+                distortion,
+            );
+            for output in [
+                Coordinate { x: 50.0, y: 30.0 },
+                Coordinate { x: 63.5, y: 19.25 },
+                Coordinate { x: 27.75, y: 42.0 },
+            ] {
+                let input = mapping.evaluate(output);
+                let restored = mapping.invert(input).unwrap();
+                assert!((restored.x - output.x).abs() < 1.0e-6);
+                assert!((restored.y - output.y).abs() < 1.0e-6);
+            }
+        }
+
+        let wide = LensMap::new(
+            Dimensions {
+                width: 100_000_000,
+                height: 1,
+            },
+            0.2,
+        );
+        let adjacent_to_center = Coordinate {
+            x: 50_000_000.0,
+            y: 0.0,
+        };
+        let restored = wide.invert(wide.evaluate(adjacent_to_center)).unwrap();
+        assert!((restored.x - adjacent_to_center.x).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn lens_distortion_resamples_once_and_uses_zero_outside_source_bounds() {
+        use std::sync::Mutex;
+
+        let source = MaskBitmap::full(9, 9).unwrap();
+        let original = chain(9, 9, vec![]);
+        let transformed = chain(
+            9,
+            9,
+            vec![
+                lens(0.5, 0.2, -0.3),
+                GeometryStep::Straighten { degrees: 3.0 },
+            ],
+        );
+        let reports = Mutex::new(Vec::new());
+        let callback = |phase: &str, completed: u64, total: u64| {
+            reports
+                .lock()
+                .unwrap()
+                .push((phase.to_owned(), completed, total));
+            Ok(())
+        };
+        let output = remap_between_chains_with_progress(
+            &source,
+            &original,
+            0,
+            &transformed,
+            2,
+            MaskWorkContext::new(None, Some(&callback)),
+        )
+        .unwrap();
+        assert_eq!(output.get(4, 4), 255);
+        assert_eq!(output.get(0, 0), 0);
+        assert!(reports
+            .into_inner()
+            .unwrap()
+            .iter()
+            .all(|(phase, _, _)| phase == "geometry_resample_rows"));
+    }
+
+    #[test]
+    fn folded_extreme_and_invalid_lens_settings_are_rejected() {
+        for distortion in [-1.0, -0.2, -1.0 / 6.0] {
+            assert!(GeometryChain::new(10, 10, vec![lens(distortion, 0.0, 0.0)]).is_err());
+        }
+        assert!(GeometryChain::new(10, 10, vec![lens(f32::NAN, 0.0, 0.0)]).is_err());
+        assert!(GeometryChain::new(10, 10, vec![lens(1.01, 0.0, 0.0)]).is_err());
+        assert!(GeometryChain::new(10, 10, vec![lens(0.0, 1.01, 0.0)]).is_err());
+        assert!(GeometryChain::new(10, 10, vec![lens(0.0, 0.0, f32::INFINITY)]).is_err());
+
+        assert!(GeometryChain::new(10, 10, vec![lens(-0.16, 0.0, 0.0)]).is_ok());
+        assert!(GeometryChain::new(1, 10, vec![lens(-0.16, 0.0, 0.0)]).is_ok());
+        assert!(GeometryChain::new(1, 1, vec![lens(-0.16, 1.0, -1.0)]).is_ok());
+    }
+
+    #[test]
+    fn lens_geometry_wire_format_preserves_all_workflow_fields() {
+        let step = lens(0.125, -0.25, 0.5);
+        let value = serde_json::to_value(step).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "lens_correction",
+                "distortion": 0.125,
+                "vignetting": -0.25,
+                "chromatic_aberration": 0.5
+            })
+        );
+        assert_eq!(serde_json::from_value::<GeometryStep>(value).unwrap(), step);
+    }
+
+    #[test]
+    fn lens_preserves_stage_dimensions_in_ordered_geometry_chains() {
+        let geometry = chain(
+            8,
+            6,
+            vec![
+                GeometryStep::Crop {
+                    x: 0.25,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 1.0,
+                },
+                lens(0.1, 0.4, -0.2),
+                rotate(90),
+            ],
+        );
+        assert_eq!(geometry.dimensions_at(1).unwrap(), (4, 6));
+        assert_eq!(geometry.dimensions_at(2).unwrap(), (4, 6));
+        assert_eq!(geometry.dimensions_at(3).unwrap(), (6, 4));
     }
 
     #[test]

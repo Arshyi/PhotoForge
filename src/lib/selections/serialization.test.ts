@@ -109,7 +109,11 @@ describe('selection session serialization', () => {
         aspect_ratio: null, overlay: 'none'
       },
       { type: 'reflect_horizontal' },
-      { type: 'rotate', degrees: 90 }
+      { type: 'rotate', degrees: 90 },
+      {
+        type: 'lens_correction', distortion: 0.1, vignetting: -0.2,
+        chromatic_aberration: 0.05
+      }
     ];
     let state = createSelectionState('doc', 8, 4);
     state = {

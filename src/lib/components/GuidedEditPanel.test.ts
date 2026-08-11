@@ -161,7 +161,7 @@ describe('GuidedEditPanel', () => {
   });
 
   it('validates the edited plan before applying it', async () => {
-    const apply = vi.fn();
+    const apply = vi.fn(() => true);
     enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
     enqueue('validate_guided_plan', planned());
     const view = renderPanel({ onapply: apply });
@@ -171,6 +171,53 @@ describe('GuidedEditPanel', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Apply' }));
     await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
     expect(invokeMock.mock.calls.some(([command]) => command === 'validate_guided_plan')).toBe(true);
+    await waitFor(() => expect(view.queryByLabelText('Guided edit plan')).toBeNull());
+  });
+
+  it('retains a reviewed plan and reports an error when the workspace rejects it', async () => {
+    const apply = vi.fn(() => false);
+    const message = vi.fn();
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', planned());
+    const view = renderPanel({ onapply: apply, onmessage: message });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
+    expect(view.getByLabelText('Guided edit plan')).toBeTruthy();
+    expect(message).toHaveBeenCalledWith(
+      'The reviewed guided edits were not applied because the workspace is busy.',
+      'error'
+    );
+    expect(message).not.toHaveBeenCalledWith(expect.stringMatching(/^Applied /));
+  });
+
+  it('retains a reviewed plan when the application callback rejects', async () => {
+    const apply = vi.fn(async () => { throw new Error('Commit failed safely'); });
+    const message = vi.fn();
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', planned());
+    const view = renderPanel({ onapply: apply, onmessage: message });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'Apply' }));
+
+    await waitFor(() => expect(message).toHaveBeenCalledWith('Commit failed safely', 'error'));
+    expect(view.getByLabelText('Guided edit plan')).toBeTruthy();
+    expect(message).not.toHaveBeenCalledWith(expect.stringMatching(/^Applied /));
+  });
+
+  it('disables applying an existing reviewed plan while the workspace is busy', async () => {
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    const view = renderPanel();
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    const apply = await view.findByRole('button', { name: 'Apply' });
+
+    await view.rerender({ disabled: true });
+    expect((apply as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByLabelText('Guided edit plan')).toBeTruthy();
   });
 
   it('applies a reviewed plan with Ctrl+Enter', async () => {

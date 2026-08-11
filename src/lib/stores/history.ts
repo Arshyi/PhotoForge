@@ -46,11 +46,17 @@ export class EditHistory {
     return this.operations;
   }
 
-  commit(operations: EditOperation[], coalesceKey?: string, now = Date.now()): EditOperation[] {
+  commit(
+    operations: EditOperation[],
+    coalesceKey?: string,
+    now = Date.now(),
+    forceMatchingCoalesce = false
+  ): EditOperation[] {
     this.pushedOnLastCommit = false;
     if (JSON.stringify(operations) === JSON.stringify(this.current)) return this.operations;
     const canCoalesce =
-      coalesceKey !== undefined && this.coalesceKey === coalesceKey && now - this.coalesceAt <= 500;
+      coalesceKey !== undefined && this.coalesceKey === coalesceKey &&
+      (forceMatchingCoalesce || now - this.coalesceAt <= 500);
     if (!canCoalesce) {
       this.undoStack.push(cloneOperations(this.current));
       this.pushedOnLastCommit = true;

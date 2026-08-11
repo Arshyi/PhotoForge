@@ -1,4 +1,12 @@
-export type HistoryEvent = 'edit' | 'selection' | 'geometry';
+export type HistoryEvent = 'edit' | 'selection' | 'geometry' | 'compound';
+
+function includesEdit(event: HistoryEvent): boolean {
+  return event === 'edit' || event === 'geometry' || event === 'compound';
+}
+
+function includesSelection(event: HistoryEvent): boolean {
+  return event === 'selection' || event === 'geometry' || event === 'compound';
+}
 
 export interface RetainedHistoryTimeline {
   events: HistoryEvent[];
@@ -16,8 +24,8 @@ export function retainedHistorySuffix(
   let start = events.length;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    const nextEditDepth = editDepth + (event === 'edit' || event === 'geometry' ? 1 : 0);
-    const nextSelectionDepth = selectionDepth + (event === 'selection' || event === 'geometry' ? 1 : 0);
+    const nextEditDepth = editDepth + (includesEdit(event) ? 1 : 0);
+    const nextSelectionDepth = selectionDepth + (includesSelection(event) ? 1 : 0);
     if (nextEditDepth > availableEditDepth || nextSelectionDepth > availableSelectionDepth) break;
     editDepth = nextEditDepth;
     selectionDepth = nextSelectionDepth;
@@ -40,8 +48,8 @@ export function eventDepths(events: HistoryEvent[]): { editDepth: number; select
   let editDepth = 0;
   let selectionDepth = 0;
   for (const event of events) {
-    if (event === 'edit' || event === 'geometry') editDepth += 1;
-    if (event === 'selection' || event === 'geometry') selectionDepth += 1;
+    if (includesEdit(event)) editDepth += 1;
+    if (includesSelection(event)) selectionDepth += 1;
   }
   return { editDepth, selectionDepth };
 }

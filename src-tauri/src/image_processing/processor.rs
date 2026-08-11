@@ -2,8 +2,8 @@ use crate::domain::EditOperation;
 use crate::error::AppError;
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 
-use super::professional;
 use super::restoration;
+use super::{decontaminate, professional};
 
 pub fn apply_pipeline(
     source: &DynamicImage,
@@ -140,8 +140,22 @@ fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaI
                     image_height: image.height(),
                 });
             }
-            let adjusted = apply_operation(image, operation)?;
-            blend_masked(image, &adjusted, &decoded, *invert)?
+            if let EditOperation::DecontaminateColors {
+                enabled,
+                strength,
+                radius,
+            } = operation.as_ref()
+            {
+                decontaminate::apply(image, &decoded, *invert, *enabled, *strength, *radius)?
+            } else {
+                let adjusted = apply_operation(image, operation)?;
+                blend_masked(image, &adjusted, &decoded, *invert)?
+            }
+        }
+        EditOperation::DecontaminateColors { .. } => {
+            return Err(AppError::InvalidOperation(
+                "decontaminate_colors requires a selection mask".into(),
+            ));
         }
         EditOperation::Curves { .. }
         | EditOperation::Levels { .. }
@@ -564,6 +578,54 @@ mod tests {
         .to_rgba8();
         assert_eq!(result.get_pixel(0, 0), source.to_rgba8().get_pixel(0, 0));
         assert_ne!(result.get_pixel(1, 0), source.to_rgba8().get_pixel(1, 0));
+    }
+
+    #[test]
+    fn masked_decontamination_integrates_with_existing_pipeline_operations() {
+        let source = image(
+            3,
+            1,
+            &[[200, 20, 20, 41], [20, 200, 20, 42], [20, 20, 200, 43]],
+        );
+        let mask = crate::mask::MaskBitmap::from_coverage(3, 1, vec![255, 128, 0]).unwrap();
+        let result = apply_pipeline(
+            &source,
+            &[
+                EditOperation::Masked {
+                    operation: Box::new(EditOperation::DecontaminateColors {
+                        enabled: true,
+                        strength: 1.0,
+                        radius: 1,
+                    }),
+                    mask: crate::mask::MaskSnapshot::encode(&mask),
+                    invert: false,
+                    mask_id: Some("subject".into()),
+                },
+                EditOperation::Brightness { amount: 0.1 },
+            ],
+        )
+        .unwrap()
+        .to_rgba8();
+
+        assert_eq!(result.get_pixel(0, 0).0, [226, 46, 46, 41]);
+        assert_eq!(result.get_pixel(1, 0).0, [226, 46, 46, 42]);
+        assert_eq!(result.get_pixel(2, 0).0, [46, 46, 226, 43]);
+    }
+
+    #[test]
+    fn decontamination_rejects_unmasked_use() {
+        let source = image(1, 1, &[[10, 20, 30, 255]]);
+        assert!(matches!(
+            apply_pipeline(
+                &source,
+                &[EditOperation::DecontaminateColors {
+                    enabled: true,
+                    strength: 0.5,
+                    radius: 4,
+                }]
+            ),
+            Err(AppError::InvalidOperation(_))
+        ));
     }
 
     #[test]

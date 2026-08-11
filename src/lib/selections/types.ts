@@ -109,7 +109,13 @@ export type GeometryOperation =
   | { type: 'rotate'; degrees: number }
   | { type: 'reflect_horizontal' }
   | { type: 'straighten'; degrees: number }
-  | { type: 'perspective'; corners: GeometryPerspectiveCorners };
+  | { type: 'perspective'; corners: GeometryPerspectiveCorners }
+  | {
+      type: 'lens_correction';
+      distortion: number;
+      vignetting: number;
+      chromatic_aberration: number;
+    };
 
 export interface SelectionState {
   schemaVersion: 2;

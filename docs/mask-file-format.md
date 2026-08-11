@@ -45,12 +45,14 @@ Runs follow row-major order and may cross row boundaries. Encoders select RLE on
 - All multiplication, allocation, Base64, run-length, decoded-length, version, identity, and checksum checks happen before a mask is accepted.
 - Files larger than the bounded encoded representation plus metadata are rejected.
 - Import/export paths must be absolute local paths, cannot use URI syntax, UNC/network paths, or `..` traversal, and are chosen through native dialogs.
-- Export writes a sibling temporary file and renames it into place. A failure in one mask does not modify the source image.
+- Export creates a collision-resistant sibling temporary file with create-new semantics, flushes and synchronizes it, then replaces the destination. Cancellation or failure before replacement preserves any existing destination and removes the temporary file. A failure in one mask does not modify the source image.
 - Unknown JSON fields are ignored for forward compatibility; an unknown format or version is rejected.
 
 ## Grayscale PNG interchange
 
 PhotoForge also imports and exports grayscale PNG masks. PNG intensity maps directly to coverage: black is `0`, white is `255`, and intermediate values remain partial. Dimensions are inspected and bounded before decode. Other formats are rejected for mask interchange.
+
+JSON and PNG interchange is request-scoped to the open document. File bytes, output rows, decoded coverage, checksum, and diagnostic scans report real numerical work units when their totals are known; parser and codec-only phases remain explicitly indeterminate instead of inventing percentages. Cancellation is checked between bounded chunks and before destination replacement, and stale document/request results are discarded.
 
 ## Version 0.7.1 compatibility
 

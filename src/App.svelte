@@ -118,15 +118,20 @@
     SelectionTool
   } from './lib/selections/types';
   import {
+    canReplacePendingGeometry,
     createGeometryCommitToken,
     createWorkspaceMutationGuard,
+    geometryCoalesceIntent,
     isGeometryCommitTokenCurrent,
+    isMaskIoRequestCurrent,
+    isMaskRequestCurrent,
     isWorkspaceMutationGuardCurrent,
     selectionCanvasRectangle,
     workspaceMutationBlocked,
     type GeometryCommitToken,
     type WorkspaceMutationGuard
   } from './lib/selections/workflowGuards';
+  import { buildRefineApplyTransaction } from './lib/selections/refineApply';
 
   const history = new EditHistory();
   const selectionHistory = new SelectionHistory();
@@ -170,6 +175,7 @@
   let selectionState: SelectionState = createSelectionState();
   let selectionBusy = false;
   let maskRequestId = 0;
+  let cancelledMaskRequestId = 0;
   const maskProgressTracker = new MaskProgressTracker();
   let maskProgress: MaskProgressView | null = null;
   let maskProgressTimer: ReturnType<typeof setTimeout> | undefined;
@@ -185,10 +191,12 @@
   let refineTimer: ReturnType<typeof setTimeout> | undefined;
   let refineSourceGuard: WorkspaceMutationGuard | null = null;
   let geometryTransactionRunning = false;
+  let activeGeometryCoalesceKey: string | undefined;
   let geometryCommitGeneration = 0;
   type PendingGeometryCommit = {
     operations: EditOperation[];
     coalesceKey?: string;
+    coalesceWithActive: boolean;
     sourceWidth: number;
     sourceHeight: number;
     token: GeometryCommitToken;
@@ -200,6 +208,7 @@
   $: selectionCanvasWidth = selectionState.canvasWidth || metadata?.width || 0;
   $: selectionCanvasHeight = selectionState.canvasHeight || metadata?.height || 0;
   $: selectionPanelHistory = selectionPanelHistoryAvailability(historyEvents, redoEvents);
+  $: geometryMutationBusy = geometryTransactionRunning || Boolean(pendingGeometryCommit);
 
   onMount(() => {
     guidedSettings = loadGuidedSettings();
@@ -342,7 +351,7 @@
   }
 
   async function chooseImage() {
-    if (opening) return;
+    if (opening || exporting) return;
     try {
       const path = await open({
         multiple: false,
@@ -357,6 +366,10 @@
   }
 
   async function loadPath(path: string) {
+    if (exporting) {
+      notify('Wait for the current export to finish before opening another image.', 'error');
+      return;
+    }
     persistSelectionState();
     closeRefineState();
     invalidateGeometryCommits();
@@ -514,28 +527,39 @@
     }
   }
 
-  function commit(next: EditOperation[], coalesceKey?: string) {
+  function commit(next: EditOperation[], coalesceKey?: string): boolean {
     const scoped = scopeChangedOperations(next);
-    commitPrepared(scoped, coalesceKey);
+    return commitPrepared(scoped, coalesceKey);
   }
 
-  function commitGlobal(next: EditOperation[], coalesceKey?: string) {
-    commitPrepared(cloneOperations(next), coalesceKey);
+  function commitGlobal(next: EditOperation[], coalesceKey?: string): boolean {
+    return commitPrepared(cloneOperations(next), coalesceKey);
   }
 
-  function commitPrepared(next: EditOperation[], coalesceKey?: string) {
-    if (!allowWorkspaceMutation()) return;
+  function commitPrepared(next: EditOperation[], coalesceKey?: string): boolean {
     let geometryChanged = false;
     try {
       geometryChanged = geometryFingerprint(extractGeometryOperations(operations)) !==
         geometryFingerprint(extractGeometryOperations(next));
     } catch (error) {
       notify(errorMessage(error), 'error');
-      return;
+      return false;
     }
-    if (geometryChanged) {
-      queueGeometryCommit(next, coalesceKey);
-      return;
+    const coalesceIntent = geometryCoalesceIntent(
+      geometryChanged,
+      pendingGeometryCommit?.coalesceKey,
+      activeGeometryCoalesceKey,
+      geometryTransactionRunning,
+      coalesceKey,
+      geometryTransactionRunning && cancelledMaskRequestId === maskRequestId
+    );
+    if (!allowWorkspaceMutation(coalesceIntent !== 'reject')) return false;
+    if (coalesceIntent === 'cancel_pending') {
+      clearPendingGeometryCommit();
+      return true;
+    }
+    if (geometryChanged || coalesceIntent === 'queue') {
+      return queueGeometryCommit(next, coalesceKey);
     }
     selectionHistory.endCoalescing();
     const before = JSON.stringify(operations);
@@ -545,13 +569,17 @@
     }
     syncHistoryActions();
     schedulePreview();
+    return true;
   }
 
-  function queueGeometryCommit(next: EditOperation[], coalesceKey?: string) {
-    if (!metadata) return;
+  function queueGeometryCommit(next: EditOperation[], coalesceKey?: string): boolean {
+    if (!metadata) return false;
+    const coalesceWithActive = geometryTransactionRunning &&
+      canReplacePendingGeometry(activeGeometryCoalesceKey, coalesceKey);
     pendingGeometryCommit = {
       operations: cloneOperations(next),
       ...(coalesceKey ? { coalesceKey } : {}),
+      coalesceWithActive,
       sourceWidth: metadata.width,
       sourceHeight: metadata.height,
       token: createGeometryCommitToken(
@@ -561,12 +589,13 @@
         selectionState.documentKey
       )
     };
-    if (geometryTransactionRunning) return;
+    if (geometryTransactionRunning) return true;
     if (geometryCommitTimer) clearTimeout(geometryCommitTimer);
     geometryCommitTimer = setTimeout(() => {
       geometryCommitTimer = undefined;
       void drainGeometryCommit();
     }, coalesceKey === 'straighten' ? 140 : 0);
+    return true;
   }
 
   async function drainGeometryCommit() {
@@ -574,6 +603,7 @@
     const pending = pendingGeometryCommit;
     pendingGeometryCommit = null;
     if (!geometryCommitIsCurrent(pending.token)) return;
+    activeGeometryCoalesceKey = pending.coalesceKey;
     geometryTransactionRunning = true;
     selectionBusy = true;
     const oldOperations = cloneOperations(operations);
@@ -600,10 +630,14 @@
           throw new Error(`Masked operation ${embedded.operationIndex + 1} failed geometry validation.`);
         }
       }
+      if (ownRequest === cancelledMaskRequestId) return;
 
       progressDelay = setTimeout(() => {
         progressDelay = undefined;
-        if (ownRequest !== maskRequestId || !geometryCommitIsCurrent(pending.token)) return;
+        if (!isMaskRequestCurrent(
+          ownDocument, ownRequest, cancelledMaskRequestId, documentId, maskRequestId
+        ) ||
+          !geometryCommitIsCurrent(pending.token)) return;
         startMaskProgress(ownRequest, 'Validate and remap mask geometry');
         progressStarted = true;
       }, 180);
@@ -618,6 +652,7 @@
         clearTimeout(progressDelay);
         progressDelay = undefined;
       }
+      if (ownRequest === cancelledMaskRequestId) return;
       const remapped = validateGeometryRemapResult(plan, result, ownDocument, ownRequest);
       if (result.documentId !== documentId || result.requestId !== maskRequestId ||
         !geometryCommitIsCurrent(pending.token)) {
@@ -637,8 +672,19 @@
         history.endCoalescing();
         selectionHistory.endCoalescing();
       }
-      operations = history.commit(applied.operations, pending.coalesceKey);
-      selectionState = selectionHistory.commit(applied.selection, pending.coalesceKey);
+      const commitAt = Date.now();
+      operations = history.commit(
+        applied.operations,
+        pending.coalesceKey,
+        commitAt,
+        pending.coalesceWithActive
+      );
+      selectionState = selectionHistory.commit(
+        applied.selection,
+        pending.coalesceKey,
+        commitAt,
+        pending.coalesceWithActive
+      );
       const editPushed = history.lastCommitCreatedEntry;
       const selectionPushed = selectionHistory.lastCommitCreatedEntry;
       let historyReset = false;
@@ -668,6 +714,7 @@
       }
       if (ownRequest === maskRequestId) selectionBusy = false;
       geometryTransactionRunning = false;
+      activeGeometryCoalesceKey = undefined;
       const queuedAfterTransaction = pendingGeometryCommit as PendingGeometryCommit | null;
       if (queuedAfterTransaction && geometryCommitIsCurrent(queuedAfterTransaction.token)) {
         if (geometryCommitTimer) clearTimeout(geometryCommitTimer);
@@ -683,6 +730,10 @@
 
   function invalidateGeometryCommits() {
     geometryCommitGeneration += 1;
+    clearPendingGeometryCommit();
+  }
+
+  function clearPendingGeometryCommit() {
     pendingGeometryCommit = null;
     if (geometryCommitTimer) clearTimeout(geometryCommitTimer);
     geometryCommitTimer = undefined;
@@ -733,6 +784,37 @@
     syncHistoryActions();
   }
 
+  function commitCompoundState(nextOperations: EditOperation[], nextSelection: SelectionState): boolean {
+    if (!allowWorkspaceMutation()) return false;
+    history.endCoalescing();
+    selectionHistory.endCoalescing();
+    const previousOperations = JSON.stringify(operations);
+    const previousSelection = JSON.stringify(selectionState);
+    operations = history.commit(nextOperations);
+    selectionState = selectionHistory.commit(nextSelection);
+    const editChanged = JSON.stringify(operations) !== previousOperations;
+    const selectionChanged = JSON.stringify(selectionState) !== previousSelection;
+    const editPushed = history.lastCommitCreatedEntry;
+    const selectionPushed = selectionHistory.lastCommitCreatedEntry;
+
+    if (editChanged !== editPushed || selectionChanged !== selectionPushed) {
+      resetHistoryAtCurrentState();
+      persistSelectionState();
+      syncHistoryActions();
+      if (editChanged) schedulePreview();
+      notify('The change was applied, but history was reset to preserve atomic undo safety.', 'error');
+      return true;
+    }
+    if (editPushed && selectionPushed) recordHistoryMutation('compound', true);
+    else if (editPushed) recordHistoryMutation('edit', true);
+    else if (selectionPushed) recordHistoryMutation('selection', true);
+
+    if (selectionChanged) persistSelectionState();
+    if (editChanged) schedulePreview();
+    syncHistoryActions();
+    return editChanged || selectionChanged;
+  }
+
   function recordHistoryMutation(kind: HistoryEvent, createdEntry: boolean) {
     if (createdEntry) historyEvents = [...historyEvents, kind];
     redoEvents = [];
@@ -759,8 +841,15 @@
     redoEvents = [];
   }
 
-  function allowWorkspaceMutation(): boolean {
-    if (!workspaceMutationBlocked(selectionBusy, geometryTransactionRunning, refineOriginalMask !== null)) {
+  function allowWorkspaceMutation(allowGeometryCoalescing = false): boolean {
+    const selectionBlocks = selectionBusy && !allowGeometryCoalescing;
+    const geometryBlocks = (geometryTransactionRunning || Boolean(pendingGeometryCommit)) &&
+      !allowGeometryCoalescing;
+    if (!workspaceMutationBlocked(
+      selectionBlocks,
+      geometryBlocks,
+      refineOriginalMask !== null
+    )) {
       return true;
     }
     notify('Wait for the current selection or geometry operation to finish.', 'error');
@@ -808,7 +897,8 @@
     if (!allowWorkspaceMutation()) return;
     const kind = historyEvents.at(-1);
     if (!kind) return;
-    if ((kind === 'geometry' && (!history.canUndo || !selectionHistory.canUndo)) ||
+    const paired = kind === 'geometry' || kind === 'compound';
+    if ((paired && (!history.canUndo || !selectionHistory.canUndo)) ||
       (kind === 'edit' && !history.canUndo) ||
       (kind === 'selection' && !selectionHistory.canUndo)) {
       resetHistoryAtCurrentState();
@@ -819,7 +909,7 @@
     historyEvents = historyEvents.slice(0, -1);
     history.endCoalescing();
     selectionHistory.endCoalescing();
-    if (kind === 'geometry') {
+    if (paired) {
       operations = history.undo();
       selectionState = selectionHistory.undo();
       persistSelectionState();
@@ -839,7 +929,8 @@
     if (!allowWorkspaceMutation()) return;
     const kind = redoEvents.at(-1);
     if (!kind) return;
-    if ((kind === 'geometry' && (!history.canRedo || !selectionHistory.canRedo)) ||
+    const paired = kind === 'geometry' || kind === 'compound';
+    if ((paired && (!history.canRedo || !selectionHistory.canRedo)) ||
       (kind === 'edit' && !history.canRedo) ||
       (kind === 'selection' && !selectionHistory.canRedo)) {
       resetHistoryAtCurrentState();
@@ -850,7 +941,7 @@
     redoEvents = redoEvents.slice(0, -1);
     history.endCoalescing();
     selectionHistory.endCoalescing();
-    if (kind === 'geometry') {
+    if (paired) {
       operations = history.redo();
       selectionState = selectionHistory.redo();
       persistSelectionState();
@@ -887,8 +978,8 @@
     commit(presetOperations);
   }
 
-  function applyGuidedPlan(planOperations: EditOperation[]) {
-    commitGlobal(planOperations);
+  function applyGuidedPlan(planOperations: EditOperation[]): boolean {
+    return commitGlobal(planOperations);
   }
 
   function persistSelectionState() {
@@ -929,7 +1020,7 @@
   }
 
   async function handleSelectionGesture(gesture: SelectionGesture) {
-    if (!metadata || selectionBusy) return;
+    if (!metadata || selectionBusy || geometryMutationBusy) return;
     const mutationGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     const configuredMode = operationModeFromModifiers(
       selectionState.mode,
@@ -1029,7 +1120,7 @@
   }
 
   function openRefineSelection() {
-    if (!selectionState.activeMask || selectionBusy) return;
+    if (!selectionState.activeMask || selectionBusy || geometryMutationBusy) return;
     refineSourceGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     refineOriginalMask = structuredClone(selectionState.activeMask);
     refinePreviewMask = null;
@@ -1085,9 +1176,9 @@
         requestId: ownRequest
       });
       if (
-        result.isCurrent &&
-        result.requestId === maskRequestId &&
-        result.documentId === documentId &&
+        result.isCurrent && isMaskRequestCurrent(
+          result.documentId, result.requestId, cancelledMaskRequestId, documentId, maskRequestId
+        ) &&
         refineOriginalMask?.checksum === originalChecksum &&
         isWorkspaceMutationGuardCurrent(sourceGuard, documentId, operations, selectionState)
       ) {
@@ -1121,21 +1212,28 @@
     }
     const mask = structuredClone(refinePreviewMask);
     const diagnostics = structuredClone(refinePreviewDiagnostics);
+    const parameters = { ...refineParameters };
+    const transaction = buildRefineApplyTransaction(operations, selectionState, mask, diagnostics, {
+      enabled: parameters.decontaminate,
+      strength: parameters.decontaminateStrength,
+      radius: parameters.decontaminateRadius
+    });
     closeRefineState();
-    commitSelectionState(
-      setActiveMask(
-        { ...selectionState, overlay: { ...selectionState.overlay, visible: true } },
-        mask,
-        diagnostics
-      )
-    );
-    notify('Refine selection applied');
+    const applied = transaction.includesImageEdit
+      ? commitCompoundState(transaction.operations, transaction.selection)
+      : (commitSelectionState(transaction.selection), true);
+    if (applied) {
+      notify(parameters.decontaminate
+        ? 'Refine selection and color decontamination applied'
+        : 'Refine selection applied');
+    }
   }
 
   function cancelRefineSelection() {
     if (refineTimer) clearTimeout(refineTimer);
     refineTimer = undefined;
     if (refineBusy) {
+      cancelledMaskRequestId = maskRequestId;
       maskProgress = maskProgressTracker.markCancelling();
       void cancelMaskOperation(maskRequestId).catch(() => false);
     }
@@ -1154,7 +1252,7 @@
   }
 
   async function applyMaskOperation(operation: MaskOperation) {
-    if (!metadata || selectionBusy) return;
+    if (!metadata || selectionBusy || geometryMutationBusy) return;
     if (operation.type === 'deselect') {
       commitSelectionState({
         ...setActiveMask(selectionState, null, null),
@@ -1212,7 +1310,9 @@
     source: string,
     mutationGuard: WorkspaceMutationGuard
   ) {
-    if (!result.isCurrent || result.requestId !== maskRequestId || result.documentId !== documentId) return;
+    if (!result.isCurrent || !isMaskRequestCurrent(
+      result.documentId, result.requestId, cancelledMaskRequestId, documentId, maskRequestId
+    )) return;
     if (!isWorkspaceMutationGuardCurrent(mutationGuard, documentId, operations, selectionState)) {
       notify('The selection or edit pipeline changed; the stale mask result was discarded.', 'error');
       return;
@@ -1232,8 +1332,13 @@
 
   async function cancelCurrentMaskOperation() {
     if (!selectionBusy) return;
+    const cancellingRequest = maskRequestId;
+    cancelledMaskRequestId = cancellingRequest;
+    if (geometryTransactionRunning) {
+      clearPendingGeometryCommit();
+    }
     maskProgress = maskProgressTracker.markCancelling();
-    await cancelMaskOperation(maskRequestId).catch(() => false);
+    await cancelMaskOperation(cancellingRequest).catch(() => false);
   }
 
   function isMaskCancellation(error: unknown): boolean {
@@ -1247,7 +1352,7 @@
     id?: string,
     value?: string
   ) {
-    if (selectionBusy) return;
+    if (selectionBusy || geometryMutationBusy) return;
     if (action === 'create') {
       if (selectionState.namedMasks.length >= MAX_NAMED_MASKS) {
         notify(`Named masks are limited to ${MAX_NAMED_MASKS} per document.`, 'error');
@@ -1280,7 +1385,7 @@
 
   async function combineNamedMask(id: string) {
     const named = selectionState.namedMasks.find((mask) => mask.id === id);
-    if (!named || !selectionState.activeMask || selectionBusy) return;
+    if (!named || !selectionState.activeMask || selectionBusy || geometryMutationBusy) return;
     const mutationGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     const sourceMode = selectionState.mode;
     const ownRequest = ++maskRequestId;
@@ -1377,8 +1482,16 @@
   }
 
   async function importSelectionMask(format: 'json' | 'png') {
-    if (!metadata || selectionBusy) return;
+    if (!metadata || selectionBusy || geometryTransactionRunning || pendingGeometryCommit) {
+      if (metadata && (geometryTransactionRunning || pendingGeometryCommit)) {
+        notify('Wait for the pending geometry change before importing a mask.', 'error');
+      }
+      return;
+    }
+    let ownRequest = 0;
     try {
+      const dialogDocument = documentId;
+      const dialogGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
       const path = await open({
         multiple: false,
         directory: false,
@@ -1388,11 +1501,27 @@
           : { name: 'Grayscale PNG mask', extensions: ['png'] }]
       });
       if (typeof path !== 'string') return;
+      if (selectionBusy || geometryTransactionRunning || pendingGeometryCommit ||
+        dialogDocument !== documentId ||
+        !isWorkspaceMutationGuardCurrent(dialogGuard, documentId, operations, selectionState)) {
+        notify('The document changed while the import dialog was open; no mask was imported.', 'error');
+        return;
+      }
       if (selectionState.namedMasks.length >= MAX_NAMED_MASKS) {
         throw new Error(`Named masks are limited to ${MAX_NAMED_MASKS} per document.`);
       }
+      const ownDocument = documentId;
+      const sourceGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
+      ownRequest = ++maskRequestId;
+      selectionBusy = true;
+      startMaskProgress(ownRequest, format === 'json' ? 'Import mask JSON' : 'Import mask PNG');
       if (format === 'json') {
-        const document = await importMaskFile(path);
+        const imported = await importMaskFile({ path, documentId: ownDocument, requestId: ownRequest });
+        if (!isMaskIoRequestCurrent(
+          ownDocument, ownRequest, cancelledMaskRequestId, documentId, maskRequestId,
+          sourceGuard, operations, selectionState
+        )) return;
+        const { document, diagnostics } = imported;
         ensureMaskDimensions(document.mask);
         const duplicateId = selectionState.namedMasks.some((mask) => mask.id === document.id);
         const id = duplicateId ? `${document.id}-${Date.now().toString(36)}` : document.id;
@@ -1407,24 +1536,45 @@
           sourceTool: document.metadata.sourceTool as SelectionTool | undefined
         };
         commitSelectionState({
-          ...setActiveMask(selectionState, document.mask, await inspectSelectionMask(document.mask)),
+          ...setActiveMask(selectionState, document.mask, diagnostics),
           namedMasks: [...selectionState.namedMasks, named]
-        });
+        }, undefined, true);
       } else {
-        const mask = await importMaskPng(path);
+        const imported = await importMaskPng({ path, documentId: ownDocument, requestId: ownRequest });
+        if (!isMaskIoRequestCurrent(
+          ownDocument, ownRequest, cancelledMaskRequestId, documentId, maskRequestId,
+          sourceGuard, operations, selectionState
+        )) return;
+        const { mask, diagnostics } = imported;
         ensureMaskDimensions(mask);
-        const diagnostics = await inspectSelectionMask(mask);
         const next = setActiveMask(selectionState, mask, diagnostics);
-        commitSelectionState(createNamedMask(next, 'Imported PNG'));
+        commitSelectionState(createNamedMask(next, 'Imported PNG'), undefined, true);
       }
       notify('Mask imported locally');
     } catch (error) {
-      notify(errorMessage(error), 'error');
+      if ((!ownRequest || ownRequest === maskRequestId) && !isMaskCancellation(error)) {
+        notify(errorMessage(error), 'error');
+      }
+    } finally {
+      if (ownRequest && ownRequest === maskRequestId) {
+        selectionBusy = false;
+        finishMaskProgress(ownRequest);
+      }
     }
   }
 
   async function exportNamedMask(named: NamedMask, png: boolean) {
+    if (!metadata || selectionBusy || geometryTransactionRunning || pendingGeometryCommit) {
+      if (metadata && (geometryTransactionRunning || pendingGeometryCommit)) {
+        notify('Wait for the pending geometry change before exporting a mask.', 'error');
+      }
+      return;
+    }
+    let ownRequest = 0;
     try {
+      const dialogDocument = documentId;
+      const dialogGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
+      const namedChecksum = named.mask.checksum;
       const path = await save({
         title: png ? 'Export grayscale mask' : 'Export PhotoForge mask',
         defaultPath: `${named.name.replace(/[^a-z0-9_-]+/gi, '-')}${png ? '.png' : '.photoforge-mask.json'}`,
@@ -1433,14 +1583,46 @@
           : { name: 'PhotoForge mask', extensions: ['json'] }]
       });
       if (!path) return;
-      if (png) await exportMaskPng(path, named.mask);
-      else await exportMaskFile(
-        path,
-        createMaskFile(named.id, named.name, named.mask, named.createdAt, named.modifiedAt, named.sourceTool)
-      );
-      notify(`Exported ${png ? 'grayscale PNG' : 'PhotoForge mask'}`);
+      const currentNamed = selectionState.namedMasks.find((candidate) => candidate.id === named.id);
+      if (selectionBusy || geometryTransactionRunning || pendingGeometryCommit ||
+        dialogDocument !== documentId || !currentNamed || currentNamed.mask.checksum !== namedChecksum ||
+        !isWorkspaceMutationGuardCurrent(dialogGuard, documentId, operations, selectionState)) {
+        notify('The document or named mask changed while the export dialog was open; nothing was exported.', 'error');
+        return;
+      }
+      const ownDocument = documentId;
+      const sourceGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
+      ownRequest = ++maskRequestId;
+      selectionBusy = true;
+      startMaskProgress(ownRequest, png ? 'Export mask PNG' : 'Export mask JSON');
+      if (png) {
+        await exportMaskPng({ path, mask: currentNamed.mask, documentId: ownDocument, requestId: ownRequest });
+      } else {
+        await exportMaskFile({
+          path,
+          document: createMaskFile(
+            currentNamed.id, currentNamed.name, currentNamed.mask, currentNamed.createdAt,
+            currentNamed.modifiedAt, currentNamed.sourceTool
+          ),
+          documentId: ownDocument,
+          requestId: ownRequest
+        });
+      }
+      if (isMaskIoRequestCurrent(
+        ownDocument, ownRequest, cancelledMaskRequestId, documentId, maskRequestId,
+        sourceGuard, operations, selectionState
+      )) {
+        notify(`Exported ${png ? 'grayscale PNG' : 'PhotoForge mask'}`);
+      }
     } catch (error) {
-      notify(errorMessage(error), 'error');
+      if ((!ownRequest || ownRequest === maskRequestId) && !isMaskCancellation(error)) {
+        notify(errorMessage(error), 'error');
+      }
+    } finally {
+      if (ownRequest && ownRequest === maskRequestId) {
+        selectionBusy = false;
+        finishMaskProgress(ownRequest);
+      }
     }
   }
 
@@ -1451,12 +1633,15 @@
   }
 
   async function exportImage() {
-    if (!metadata || exporting || opening) return;
+    if (!metadata || exporting || opening || selectionBusy || geometryMutationBusy || refineOriginalMask) return;
     try {
+      const dialogDocument = documentId;
+      const dialogGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
+      const selectedProfile = exportProfile;
       const stem = metadata.filename.replace(/\.[^.]+$/, '');
-      const extension = ['web', 'print', 'high_jpeg'].includes(exportProfile)
+      const extension = ['web', 'print', 'high_jpeg'].includes(selectedProfile)
         ? 'jpg'
-        : exportProfile === 'maximum_compression'
+        : selectedProfile === 'maximum_compression'
           ? 'webp'
           : 'png';
       const outputPath = await save({
@@ -1469,12 +1654,19 @@
         ]
       });
       if (!outputPath) return;
+      if (!metadata || opening || selectionBusy || geometryMutationBusy || refineOriginalMask ||
+        dialogDocument !== documentId ||
+        !isWorkspaceMutationGuardCurrent(dialogGuard, documentId, operations, selectionState)) {
+        notify('The document or edit pipeline changed while the export dialog was open; nothing was exported.', 'error');
+        return;
+      }
+      const exportOperations = cloneOperations(operations);
       exporting = true;
-      localStorage.setItem('photoforge.lastExportProfile', exportProfile);
+      localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
       const result = await invoke<ExportResult>('export_with_profile', {
         outputPath,
-        operations,
-        profile: exportProfile
+        operations: exportOperations,
+        profile: selectedProfile
       });
       processingTime = result.processingTimeMs;
       notify(`Exported ${result.width} × ${result.height} image`);
@@ -1550,11 +1742,11 @@
     </div>
 
     <nav class="primary-actions" aria-label="File actions">
-      <ToolButton label="Open" icon="＋" primary disabled={opening} onclick={chooseImage} />
+      <ToolButton label="Open" icon="＋" primary disabled={opening || exporting} onclick={chooseImage} />
       <ToolButton
         label={exporting ? 'Exporting' : 'Export'}
         icon="⇩"
-        disabled={!metadata || exporting || opening}
+        disabled={!metadata || exporting || opening || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
         onclick={exportImage}
       />
       <select aria-label="Export profile" bind:value={exportProfile} title="Remembered export profile">
@@ -1568,9 +1760,9 @@
     </nav>
 
     <div class="history-actions" aria-label="Edit history">
-      <ToolButton label="Undo" icon="↶" disabled={!canUndo || selectionBusy || geometryTransactionRunning || Boolean(refineOriginalMask)} title="Undo (Ctrl+Z)" onclick={undo} />
-      <ToolButton label="Redo" icon="↷" disabled={!canRedo || selectionBusy || geometryTransactionRunning || Boolean(refineOriginalMask)} title="Redo (Ctrl+Y)" onclick={redo} />
-      <ToolButton label="Reset" icon="⌫" disabled={!metadata || !operations.length || selectionBusy || geometryTransactionRunning || Boolean(refineOriginalMask)} onclick={reset} />
+      <ToolButton label="Undo" icon="↶" disabled={!canUndo || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)} title="Undo (Ctrl+Z)" onclick={undo} />
+      <ToolButton label="Redo" icon="↷" disabled={!canRedo || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)} title="Redo (Ctrl+Y)" onclick={redo} />
+      <ToolButton label="Reset" icon="⌫" disabled={!metadata || !operations.length || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)} onclick={reset} />
     </div>
 
     <div class="top-spacer"></div>
@@ -1596,7 +1788,7 @@
       oncomparisonchange={(value) => (comparisonPosition = value)}
       imageWidth={selectionCanvasWidth}
       imageHeight={selectionCanvasHeight}
-      selectionTool={comparisonUsesSplitView ? 'none' : selectionState.tool}
+      selectionTool={comparisonUsesSplitView || geometryMutationBusy ? 'none' : selectionState.tool}
       activeMask={selectionState.activeMask}
       visibleMasks={selectionState.namedMasks.filter((mask) => mask.visible).map((mask) => mask.mask)}
       overlaySettings={selectionState.overlay}
@@ -1640,7 +1832,7 @@
       >
         <SelectionWorkspace
           state={selectionState}
-          disabled={!metadata || opening}
+          disabled={!metadata || opening || geometryMutationBusy}
           busy={selectionBusy}
           progress={maskProgress}
           canUndo={selectionPanelHistory.canUndo}
@@ -1658,7 +1850,7 @@
         <GuidedEditPanel
           {documentId}
           ready={Boolean(metadata && analysis)}
-          disabled={opening}
+          disabled={opening || exporting || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
           settings={guidedSettings}
           configurationRevision={componentConfigurationRevision}
           onapply={applyGuidedPlan}

@@ -174,6 +174,9 @@ export function validateEditOperation(value: unknown): string | null {
     if (value.mask_id !== null && !boundedText(value.mask_id, 1, 128, true)) return 'mask identifier is invalid.';
     return validateMaskSnapshot(value.mask);
   }
+  if (value.type === 'decontaminate_colors') {
+    return validateBaseOperation(value) ?? 'decontaminate_colors requires an embedded selection mask.';
+  }
   return validateBaseOperation(value);
 }
 
@@ -223,8 +226,11 @@ function validateBaseOperation(value: Record<string, unknown>): string | null {
     case 'straighten': return finiteRange(value.degrees, -45, 45) ? null : invalid();
     case 'perspective': return validPerspective(value.corners) ? null : invalid();
     case 'lens_correction':
-      return finiteRange(value.distortion, -1, 1) && finiteRange(value.vignetting, -1, 1) &&
+      return finiteRange(value.distortion, -0.16, 1) && finiteRange(value.vignetting, -1, 1) &&
         finiteRange(value.chromatic_aberration, -1, 1) ? null : invalid();
+    case 'decontaminate_colors':
+      return typeof value.enabled === 'boolean' && finiteRange(value.strength, 0, 1) &&
+        integerRange(value.radius, 1, 32) ? null : invalid();
     case 'hsl': return validHsl(value.settings) ? null : invalid();
     case 'temperature_tint':
       return finiteRange(value.temperature, -1, 1) && finiteRange(value.tint, -1, 1) ? null : invalid();

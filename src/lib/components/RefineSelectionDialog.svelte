@@ -4,13 +4,19 @@
     feather: number;
     contrast: number;
     shiftEdge: number;
+    decontaminate: boolean;
+    decontaminateStrength: number;
+    decontaminateRadius: number;
   }
 
   export const REFINE_SELECTION_DEFAULTS: Readonly<RefineSelectionParameters> = Object.freeze({
     smooth: 3,
     feather: 2,
     contrast: 0,
-    shiftEdge: 0
+    shiftEdge: 0,
+    decontaminate: false,
+    decontaminateStrength: 0.5,
+    decontaminateRadius: 4
   });
 </script>
 
@@ -22,6 +28,7 @@
     type MaskThumbnailBitmap
   } from '../selections/thumbnails';
   import type { MaskSnapshot } from '../selections/types';
+  import { decontaminatePreviewPixels } from './refineDecontamination';
 
   type ComparisonMode = 'split' | 'toggle';
   type ToggleView = 'before' | 'after';
@@ -47,6 +54,9 @@
   let sessionKey = '';
   let renderedBeforeKey = '';
   let renderedAfterKey = '';
+  let successfulAfterRenderKey = '';
+  let beforePreviewError = '';
+  let afterPreviewError = '';
   let imageRevision = 0;
   let loadedImage: HTMLImageElement | null = null;
   let loadedImageUrl = '';
@@ -59,15 +69,27 @@
   }
   $: beforeRenderKey = `${thumbnailContentKey(originalMask, 240, 180)}:${background}:${imageRevision}`;
   $: afterRenderKey = previewMask
-    ? `${thumbnailContentKey(previewMask, 240, 180)}:${background}:${imageRevision}`
+    ? `${thumbnailContentKey(previewMask, 240, 180)}:${background}:${imageRevision}:${parameters.decontaminate}:${parameters.decontaminateStrength}:${parameters.decontaminateRadius}`
     : `empty:${background}:${imageRevision}`;
+  $: previewRenderError = afterPreviewError || beforePreviewError;
+  $: displayedError = [error, previewRenderError].filter(Boolean).join(' ');
+  $: afterPreviewCurrent = Boolean(previewMask) &&
+    successfulAfterRenderKey === afterRenderKey &&
+    !previewRenderError &&
+    !error;
   $: if (beforeCanvas && beforeRenderKey !== renderedBeforeKey) {
-    drawPreview(beforeCanvas, originalMask, background);
+    beforePreviewError = drawPreview(beforeCanvas, originalMask, background, false);
     renderedBeforeKey = beforeRenderKey;
   }
   $: if (afterCanvas && afterRenderKey !== renderedAfterKey) {
-    if (previewMask) drawPreview(afterCanvas, previewMask, background);
-    else clearPreview(afterCanvas);
+    if (previewMask) {
+      afterPreviewError = drawPreview(afterCanvas, previewMask, background, true);
+      successfulAfterRenderKey = afterPreviewError ? '' : afterRenderKey;
+    } else {
+      clearPreview(afterCanvas);
+      afterPreviewError = '';
+      successfulAfterRenderKey = '';
+    }
     renderedAfterKey = afterRenderKey;
   }
   $: if (originalImageUrl !== loadedImageUrl) loadOriginalImage(originalImageUrl);
@@ -92,16 +114,28 @@
   ) {
     if (!Number.isFinite(input)) return;
     const bounded = Math.max(minimum, Math.min(maximum, integer ? Math.round(input) : input));
+    invalidateAfterPreview();
     onparameterschange({ ...parameters, [key]: bounded });
+  }
+
+  function updateBooleanParameter(key: keyof RefineSelectionParameters, value: boolean) {
+    invalidateAfterPreview();
+    onparameterschange({ ...parameters, [key]: value });
   }
 
   function resetParameters() {
     if (busy) return;
+    invalidateAfterPreview();
     onparameterschange({ ...REFINE_SELECTION_DEFAULTS });
   }
 
+  function invalidateAfterPreview() {
+    afterPreviewError = '';
+    successfulAfterRenderKey = '';
+  }
+
   function apply() {
-    if (busy || !previewMask || settled) return;
+    if (busy || !afterPreviewCurrent || settled) return;
     settled = true;
     closeModal();
     onapply();
@@ -153,8 +187,8 @@
     ) {
       return;
     }
-    if (!busy && previewMask && !settled) {
-      event.preventDefault();
+    event.preventDefault();
+    if (!busy && afterPreviewCurrent && !settled) {
       apply();
     }
   }
@@ -172,40 +206,61 @@
       imageRevision += 1;
     };
     image.onerror = () => {
-      if (ownRequest === imageRequest) loadedImage = null;
+      if (ownRequest !== imageRequest || loadedImageUrl !== url) return;
+      loadedImage = null;
+      imageRevision += 1;
     };
     image.src = url;
   }
 
-  function drawPreview(canvas: HTMLCanvasElement, mask: MaskSnapshot, mode: PreviewBackground) {
+  function drawPreview(
+    canvas: HTMLCanvasElement,
+    mask: MaskSnapshot,
+    mode: PreviewBackground,
+    decontaminate: boolean
+  ): string {
     try {
       const thumbnail = maskThumbnailCache.get(mask, 240, 180);
       canvas.width = thumbnail.width;
       canvas.height = thumbnail.height;
       const context = canvas.getContext('2d');
-      if (!context) return;
-      const source = loadedImage ? imagePixels(loadedImage, thumbnail.width, thumbnail.height) : null;
+      if (!context) throw new Error('Canvas rendering is unavailable.');
+      const rawSource = loadedImage ? imagePixels(loadedImage, thumbnail.width, thumbnail.height) : null;
+      if (decontaminate && parameters.decontaminate && !rawSource) {
+        throw new Error('The source image is unavailable for the Decontaminate Colors preview.');
+      }
+      const source = rawSource && decontaminate
+        ? decontaminatePreviewPixels(
+            rawSource,
+            thumbnail.pixels,
+            thumbnail.width,
+            thumbnail.height,
+            {
+              enabled: parameters.decontaminate,
+              strength: parameters.decontaminateStrength,
+              radius: parameters.decontaminateRadius
+            }
+          )
+        : rawSource;
       const output = previewPixels(thumbnail, mode, source);
       const image = context.createImageData(thumbnail.width, thumbnail.height);
       image.data.set(output);
       context.putImageData(image, 0, 0);
-    } catch {
+      return '';
+    } catch (reason) {
       clearPreview(canvas);
+      return previewRenderFailureMessage(reason);
     }
   }
 
-  function imagePixels(image: HTMLImageElement, width: number, height: number): Uint8ClampedArray | null {
-    try {
-      const scratch = document.createElement('canvas');
-      scratch.width = width;
-      scratch.height = height;
-      const context = scratch.getContext('2d');
-      if (!context) return null;
-      context.drawImage(image, 0, 0, width, height);
-      return context.getImageData(0, 0, width, height).data;
-    } catch {
-      return null;
-    }
+  function imagePixels(image: HTMLImageElement, width: number, height: number): Uint8ClampedArray {
+    const scratch = document.createElement('canvas');
+    scratch.width = width;
+    scratch.height = height;
+    const context = scratch.getContext('2d');
+    if (!context) throw new Error('Source-image preview rendering is unavailable.');
+    context.drawImage(image, 0, 0, width, height);
+    return context.getImageData(0, 0, width, height).data;
   }
 
   function previewPixels(
@@ -247,6 +302,13 @@
     const context = canvas.getContext('2d');
     context?.clearRect(0, 0, canvas.width, canvas.height);
   }
+
+  function previewRenderFailureMessage(reason: unknown): string {
+    const detail = reason instanceof Error && reason.message.trim()
+      ? reason.message.trim()
+      : 'An unknown rendering error occurred.';
+    return `Representative preview unavailable. ${detail}`;
+  }
 </script>
 
 <svelte:window on:keydown={handleKeyboard} />
@@ -257,7 +319,7 @@
     class="dialog"
     aria-modal="true"
     aria-labelledby="refine-selection-title"
-    aria-describedby={error ? 'refine-selection-error' : undefined}
+    aria-describedby={displayedError ? 'refine-selection-error' : undefined}
     aria-busy={busy}
     tabindex="-1"
     on:cancel={handleDialogCancel}
@@ -305,6 +367,7 @@
         {#if !previewMask}<span class="preview-pending">{busy ? 'Updating preview…' : 'Preview unavailable'}</span>{/if}
       </article>
     </div>
+    <p class="preview-note">Representative thumbnail preview; full-resolution export reruns the operation.</p>
 
     <div class="controls">
       <label>
@@ -323,15 +386,27 @@
         <span>Shift edge <output>{parameters.shiftEdge}px</output></span>
         <input aria-label="Refine shift edge" type="range" min="-256" max="256" step="1" value={parameters.shiftEdge} disabled={busy || settled} on:input={(event) => updateParameter('shiftEdge', Number(event.currentTarget.value), -256, 256, true)} />
       </label>
+      <label class="decontaminate-toggle">
+        <span><strong>Decontaminate Colors</strong><small>Replace edge spill with nearby selected foreground color.</small></span>
+        <input aria-label="Decontaminate Colors" type="checkbox" checked={parameters.decontaminate} disabled={busy || settled} on:change={(event) => updateBooleanParameter('decontaminate', event.currentTarget.checked)} />
+      </label>
+      <label>
+        <span>Decontaminate strength <output>{Math.round(parameters.decontaminateStrength * 100)}%</output></span>
+        <input aria-label="Decontaminate strength" type="range" min="0" max="1" step="0.05" value={parameters.decontaminateStrength} disabled={busy || settled || !parameters.decontaminate} on:input={(event) => updateParameter('decontaminateStrength', Number(event.currentTarget.value), 0, 1)} />
+      </label>
+      <label>
+        <span>Decontaminate radius <output>{parameters.decontaminateRadius}px</output></span>
+        <input aria-label="Decontaminate radius" type="range" min="1" max="32" step="1" value={parameters.decontaminateRadius} disabled={busy || settled || !parameters.decontaminate} on:input={(event) => updateParameter('decontaminateRadius', Number(event.currentTarget.value), 1, 32, true)} />
+      </label>
     </div>
 
-    {#if error}<p id="refine-selection-error" class="error" role="alert">{error}</p>{/if}
+    {#if displayedError}<p id="refine-selection-error" class="error" role="alert">{displayedError}</p>{/if}
 
     <footer>
       <button type="button" disabled={busy || settled} on:click={resetParameters}>Reset</button>
       <span></span>
       <button type="button" disabled={settled} on:click={cancel}>Cancel</button>
-      <button class="primary" type="button" aria-label="Apply" disabled={busy || !previewMask || settled} on:click={apply}>{busy ? 'Updating…' : 'Apply'}</button>
+      <button class="primary" type="button" aria-label="Apply" disabled={busy || !afterPreviewCurrent || settled} on:click={apply}>{busy ? 'Updating…' : 'Apply'}</button>
     </footer>
   </dialog>
 </div>
@@ -362,9 +437,15 @@
   .canvas-frame { display: grid; place-items: center; max-width: 100%; max-height: 320px; }
   .preview-card canvas { display: block; max-width: 100%; max-height: 320px; }
   .preview-pending { position: absolute; color: var(--ink-faint); font-size: .65rem; }
+  .preview-note { margin: -4px 0 0; color: var(--ink-faint); font-size: .58rem; }
   .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
   .controls label { display: grid; gap: 5px; color: var(--ink-soft); font-size: .63rem; }
   .controls label > span { justify-content: space-between; }
+  .controls .decontaminate-toggle { grid-column: 1 / -1; grid-template-columns: 1fr auto; align-items: center; padding-top: 8px; border-top: 1px solid var(--line); }
+  .decontaminate-toggle span { display: grid; justify-content: start; gap: 2px; }
+  .decontaminate-toggle strong { color: var(--ink); font-size: .67rem; }
+  .decontaminate-toggle small { color: var(--ink-faint); font-size: .56rem; }
+  .decontaminate-toggle input { width: 16px; height: 16px; }
   .controls output { color: var(--ink); font-family: var(--font-mono); }
   .controls input { width: 100%; }
   .error { margin: 0; padding: 8px; border-radius: 6px; color: #f0a5a0; background: rgba(190,70,60,.12); font-size: .66rem; }

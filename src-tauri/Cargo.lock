@@ -2188,6 +2188,7 @@ version = "0.7.1"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "png 0.18.1",
  "reqwest",
  "serde",
  "serde_json",

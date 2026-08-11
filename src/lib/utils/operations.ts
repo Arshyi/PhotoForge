@@ -216,6 +216,7 @@ export const operationLabels: Record<OperationType, string> = {
   ,straighten: 'Straighten'
   ,perspective: 'Perspective'
   ,lens_correction: 'Lens Correction'
+  ,decontaminate_colors: 'Decontaminate Colors'
   ,hsl: 'HSL'
   ,temperature_tint: 'Temperature & Tint'
   ,selective_color: 'Selective Color'

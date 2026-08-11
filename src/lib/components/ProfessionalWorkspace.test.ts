@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import ProfessionalWorkspace from './ProfessionalWorkspace.svelte';
-import type { HistogramChannels, ImageMetadata } from '../types/editor';
+import type { EditOperation, HistogramChannels, ImageMetadata } from '../types/editor';
 import { createWorkflow, saveWorkflows } from '../utils/workflows';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -11,11 +11,15 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
 const bins = (): HistogramChannels => ({ red: Array(256).fill(1), green: Array(256).fill(1), blue: Array(256).fill(1), luminance: Array(256).fill(1), shadowClipping: 0, highlightClipping: 0, pixelCount: 256 });
 const metadata: ImageMetadata = { filename: 'photo.png', width: 100, height: 80, format: 'PNG', fileSize: 2048, colorSpace: 'sRGB', bitDepth: 8, hasAlpha: true, createdAt: '1Z', modifiedAt: '2Z', cameraModel: 'Test Camera', exifAvailable: true };
 
-function setup(oncommit = vi.fn(), onmessage = vi.fn()) {
+function setup(
+  oncommit = vi.fn(),
+  onmessage = vi.fn(),
+  operations: EditOperation[] = [{ type: 'brightness', amount: 0.1 }]
+) {
   return render(ProfessionalWorkspace, {
     documentId: 1,
     metadata,
-    operations: [{ type: 'brightness', amount: 0.1 }],
+    operations,
     oncommit,
     onmessage,
     onviewchange: vi.fn()
@@ -46,6 +50,88 @@ describe('ProfessionalWorkspace', () => {
     const commit = vi.fn(); setup(commit);
     await fireEvent.click(screen.getByRole('button', { name }));
     expect(commit).toHaveBeenCalled();
+  });
+
+  it('hydrates lens controls across replay and undo without clobbering a queued slider edit', async () => {
+    const commit = vi.fn();
+    const brightness: EditOperation = { type: 'brightness', amount: 0.1 };
+    const initialLens: EditOperation = {
+      type: 'lens_correction', distortion: 0.2, vignetting: 0.4, chromatic_aberration: 0.6
+    };
+    const view = setup(commit, vi.fn(), [brightness, initialLens]);
+    const distortionControl = screen.getByLabelText('Barrel / pincushion') as HTMLInputElement;
+    const vignettingControl = screen.getByLabelText('Vignetting') as HTMLInputElement;
+    const chromaticControl = screen.getByLabelText('Chromatic aberration') as HTMLInputElement;
+
+    expect(distortionControl.value).toBe('0.2');
+    expect(vignettingControl.value).toBe('0.4');
+    expect(chromaticControl.value).toBe('0.6');
+
+    await fireEvent.input(distortionControl, { target: { value: '0.25' } });
+    expect(commit).toHaveBeenLastCalledWith([
+      brightness,
+      { type: 'lens_correction', distortion: 0.25, vignetting: 0.4, chromatic_aberration: 0.6 }
+    ], 'lens_correction');
+
+    await fireEvent.input(vignettingControl, { target: { value: '0.5' } });
+    const latestLens: EditOperation = {
+      type: 'lens_correction', distortion: 0.25, vignetting: 0.5, chromatic_aberration: 0.6
+    };
+    expect(commit).toHaveBeenLastCalledWith([brightness, latestLens], 'lens_correction');
+
+    // A slower geometry transaction may acknowledge the previous input first.
+    await view.rerender({
+      operations: [brightness, {
+        type: 'lens_correction', distortion: 0.25, vignetting: 0.4, chromatic_aberration: 0.6
+      }]
+    });
+    expect(vignettingControl.value).toBe('0.5');
+
+    await view.rerender({ operations: [brightness, latestLens] });
+    expect(vignettingControl.value).toBe('0.5');
+
+    const replayedLens: EditOperation = {
+      type: 'lens_correction', distortion: -0.1, vignetting: -0.2, chromatic_aberration: 0.8
+    };
+    await view.rerender({ operations: [brightness, replayedLens] });
+    expect(distortionControl.value).toBe('-0.1');
+    expect(vignettingControl.value).toBe('-0.2');
+    expect(chromaticControl.value).toBe('0.8');
+
+    await fireEvent.input(chromaticControl, { target: { value: '0.7' } });
+    expect(commit).toHaveBeenLastCalledWith([
+      brightness,
+      { type: 'lens_correction', distortion: -0.1, vignetting: -0.2, chromatic_aberration: 0.7 }
+    ], 'lens_correction');
+
+    await view.rerender({ operations: [brightness] });
+    expect(distortionControl.value).toBe('0');
+    expect(vignettingControl.value).toBe('0');
+    expect(chromaticControl.value).toBe('0');
+  });
+
+  it('keeps an asynchronously accepted lens draft and rolls back an asynchronously rejected one', async () => {
+    let resolveAccepted: ((accepted: boolean) => void) | undefined;
+    const commit = vi.fn()
+      .mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveAccepted = resolve; }))
+      .mockResolvedValueOnce(false);
+    const initialLens: EditOperation = {
+      type: 'lens_correction', distortion: 0.2, vignetting: 0.4, chromatic_aberration: 0.6
+    };
+    setup(commit, vi.fn(), [initialLens]);
+    const distortionControl = screen.getByLabelText('Barrel / pincushion') as HTMLInputElement;
+
+    await fireEvent.input(distortionControl, { target: { value: '0.3' } });
+    expect(distortionControl.value).toBe('0.3');
+    resolveAccepted?.(true);
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+    expect(distortionControl.value).toBe('0.3');
+
+    await fireEvent.input(distortionControl, { target: { value: '0.5' } });
+    await waitFor(() => expect(distortionControl.value).toBe('0.2'));
+    expect(commit).toHaveBeenLastCalledWith([
+      { type: 'lens_correction', distortion: 0.5, vignetting: 0.4, chromatic_aberration: 0.6 }
+    ], 'lens_correction');
   });
 
   it('shows live before and after histogram', async () => {

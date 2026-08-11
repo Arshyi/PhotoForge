@@ -85,6 +85,11 @@ impl Workflow {
             )));
         }
         for operation in &self.operations {
+            if matches!(operation, EditOperation::DecontaminateColors { .. }) {
+                return Err(AppError::WorkflowValidation(
+                    "decontaminate_colors requires an embedded selection mask".into(),
+                ));
+            }
             operation.validate()?;
         }
         Ok(())
@@ -341,6 +346,38 @@ mod tests {
         let mut value = workflow();
         value.operations = vec![EditOperation::Gamma { value: 0.0 }];
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn workflow_rejects_unmasked_decontamination_at_the_command_boundary() {
+        let mut value = workflow();
+        value.operations = vec![EditOperation::DecontaminateColors {
+            enabled: true,
+            strength: 0.5,
+            radius: 4,
+        }];
+        assert!(matches!(
+            value.validate(),
+            Err(AppError::WorkflowValidation(message))
+                if message.contains("requires an embedded selection mask")
+        ));
+    }
+
+    #[test]
+    fn workflow_accepts_bounded_masked_decontamination() {
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 1, vec![255, 128]).unwrap();
+        let mut value = workflow();
+        value.operations = vec![EditOperation::Masked {
+            operation: Box::new(EditOperation::DecontaminateColors {
+                enabled: true,
+                strength: 0.5,
+                radius: 4,
+            }),
+            mask: crate::mask::MaskSnapshot::encode(&mask),
+            invert: false,
+            mask_id: Some("refined-edge".into()),
+        }];
+        value.validate().unwrap();
     }
 
     #[test]

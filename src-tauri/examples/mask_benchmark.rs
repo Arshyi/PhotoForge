@@ -216,6 +216,19 @@ fn main() {
         measure_samples(&format!("mask_perspective_{label}"), samples, || {
             remap_between_chains(&mask, &old_chain, 0, &perspective_chain, 1, None).unwrap()
         });
+        let lens_chain = GeometryChain::new(
+            width,
+            height,
+            vec![GeometryStep::LensCorrection {
+                distortion: 0.08,
+                vignetting: 0.15,
+                chromatic_aberration: 0.1,
+            }],
+        )
+        .unwrap();
+        measure_samples(&format!("mask_lens_distortion_{label}"), samples, || {
+            remap_between_chains(&mask, &old_chain, 0, &lens_chain, 1, None).unwrap()
+        });
 
         let single_color = RgbaImage::from_pixel(width, height, Rgba([120, 100, 80, 255]));
         measure_samples(&format!("magic_wand_single_color_{label}"), samples, || {
@@ -368,6 +381,26 @@ fn main() {
     let processed = measure("masked_brightness_4000x3000", || {
         DeterministicEngine.process(&image, &[operation]).unwrap()
     });
+    let decontaminate = EditOperation::Masked {
+        operation: Box::new(EditOperation::DecontaminateColors {
+            enabled: true,
+            strength: 0.5,
+            radius: 4,
+        }),
+        mask: MaskSnapshot::encode(&freehand),
+        invert: false,
+        mask_id: Some("benchmark-refine".into()),
+    };
+    let decontaminated = measure("decontaminate_colors_4000x3000", || {
+        DeterministicEngine
+            .process(&image, &[decontaminate])
+            .unwrap()
+    });
+    assert_eq!(decontaminated.dimensions(), image.dimensions());
+    assert!(decontaminated
+        .to_rgba8()
+        .pixels()
+        .all(|pixel| pixel.0[3] == 255));
     let export_path = temporary.path().join("masked-export.png");
     measure("masked_export_png_4000x3000", || {
         processed.save(&export_path).unwrap()

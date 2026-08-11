@@ -38,6 +38,10 @@ Uses unsharp masking: a Gaussian-softened copy is subtracted from the original, 
 
 Sharpening increases local edge contrast. It does not reconstruct information absent from the source and is not presented as deblurring or genuine detail recovery.
 
+### Lens correction
+
+Lens correction uses normalized radial distortion plus bounded vignetting and red/blue chromatic-aberration offsets. Distortion is accepted only in the invertible `-0.16…1` range; vignetting and chromatic aberration are each `-1…1`. The negative distortion limit keeps the radial map away from a folded or near-singular canvas, which is required for deterministic mask remapping. Selection coverage follows the same center coordinate used for the image's green and alpha sample. Vignetting changes intensity and red/blue offsets are channel-specific, so neither moves a single-channel coverage mask.
+
 ## Phase 2 restoration operations
 
 All restoration operations are deterministic tagged pipeline entries. Strength zero is exact identity, floating-point parameters must be finite, kernels and regions are bounded, and source alpha is preserved—including document grayscale mode. They operate on 8-bit encoded channel values and are not substitutes for a color-managed workflow.
@@ -126,9 +130,13 @@ All restoration operations are deterministic tagged pipeline entries. Strength z
 
 Analysis calculates normalized average luminance, 5th–95th percentile spread, channel imbalance, Laplacian-style sharpness, high-frequency noise, local contrast, edge density, white-background ratio, and a likely-document heuristic. It runs once per document on the cached preview and is generation-protected/cached. Metrics are deterministic heuristics and never auto-apply edits or assert a definitive diagnosis.
 
+## Phase 7.1 edge-color decontamination
+
+Decontaminate Colors is an optional operation created by Refine Selection and is valid only inside an immutable mask wrapper. It leaves zero-coverage and confidently selected (`224…255`) pixels unchanged. For each partial-coverage edge pixel, it searches a circular radius `1…32` for non-transparent, confidently selected samples, weights their RGB by coverage and squared-distance proximity, and blends the resulting foreground color by strength `0…1`. If no qualifying foreground sample exists, the pixel is unchanged. Alpha is copied exactly. The operation is deterministic, local, bounded to 128 million conservative neighborhood visits, and fails with a resource-limit error instead of exceeding that ceiling.
+
 ## Preview versus export
 
-Interactive previews are generated from a decoded source copy whose longest dimension is at most 1600 pixels. Full-resolution export reruns the same validated operation sequence against the cached original. There are no preview-only algorithm substitutions. Pixel-domain radii cover a physically smaller portion of a full-resolution image, but their mathematical meaning and operation ordering do not change. The source file is not decoded for each adjustment.
+Interactive previews are generated from a decoded source copy whose longest dimension is at most 1600 pixels. Full-resolution export reruns the same validated operation sequence against the cached original. The ordinary preview and export pipelines use the same validated operation implementations and ordering, but immutable full-resolution mask snapshots are represented by temporary bilinear coverage copies at the bounded preview stage. Pixel-domain radii therefore cover a different physical portion of the bounded preview and full-resolution image. The Refine dialog adds an even smaller representative canvas for comparison: its decontamination view uses the same circular weighting and integer blend at thumbnail resolution, not a pixel-for-pixel full-resolution simulation. Canonical masks and settings are never rewritten by either preview representation. The source file is not decoded for each adjustment.
 
 ## Phase 3 guided planning
 

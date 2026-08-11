@@ -37,6 +37,33 @@ export interface MaskRemapResult {
   isCurrent: boolean;
 }
 
+export interface MaskIoRequestScope {
+  documentId: number;
+  requestId: number;
+}
+
+export interface ImportMaskInput extends MaskIoRequestScope {
+  path: string;
+}
+
+export interface ExportMaskFileInput extends ImportMaskInput {
+  document: MaskFile;
+}
+
+export interface ExportMaskPngInput extends ImportMaskInput {
+  mask: MaskSnapshot;
+}
+
+export interface ImportedMaskFileResult {
+  document: MaskFile;
+  diagnostics: MaskDiagnostics;
+}
+
+export interface ImportedMaskPngResult {
+  mask: MaskSnapshot;
+  diagnostics: MaskDiagnostics;
+}
+
 export async function rasterizeSelection(input: {
   width: number;
   height: number;
@@ -144,20 +171,20 @@ export async function validateMaskSnapshot(mask: MaskSnapshot): Promise<MaskSnap
   return invoke<MaskSnapshot>('validate_mask_snapshot', { mask });
 }
 
-export async function importMaskFile(path: string): Promise<MaskFile> {
-  return invoke<MaskFile>('import_mask_file', { path });
+export async function importMaskFile(input: ImportMaskInput): Promise<ImportedMaskFileResult> {
+  return invoke<ImportedMaskFileResult>('import_mask_file', { ...input });
 }
 
-export async function exportMaskFile(path: string, document: MaskFile): Promise<string> {
-  return invoke<string>('export_mask_file', { path, document });
+export async function exportMaskFile(input: ExportMaskFileInput): Promise<string> {
+  return invoke<string>('export_mask_file', { ...input });
 }
 
-export async function importMaskPng(path: string): Promise<MaskSnapshot> {
-  return invoke<MaskSnapshot>('import_mask_png', { path });
+export async function importMaskPng(input: ImportMaskInput): Promise<ImportedMaskPngResult> {
+  return invoke<ImportedMaskPngResult>('import_mask_png', { ...input });
 }
 
-export async function exportMaskPng(path: string, mask: MaskSnapshot): Promise<string> {
-  return invoke<string>('export_mask_png', { path, mask });
+export async function exportMaskPng(input: ExportMaskPngInput): Promise<string> {
+  return invoke<string>('export_mask_png', { ...input });
 }
 
 function geometryStepForBackend(operation: GeometryOperation): Record<string, unknown> {

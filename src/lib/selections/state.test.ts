@@ -113,6 +113,22 @@ describe('selection history', () => {
     expect(history.canUndo).toBe(false);
   });
 
+  it('force-coalesces a matching async geometry continuation beyond the normal time window', () => {
+    const history = new SelectionHistory();
+    const initial = createSelectionState('doc');
+    history.replace(initial);
+    history.commit({ ...initial, canvasWidth: 10 }, 'lens_correction', 100);
+    history.commit(
+      { ...history.state, canvasWidth: 20 },
+      'lens_correction',
+      10_000,
+      true
+    );
+    expect(history.lastCommitCreatedEntry).toBe(false);
+    expect(history.undoDepth).toBe(1);
+    expect(history.undo().canvasWidth).toBe(initial.canvasWidth);
+  });
+
   it('does not create undo entries for semantic no-ops', () => {
     const history = new SelectionHistory();
     const initial = createSelectionState('doc');

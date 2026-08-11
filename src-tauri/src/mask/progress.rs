@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub(crate) const IO_PROGRESS_CHUNK_PIXELS: u64 = 64 * 1024;
+
 pub type SharedMaskProgress = Arc<Mutex<Option<MaskProgress>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -378,5 +380,21 @@ mod tests {
             cancelled.snapshot().unwrap().unwrap().state,
             MaskProgressState::Cancelled
         );
+    }
+
+    #[test]
+    fn indeterminate_zero_unit_work_completes_without_inventing_units() {
+        let handle = MaskProgressHandle::begin(shared(), 9, 10, "parse_mask_file").unwrap();
+        handle.report("parse_mask_file", 42, 0).unwrap();
+        let running = handle.snapshot().unwrap().unwrap();
+        assert_eq!(running.completed_units, 0);
+        assert_eq!(running.total_units, 0);
+        assert_eq!(running.state, MaskProgressState::Running);
+
+        handle.complete().unwrap();
+        let completed = handle.snapshot().unwrap().unwrap();
+        assert_eq!(completed.completed_units, 0);
+        assert_eq!(completed.total_units, 0);
+        assert_eq!(completed.state, MaskProgressState::Completed);
     }
 }

@@ -22,7 +22,7 @@
     WorkflowDocument
   } from '../types/editor';
   import { errorMessage, formatBytes } from '../utils/format';
-  import { cloneOperations, operationLabels, operationType, replaceOperation } from '../utils/operations';
+  import { baseOperation, cloneOperations, operationLabels, operationType, replaceOperation } from '../utils/operations';
   import {
     createWorkflow,
     duplicateOperationAt,
@@ -74,6 +74,11 @@
   let distortion = 0;
   let vignetting = 0;
   let chromaticAberration = 0;
+  let lensDocumentId = -1;
+  let lensOperationsKey = '';
+  let lensDraftKey = '';
+  let lensCommitRequest = 0;
+  const locallyRequestedLensKeys = new Set<string>();
   let temperature = 0;
   let tint = 0;
   let hslChannel: HslChannel = 'master';
@@ -119,6 +124,7 @@
   $: selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ?? null;
   $: activeHistogram = histogram?.[histogramMode] ?? null;
   $: measurement = Math.hypot(measureX2 - measureX1, measureY2 - measureY1);
+  $: synchronizeLensControls(documentId, operations);
 
   onMount(() => {
     workflows = loadWorkflows();
@@ -167,7 +173,7 @@
   }
 
   function setOperation(operation: EditOperation, enabled = true, key = operation.type) {
-    oncommit(replaceOperation(operations, operation, enabled), key);
+    return oncommit(replaceOperation(operations, operation, enabled), key);
   }
 
   function applyCurvePreset(preset: 'linear' | 'contrast' | 'matte' | 'bright') {
@@ -210,7 +216,83 @@
   }
 
   function applyPerspective() { setOperation({ type: 'perspective', corners: perspective }); }
-  function applyLens() { setOperation({ type: 'lens_correction', distortion, vignetting, chromatic_aberration: chromaticAberration }, Math.abs(distortion) + Math.abs(vignetting) + Math.abs(chromaticAberration) > 0.0001); }
+  function lensValues(source: EditOperation[]): { distortion: number; vignetting: number; chromaticAberration: number } | null {
+    const candidate = source.find((operation) => operationType(operation) === 'lens_correction');
+    if (!candidate) return null;
+    const operation = baseOperation(candidate);
+    if (operation.type !== 'lens_correction') return null;
+    return {
+      distortion: operation.distortion,
+      vignetting: operation.vignetting,
+      chromaticAberration: operation.chromatic_aberration
+    };
+  }
+
+  function lensKey(values: { distortion: number; vignetting: number; chromaticAberration: number } | null): string {
+    return values
+      ? `${values.distortion}:${values.vignetting}:${values.chromaticAberration}`
+      : 'none';
+  }
+
+  function synchronizeLensControls(nextDocumentId: number, source: EditOperation[]) {
+    const values = lensValues(source);
+    const nextKey = lensKey(values);
+    const documentChanged = nextDocumentId !== lensDocumentId;
+    if (!documentChanged && nextKey === lensOperationsKey) return;
+    lensDocumentId = nextDocumentId;
+    lensOperationsKey = nextKey;
+    if (documentChanged) lensCommitRequest += 1;
+
+    // Geometry commits are asynchronous. Ignore an older local echo while a newer
+    // slider value is still queued, otherwise a continuing drag jumps backwards.
+    if (!documentChanged && locallyRequestedLensKeys.has(nextKey) && nextKey !== lensDraftKey) {
+      locallyRequestedLensKeys.delete(nextKey);
+      return;
+    }
+
+    distortion = values?.distortion ?? 0;
+    vignetting = values?.vignetting ?? 0;
+    chromaticAberration = values?.chromaticAberration ?? 0;
+    lensDraftKey = nextKey;
+    locallyRequestedLensKeys.clear();
+  }
+
+  function restoreLensControlsFromOperations() {
+    const values = lensValues(operations);
+    const key = lensKey(values);
+    distortion = values?.distortion ?? 0;
+    vignetting = values?.vignetting ?? 0;
+    chromaticAberration = values?.chromaticAberration ?? 0;
+    lensOperationsKey = key;
+    lensDraftKey = key;
+    locallyRequestedLensKeys.clear();
+  }
+
+  async function applyLens() {
+    const values = { distortion, vignetting, chromaticAberration };
+    const enabled = Math.abs(distortion) + Math.abs(vignetting) + Math.abs(chromaticAberration) > 0.0001;
+    const requestedKey = lensKey(enabled ? values : null);
+    const ownRequest = ++lensCommitRequest;
+    lensDraftKey = requestedKey;
+    locallyRequestedLensKeys.add(requestedKey);
+    if (locallyRequestedLensKeys.size > 32) {
+      const oldest = locallyRequestedLensKeys.values().next().value;
+      if (oldest !== undefined) locallyRequestedLensKeys.delete(oldest);
+    }
+    try {
+      const accepted = await setOperation(
+        { type: 'lens_correction', distortion, vignetting, chromatic_aberration: chromaticAberration },
+        enabled
+      );
+      if (accepted === false && ownRequest === lensCommitRequest) {
+        restoreLensControlsFromOperations();
+      }
+    } catch (error) {
+      if (ownRequest !== lensCommitRequest) return;
+      restoreLensControlsFromOperations();
+      onmessage(errorMessage(error), 'error');
+    }
+  }
   function applyTemperatureTint() { setOperation({ type: 'temperature_tint', temperature, tint }, Math.abs(temperature) + Math.abs(tint) > 0.0001); }
   function applyHsl() { setOperation({ type: 'hsl', settings: hslSettings }, JSON.stringify(hslSettings) !== JSON.stringify(emptyHsl())); }
   function setHslValue(field: keyof HslAdjustment, value: number) {
@@ -421,7 +503,7 @@
 
       <details>
         <summary>Lens correction <small>Distortion · vignette · CA</small></summary>
-        <SliderControl label="Barrel / pincushion" value={distortion} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { distortion = value; applyLens(); }} />
+        <SliderControl label="Barrel / pincushion" value={distortion} min={-0.16} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { distortion = value; applyLens(); }} />
         <SliderControl label="Vignetting" value={vignetting} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { vignetting = value; applyLens(); }} />
         <SliderControl label="Chromatic aberration" value={chromaticAberration} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { chromaticAberration = value; applyLens(); }} />
       </details>

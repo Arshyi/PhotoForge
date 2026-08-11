@@ -36,5 +36,19 @@ describe('history timeline retention', () => {
       canUndo: false,
       canRedo: false
     });
+    expect(selectionPanelHistoryAvailability(['selection', 'compound'], ['compound'])).toEqual({
+      canUndo: false,
+      canRedo: false
+    });
+  });
+
+  it('retains compound edit-and-selection events as paired history entries', () => {
+    const events: HistoryEvent[] = ['edit', 'selection', 'compound', 'selection'];
+    expect(eventDepths(events)).toEqual({ editDepth: 2, selectionDepth: 3 });
+    expect(retainedHistorySuffix(events, 1, 2)).toEqual({
+      events: ['compound', 'selection'],
+      editDepth: 1,
+      selectionDepth: 2
+    });
   });
 });

@@ -52,6 +52,7 @@ export type BaseEditOperation =
   | { type: 'straighten'; degrees: number }
   | { type: 'perspective'; corners: PerspectiveCorners }
   | { type: 'lens_correction'; distortion: number; vignetting: number; chromatic_aberration: number }
+  | { type: 'decontaminate_colors'; enabled: boolean; strength: number; radius: number }
   | { type: 'hsl'; settings: HslSettings }
   | { type: 'temperature_tint'; temperature: number; tint: number }
   | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };

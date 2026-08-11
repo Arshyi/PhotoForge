@@ -16,7 +16,15 @@ const previewMask: MaskSnapshot = {
   data: 'QMA',
   checksum: 'fnv1a64:0000000000000002'
 };
-const parameters = { smooth: 4, feather: 3, contrast: 0.2, shiftEdge: -1 };
+const parameters = {
+  smooth: 4,
+  feather: 3,
+  contrast: 0.2,
+  shiftEdge: -1,
+  decontaminate: false,
+  decontaminateStrength: 0.5,
+  decontaminateRadius: 4
+};
 
 function props(overrides: Record<string, unknown> = {}) {
   return {
@@ -50,12 +58,19 @@ beforeEach(() => {
     createImageData: (width: number, height: number) => ({
       data: new Uint8ClampedArray(width * height * 4), width, height
     }),
+    drawImage: vi.fn(),
+    getImageData: (_x: number, _y: number, width: number, height: number) => ({
+      data: new Uint8ClampedArray(width * height * 4), width, height
+    }),
     putImageData: vi.fn(),
     clearRect: vi.fn()
   }) as unknown as CanvasRenderingContext2D);
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('RefineSelectionDialog', () => {
   it('opens as a modal with real before and after coverage previews', async () => {
@@ -76,6 +91,7 @@ describe('RefineSelectionDialog', () => {
     });
     expect(originalMask).toEqual(before);
     expect(previewMask).toEqual(after);
+    expect(screen.getByText(/Representative thumbnail preview/i)).toBeTruthy();
   });
 
   it('closes the native modal lifecycle on settlement and unmount', async () => {
@@ -118,6 +134,47 @@ describe('RefineSelectionDialog', () => {
     expect(parameters).toEqual(originalParameters);
   });
 
+  it('keeps color decontamination off by default and emits bounded controls', async () => {
+    const value = props();
+    const originalParameters = structuredClone(parameters);
+    const view = render(RefineSelectionDialog, { props: value });
+    const toggle = screen.getByRole('checkbox', { name: 'Decontaminate Colors' }) as HTMLInputElement;
+    const strength = screen.getByRole('slider', { name: 'Decontaminate strength' }) as HTMLInputElement;
+    const radius = screen.getByRole('slider', { name: 'Decontaminate radius' }) as HTMLInputElement;
+
+    expect(REFINE_SELECTION_DEFAULTS.decontaminate).toBe(false);
+    expect(toggle.checked).toBe(false);
+    expect(strength.disabled).toBe(true);
+    expect(radius.disabled).toBe(true);
+    await fireEvent.click(toggle);
+    expect(value.onparameterschange).toHaveBeenLastCalledWith({
+      ...parameters,
+      decontaminate: true
+    });
+
+    await view.rerender({
+      ...value,
+      parameters: { ...parameters, decontaminate: true }
+    });
+    await fireEvent.input(screen.getByRole('slider', { name: 'Decontaminate strength' }), {
+      target: { value: '0.85' }
+    });
+    expect(value.onparameterschange).toHaveBeenLastCalledWith({
+      ...parameters,
+      decontaminate: true,
+      decontaminateStrength: 0.85
+    });
+    await fireEvent.input(screen.getByRole('slider', { name: 'Decontaminate radius' }), {
+      target: { value: '32' }
+    });
+    expect(value.onparameterschange).toHaveBeenLastCalledWith({
+      ...parameters,
+      decontaminate: true,
+      decontaminateRadius: 32
+    });
+    expect(parameters).toEqual(originalParameters);
+  });
+
   it('applies at most once and requires a current preview', async () => {
     const value = props();
     render(RefineSelectionDialog, { props: value });
@@ -152,7 +209,7 @@ describe('RefineSelectionDialog', () => {
     expect(value.onapply).not.toHaveBeenCalled();
     const dialog = screen.getByRole('dialog', { name: 'Refine Selection' });
     dialog.focus();
-    await fireEvent.keyDown(dialog, { key: 'Enter' });
+    expect(await fireEvent.keyDown(dialog, { key: 'Enter' })).toBe(false);
     expect(value.onapply).toHaveBeenCalledTimes(1);
   });
 
@@ -161,10 +218,108 @@ describe('RefineSelectionDialog', () => {
     expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Reset' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('slider', { name: 'Refine smooth' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('checkbox', { name: 'Decontaminate Colors' }) as HTMLInputElement).disabled).toBe(true);
     view.unmount();
 
     render(RefineSelectionDialog, { props: props({ previewMask: null }) });
     expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('Preview unavailable')).toBeTruthy();
+  });
+
+  it('surfaces thumbnail render failures and keeps Apply and Enter fail-closed', async () => {
+    const value = props({
+      previewMask: { ...previewMask, width: 0, data: '' }
+    });
+    const view = render(RefineSelectionDialog, { props: value });
+
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'Representative preview unavailable. Mask dimensions are invalid for thumbnail generation.'
+    );
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Reset' }) as HTMLButtonElement).disabled).toBe(false);
+
+    const dialog = screen.getByRole('dialog', { name: 'Refine Selection' });
+    dialog.focus();
+    await fireEvent.keyDown(dialog, { key: 'Enter' });
+    expect(value.onapply).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(value.onparameterschange).toHaveBeenCalledWith({ ...REFINE_SELECTION_DEFAULTS });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await view.rerender({ ...value, previewMask, parameters: { ...REFINE_SELECTION_DEFAULTS } });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('surfaces a decontamination work-limit failure from the current representative render', async () => {
+    class LoadedImage {
+      onload: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.(new Event('load')));
+      }
+    }
+    vi.stubGlobal('Image', LoadedImage);
+    const width = 240;
+    const height = 180;
+    const edgeCoverage = new Uint8Array(width * height).fill(128);
+    const boundedMask: MaskSnapshot = {
+      version: 1,
+      width,
+      height,
+      encoding: 'base64_u8',
+      data: Buffer.from(edgeCoverage).toString('base64'),
+      checksum: 'fnv1a64:0000000000000128'
+    };
+    const value = props({
+      previewMask: boundedMask,
+      originalImageUrl: 'data:image/png;base64,AA==',
+      parameters: {
+        ...parameters,
+        decontaminate: true,
+        decontaminateStrength: 1,
+        decontaminateRadius: 32
+      }
+    });
+
+    render(RefineSelectionDialog, { props: value });
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain(
+        'Representative preview unavailable. Decontamination preview exceeds its bounded work limit.'
+      );
+    });
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Refine Selection' }), { key: 'Enter' })
+    ).toBe(false);
+    expect(value.onapply).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when Decontaminate Colors cannot render the source image', async () => {
+    class FailedImage {
+      onload: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => this.onerror?.(new Event('error')));
+      }
+    }
+    vi.stubGlobal('Image', FailedImage);
+    const value = props({
+      originalImageUrl: 'data:image/png;base64,invalid',
+      parameters: { ...parameters, decontaminate: true }
+    });
+
+    render(RefineSelectionDialog, { props: value });
+
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'Representative preview unavailable. The source image is unavailable for the Decontaminate Colors preview.'
+    );
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Refine Selection' }), { key: 'Enter' });
+    expect(value.onapply).not.toHaveBeenCalled();
   });
 });

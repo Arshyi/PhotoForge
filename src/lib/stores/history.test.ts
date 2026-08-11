@@ -24,4 +24,18 @@ describe('EditHistory', () => {
     history.retainUndoDepth(1);
     expect(history.undoDepth).toBe(1);
   });
+
+  it('force-coalesces a matching async geometry continuation beyond the normal time window', () => {
+    const history = new EditHistory();
+    history.commit([{ type: 'lens_correction', distortion: 0.1, vignetting: 0, chromatic_aberration: 0 }], 'lens_correction', 100);
+    history.commit(
+      [{ type: 'lens_correction', distortion: 0.6, vignetting: 0, chromatic_aberration: 0 }],
+      'lens_correction',
+      10_000,
+      true
+    );
+    expect(history.lastCommitCreatedEntry).toBe(false);
+    expect(history.undoDepth).toBe(1);
+    expect(history.undo()).toEqual([]);
+  });
 });

@@ -14,8 +14,8 @@ This document separates implementation facts from measured release observations 
 - Perspective inversion is bounded and rejects non-finite, folded, near-singular, or non-convergent transforms. Stage mismatches, stale documents, cancellation, duplicate keys, missing keys, and oversized batches fail closed.
 - Full-resolution masked operations require exact mask dimensions at their pipeline stage. Preview preparation tracks full and preview stages independently and creates temporary bilinear preview masks without rewriting canonical snapshots.
 - Undo/Redo treats a completed geometry remap as one compound edit/selection action.
-
-Lens correction is not included in the 0.7.1 mask-remap contract.
+- Lens correction participates in the same geometry contract. Scalar coverage follows bounded distortion in the validated `-0.16…1` range; vignetting and red/blue chromatic-aberration offsets are intentionally non-spatial for a one-channel mask. Identity and non-spatial-only lens changes preserve coverage exactly.
+- Rapid geometry sliders retain only the final same-control intent, including a return to the committed baseline while a remap is active. Unrelated mutations are rejected until the transaction settles, and cancellation removes queued follow-up geometry.
 
 ### Thumbnails and overlays
 
@@ -29,7 +29,7 @@ Lens correction is not included in the 0.7.1 mask-remap contract.
 - Request-scoped progress records document ID, request ID, operation, phase, completed units, total units, and queued/running/cancelling/completed/cancelled/failed state.
 - Rasterization/composition, Magic Wand, Color Range, feather/morphology/cleanup/refinement, and geometry remapping report implementation work units such as pixels, passes, or output rows.
 - The frontend ignores stale progress, prevents percentage regression, bounds determinate output to 0–100%, waits 180 ms before display, and clears terminal state. Cancellation remains `cancelling` until worker acknowledgement.
-- JSON and PNG mask import/export remain bounded one-shot file commands. They do not expose granular numerical file-I/O progress in 0.7.1.
+- JSON and PNG mask import/export use the same document/request-scoped lifecycle. They report real file-byte, output-row, decoded-coverage, checksum, and diagnostic-scan units when totals are known; parser and codec-only phases remain indeterminate. Writes use collision-resistant sibling temporary files and preserve the existing destination on cancellation or failure before replacement.
 
 ### Pointer pressure
 
@@ -44,7 +44,8 @@ Lens correction is not included in the 0.7.1 mask-remap contract.
 - The dialog provides split and before/after toggle comparisons, with original-image, black, white, and mask-only backgrounds.
 - Smooth, feather, contrast, and shift-edge controls support Reset, Apply, Cancel, Escape, and safe Enter confirmation.
 - Apply commits one logical selection history entry; Cancel discards the preview exactly; repeated previews do not create Undo entries.
-- Decontaminate Colors is **not shipped**. The existing refine algorithm modifies mask coverage only. Adding an edge-color rewrite without a separately validated image-edit contract would be unsafe and misleading, so no placeholder checkbox is exposed.
+- Decontaminate Colors is an optional, default-off masked image operation. It deterministically replaces RGB spill only on partially selected edge pixels from bounded nearby confidently selected, non-transparent foreground samples, preserves alpha, honors inside/outside inversion, and has explicit radius/work limits.
+- The dialog shows a bounded representative local preview using the same circular distance-weighted sampling semantics. Missing source imagery, malformed coverage, or a preview work-limit failure disables Apply and safe Enter rather than committing an unseen effect.
 
 ### Sessions, workflows, and interchange
 
@@ -65,47 +66,50 @@ Lens correction is not included in the 0.7.1 mask-remap contract.
 
 | Check | Final result |
 | --- | --- |
-| Rust tests | 444 passed, 0 failed |
-| Frontend Vitest | 369 passed, 0 failed across 31 files |
+| Rust tests | 474 passed, 0 failed |
+| Frontend Vitest | 415 passed, 0 failed across 34 files |
 | `cargo fmt --check` | Passed |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
 | `npm run check` | 0 errors, 0 warnings |
-| `npm run build` | Succeeded; 165 modules transformed |
+| `npm run build` | Succeeded; 167 modules transformed |
 | `npm run tauri build` | Passed; generated the release executable plus NSIS and MSI bundles |
+| `npm audit` / `npm audit --omit=dev` | 0 vulnerabilities in both full and production-only dependency graphs |
+| `cargo audit` | 0 vulnerability findings; 17 allowed maintenance/unsoundness warnings remain in transitive Tauri platform dependencies (16 unmaintained, one `glib` unsoundness advisory) |
 
 The final report must record the complete-suite totals, not only focused tests. Relevant coverage includes exact and interpolated geometry remaps, invalid perspective rejection, pressure resolution/replay, thumbnail cache invalidation, progress monotonicity/cancellation, refine preview isolation/apply/cancel/reset, strict preview-stage masks, session migration, embedded workflow masks, and stress/pathological input handling.
 
 ## Release-mode performance
 
-Measured on 2026-08-10 with generated fixtures on Windows 11 Pro build 26200, Intel Core i7-12850HX (16 cores/24 logical processors), and 127.7 GiB physical RAM. Command: `cargo run --release --example mask_benchmark`.
+Measured on 2026-08-11 with generated fixtures on Windows 11 Pro build 26200, Intel Core i7-12850HX (16 cores/24 logical processors), and 127.7 GiB physical RAM. Command: `cargo run --release --example mask_benchmark`.
 
 Each timing is a one-machine regression observation, not a cross-machine guarantee. Values must include all three required sizes and may not be cherry-picked.
 
 | Operation | 1920×1080 | 4000×3000 | 6000×4000 |
 | --- | ---: | ---: | ---: |
-| Rectangle rasterization | 3.289 ms | 19.360 ms | 37.598 ms |
-| Freehand, 180 points | 2.623 ms | 13.908 ms | 27.129 ms |
-| Polygon, 500 points | 3.201 ms | 15.191 ms | 28.873 ms |
-| Full-image Magic Wand | 124.477 ms | 812.401 ms | 1,690.994 ms |
-| Feather radius 5 | 12.763 ms | 71.993 ms | 155.671 ms |
-| Feather radius 25 | 12.521 ms | 72.645 ms | 157.867 ms |
-| Expand radius 24 | 17.924 ms | 120.891 ms | 265.158 ms |
-| Contract radius 24 | 17.992 ms | 127.622 ms | 258.331 ms |
-| Refine Selection | 51.543 ms | 321.048 ms | 695.423 ms |
-| Thumbnail generation | 2.859 ms | 17.004 ms | 32.906 ms |
-| Crop remap | 0.642 ms | 3.833 ms | 7.550 ms |
-| 90° rotation remap | 2.613 ms | 19.699 ms | 49.808 ms |
-| Straighten remap | 44.776 ms | 258.530 ms | 514.178 ms |
-| Perspective remap | 41.315 ms | 236.461 ms | 471.538 ms |
+| Rectangle rasterization | 3.395 ms | 18.861 ms | 38.269 ms |
+| Freehand, 180 points | 2.577 ms | 13.581 ms | 26.251 ms |
+| Polygon, 500 points | 3.157 ms | 15.687 ms | 28.468 ms |
+| Full-image Magic Wand | 118.337 ms | 790.365 ms | 1,638.854 ms |
+| Feather radius 5 | 11.670 ms | 70.856 ms | 149.233 ms |
+| Feather radius 25 | 11.707 ms | 70.526 ms | 148.394 ms |
+| Expand radius 24 | 18.191 ms | 121.997 ms | 270.805 ms |
+| Contract radius 24 | 17.876 ms | 120.246 ms | 253.437 ms |
+| Refine Selection | 50.539 ms | 316.687 ms | 661.937 ms |
+| Thumbnail generation | 2.886 ms | 17.992 ms | 33.522 ms |
+| Crop remap | 0.604 ms | 4.400 ms | 8.105 ms |
+| 90° rotation remap | 2.550 ms | 19.486 ms | 51.324 ms |
+| Straighten remap | 43.677 ms | 269.532 ms | 521.603 ms |
+| Perspective remap | 41.422 ms | 237.950 ms | 472.749 ms |
+| Lens-distortion remap | 40.862 ms | 239.418 ms | 471.302 ms |
 
 | Additional operation | Final result |
 | --- | ---: |
-| JSON mask save/load | 26.811 / 50.325 ms at 6000×4000 |
-| PNG mask save/load | 6.241 / 22.378 ms at 6000×4000 |
-| Masked export | Masked brightness 172.342 ms and PNG encode 18.663 ms at 4000×3000 |
-| Cancellation acknowledgement | 0.936 ms; operation cancelled |
+| JSON mask save/load | 27.319 / 45.245 ms at 6000×4000 |
+| PNG mask save/load | 33.681 / 20.476 ms at 6000×4000 |
+| Masked image processing/export | Masked brightness 170.227 ms, Decontaminate Colors 54.372 ms, and PNG encode 18.805 ms at 4000×3000 |
+| Cancellation acknowledgement | 0.930 ms; operation cancelled |
 | Owned-buffer/memory observations | 24,000,000-byte raw mask plus 96,000,000-byte RGBA fixture at 6000×4000; no measured peak-process-memory claim |
-| Equivalent Phase 7 comparison | 24 MP rectangle 45.367 vs 46.234 ms (-1.9%); 1080p polygon legacy sample 3.502 vs 3.405 ms (+2.8%); 12 MP freehand 13.199 vs 13.154 ms (+0.3%); expand/contract 122.886/122.726 vs 115.462/116.348 ms (+6.4%/+5.5%); Magic Wand 1,680.355 vs 1,633.557 ms (+2.9%); JSON save/load 26.811/50.325 vs 26.917/51.647 ms (-0.4%/-2.6%); masked brightness 172.342 vs 167.739 ms (+2.7%); cancellation 0.936 vs 0.994 ms (-5.8%) |
+| Equivalent Phase 7 comparison | 24 MP rectangle 45.627 vs 46.234 ms (-1.3%); 1080p polygon legacy sample 3.146 vs 3.405 ms (-7.6%); 12 MP freehand 13.400 vs 13.154 ms (+1.9%); expand/contract 120.783/121.391 vs 115.462/116.348 ms (+4.6%/+4.3%); Magic Wand 1,631.142 vs 1,633.557 ms (-0.1%); JSON save/load 27.319/45.245 vs 26.917/51.647 ms (+1.5%/-12.4%); masked brightness 170.227 vs 167.739 ms (+1.5%); cancellation 0.930 vs 0.994 ms (-6.4%) |
 
 ## Packaged manual validation
 
@@ -132,7 +136,7 @@ Deliberately retained evidence is under the ignored `release/validation` directo
 
 | Step | Final observation |
 | --- | --- |
-| Product/version metadata | `PhotoForge` 0.7.1; `ProductCode={46AE88A5-3A91-40B2-AE20-851A8AE42355}`; stable `UpgradeCode={DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}`; `ALLUSERS=1`; manufacturer `photoforge`. |
+| Product/version metadata | `PhotoForge` 0.7.1; `ProductCode={538D9415-5A7F-4FB1-BC36-903412BBD018}`; stable `UpgradeCode={DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}`; `ALLUSERS=1`; manufacturer `photoforge`. |
 | Install and installed files | A direct non-elevated install of the exact final MSI failed with Windows Installer error 1925/status 1603 and rolled back cleanly. An elevation request could not be completed in the unattended environment. A non-installing administrative extraction of the final MSI succeeded with exit 0 and produced the expected 0.7.1 executable. |
 | Launch and basic image operation | The administratively extracted executable reached a responsive `PhotoForge` window and closed cleanly. A basic operation through an actually installed MSI was not completed because the all-users install requires elevation. |
 | Start Menu/shortcut behavior | Not tested: the all-users MSI was not installed. Administrative extraction created no install registration. |
@@ -170,18 +174,15 @@ Release files belong in the repository's ignored `release` directory and are not
 
 | Artifact | Size | SHA-256 |
 | --- | ---: | --- |
-| `PhotoForge-portable.exe` | 14,309,888 bytes | `11afe3108efd26e599bd0c24f539c5ef03bcedf7431fad22d8e7a57da5575923` |
-| `PhotoForge_0.7.1_x64-setup.exe` | 3,260,739 bytes | `a23f887d37e9138ca5dc226a1fbec74ee2f2c019b635e02e189956c51e580987` |
-| `PhotoForge_0.7.1_x64_en-US.msi` | 4,759,552 bytes | `23b9c953a11ea33280a555d525037d548f0bc97f3d299dbb857acbab2e7b5233` |
-| `SHA256SUMS.txt` | 284 bytes | `89f313699184d02a4e9edf37bbb92fd0ed8472c6dce2c0a9cfcf79aded1d55a9` |
+| `PhotoForge-portable.exe` | 14,738,432 bytes | `6f48d5cd2da925d8d5f7168671675fd94d0d591b0756600c78cbbeb5d68c634b` |
+| `PhotoForge_0.7.1_x64-setup.exe` | 3,361,424 bytes | `4044424be03ef700e5bb5b897acc9a3632b58a44b10e1f1d8d7ee832f3002bf8` |
+| `PhotoForge_0.7.1_x64_en-US.msi` | 4,907,008 bytes | `2d753ad5291f636484f229b8f92a3dc39398aeddc5a7caa427dfaf3b616ba53f` |
+| `SHA256SUMS.txt` | 284 bytes | `1e7c6cd68d3f730d093482959b0748ac9a6bd9ea87b72479dcf03f73d0e3e47a` |
 
 Artifact audit: the three release binaries match their Tauri build outputs byte for byte, and `certutil` independently reproduced every manifest hash. The manifest contains exactly the three expected entries with no malformed, duplicate, missing, or extra entry. Portable and NSIS resources report `PhotoForge` 0.7.1; MSI properties match the metadata above. All three binaries are Authenticode `NotSigned`; no signing certificate or secret was supplied.
 
 ## Remaining limitations
 
-- Decontaminate Colors is not shipped; refinement changes mask coverage only.
-- Lens-correction masks are not geometrically remapped in 0.7.1.
-- JSON/PNG mask file I/O has bounded validation and atomic JSON save behavior but no granular numerical progress.
 - Selection sessions are bounded WebView local state, not a general project-file system. Document association uses a hash of the normalized source path plus original image dimensions; no plaintext path or source-pixel/content hash is stored. Moving or renaming a file changes its current identity, while replacing it in place with different pixels at the same dimensions does not.
 - Manual gaps remain explicit above: the full 73-item matrix was not repeated hands-on across every tool, scale, window mode, fixture, and package form; actual elevated MSI install/uninstall and packaged GUI export were not completed.
 

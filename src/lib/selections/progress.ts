@@ -53,7 +53,9 @@ export class MaskProgressTracker {
       );
       this.percent = Math.max(this.percent ?? 0, candidate);
     }
-    return this.view(now);
+    const current = this.view(now);
+    if (isTerminal(this.state)) this.reset();
+    return current;
   }
 
   markCancelling(now = Date.now()): MaskProgressView | null {
@@ -65,7 +67,7 @@ export class MaskProgressTracker {
 
   view(now = Date.now()): MaskProgressView | null {
     if (!this.active) return null;
-    const terminal = ['completed', 'cancelled', 'failed'].includes(this.state);
+    const terminal = isTerminal(this.state);
     return {
       documentId: this.documentId,
       requestId: this.requestId,
@@ -90,4 +92,8 @@ export class MaskProgressTracker {
   private matches(documentId: number, requestId: number): boolean {
     return this.active && this.documentId === documentId && this.requestId === requestId;
   }
+}
+
+function isTerminal(state: MaskProgressState): boolean {
+  return state === 'completed' || state === 'cancelled' || state === 'failed';
 }

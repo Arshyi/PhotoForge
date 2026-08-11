@@ -37,6 +37,38 @@ export function isWorkspaceMutationGuardCurrent(
     guard.selectionFingerprint === contentFingerprint(selection);
 }
 
+export function isMaskIoRequestCurrent(
+  ownDocumentId: number,
+  ownRequestId: number,
+  cancelledRequestId: number,
+  currentDocumentId: number,
+  currentRequestId: number,
+  guard: WorkspaceMutationGuard,
+  operations: EditOperation[],
+  selection: SelectionState
+): boolean {
+  return isMaskRequestCurrent(
+    ownDocumentId,
+    ownRequestId,
+    cancelledRequestId,
+    currentDocumentId,
+    currentRequestId
+  ) &&
+    isWorkspaceMutationGuardCurrent(guard, currentDocumentId, operations, selection);
+}
+
+export function isMaskRequestCurrent(
+  ownDocumentId: number,
+  ownRequestId: number,
+  cancelledRequestId: number,
+  currentDocumentId: number,
+  currentRequestId: number
+): boolean {
+  return ownDocumentId === currentDocumentId &&
+    ownRequestId === currentRequestId &&
+    ownRequestId !== cancelledRequestId;
+}
+
 export function createGeometryCommitToken(
   documentId: number,
   openRequest: number,
@@ -77,6 +109,36 @@ export function workspaceMutationBlocked(
   refineOpen: boolean
 ): boolean {
   return selectionBusy || geometryBusy || refineOpen;
+}
+
+export function canReplacePendingGeometry(
+  pendingCoalesceKey: string | undefined,
+  nextCoalesceKey: string | undefined
+): boolean {
+  return Boolean(
+    pendingCoalesceKey && nextCoalesceKey && pendingCoalesceKey === nextCoalesceKey
+  );
+}
+
+export type GeometryCoalesceIntent = 'reject' | 'queue' | 'cancel_pending';
+
+export function geometryCoalesceIntent(
+  geometryChanged: boolean,
+  pendingCoalesceKey: string | undefined,
+  activeCoalesceKey: string | undefined,
+  geometryTransactionRunning: boolean,
+  nextCoalesceKey: string | undefined,
+  activeRequestCancelled = false
+): GeometryCoalesceIntent {
+  if (activeRequestCancelled) return 'reject';
+  if (geometryTransactionRunning &&
+    canReplacePendingGeometry(activeCoalesceKey, nextCoalesceKey)) {
+    return 'queue';
+  }
+  if (canReplacePendingGeometry(pendingCoalesceKey, nextCoalesceKey)) {
+    return geometryChanged ? 'queue' : 'cancel_pending';
+  }
+  return 'reject';
 }
 
 function contentFingerprint(value: unknown): string {
