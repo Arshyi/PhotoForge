@@ -1,6 +1,6 @@
 # Phase 7.1 results
 
-PhotoForge 0.7.1 is the completion and hardening release for Phase 7. It does not begin Phase 8. The release keeps selection and image processing deterministic and local: it adds no cloud service, telemetry, model download, neural segmentation, generative editing, OCR, account, payment, marketplace, or executable-plugin behavior.
+PhotoForge 0.7.1 is the completion and hardening release for Phase 7. It does not begin Phase 8. PhotoForge application code keeps selection and image processing deterministic and local: it adds no cloud service, application telemetry, model download, neural segmentation, generative editing, OCR, account, payment, marketplace, or executable-plugin behavior. Independent WebView2 runtime diagnostics are disclosed separately below.
 
 This document separates implementation facts from measured release observations and states where hands-on coverage was incomplete.
 
@@ -66,7 +66,7 @@ This document separates implementation facts from measured release observations 
 
 | Check | Final result |
 | --- | --- |
-| Rust tests | 474 passed, 0 failed |
+| Rust tests | 481 passed, 0 failed |
 | Frontend Vitest | 415 passed, 0 failed across 34 files |
 | `cargo fmt --all -- --check` | Passed |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
@@ -113,7 +113,7 @@ Each timing is a one-machine regression observation, not a cross-machine guarant
 
 ## Packaged manual validation
 
-The requested 73-item matrix is retained as a local validation plan. It was not completed against the final binaries, and automated/backend evidence is not relabeled as a GUI pass. The official Computer Use integration initialized only after a temporary runtime repair, but it could not obtain approval for or discover a targetable PhotoForge window. The older PowerShell/UI Automation matrix runs were debugging runs against interim binaries and are deliberately excluded from final acceptance.
+The requested 73-item matrix is retained as a local validation plan. It was not completed against the final binaries, and automated/backend evidence is not relabeled as a GUI pass. Two supported Computer Use checks reported the integration as `not_installed`; the current bundled-runtime import also failed with a protected-path `EPERM`, so no supported PhotoForge window existed. An earlier temporary copy of the official runtime package could import, but app approval remained unavailable and it still exposed no targetable window. The older PowerShell/UI Automation matrix runs were debugging runs against interim binaries and are deliberately excluded from final acceptance.
 
 | Matrix group | Items | Final evidence/status |
 | --- | --- | --- |
@@ -128,7 +128,7 @@ The requested 73-item matrix is retained as a local validation plan. It was not 
 | Display/window | High-DPI mapping; 100%, 125%, 150%, 200%; narrow and maximized | Coordinate and transformed-canvas tests passed. The exact portable and installed NSIS executable opened responsive standard windows at the current 100% Windows scale; 125%, 150%, 200%, narrow, and maximized passes were not completed. |
 | Package forms | Portable, NSIS-installed, MSI-installed | The exact portable started responsively. The exact NSIS completed install, responsive launch, and clean uninstall. The MSI completed metadata audit, administrative extraction, and responsive extracted-executable launch; the requested elevated all-users installation was cancelled at the UAC boundary, so an installed-MSI lifecycle was not completed. |
 
-Deliberately retained evidence is under the ignored `release/validation` directory: the final artifact audit, benchmark output, exact-final NSIS lifecycle summary, exact-final attributed network summary, MSI administrative-extraction log and payload, generated fixtures, observer/matrix scripts, and interim debugging runs. The interim GUI matrix directories are treated here as debugging evidence and are not final acceptance. These local files are not committed.
+Deliberately retained evidence is under the ignored `release/validation` directory: `artifact-origin-bootstrap-final-20260813.txt`, `nsis-origin-bootstrap-final-20260813.txt`, `network-origin-bootstrap-final-20260813/attributed-network.txt`, `msi-origin-bootstrap-final-admin-20260813/`, `phase71-origin-bootstrap-final-cua-blocker-20260813.txt`, the benchmark output, generated fixtures, observer/matrix scripts, and interim debugging runs. The interim GUI matrix directories are treated here as debugging evidence and are not final acceptance. These local files are not committed.
 
 ## Installer lifecycle
 
@@ -136,8 +136,8 @@ Deliberately retained evidence is under the ignored `release/validation` directo
 
 | Step | Final observation |
 | --- | --- |
-| Product/version metadata | `PhotoForge` 0.7.1; `ProductCode={538D9415-5A7F-4FB1-BC36-903412BBD018}`; stable `UpgradeCode={DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}`; `ALLUSERS=1`; manufacturer `photoforge`. |
-| Install and installed files | The exact final MSI's elevation request was cancelled at the UAC consent boundary and was not retried or automated, so no product installation or registration occurred. A non-installing administrative extraction of the final MSI succeeded with exit 0 and produced the expected 0.7.1 executable. |
+| Product/version metadata | `PhotoForge` 0.7.1; `ProductCode={22FFC7C3-874B-4FBF-AE8D-C3B9F6C4E0A5}`; stable `UpgradeCode={DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}`; `ALLUSERS=1`; `MSIINSTALLPERUSER` absent; manufacturer `photoforge`. |
+| Install and installed files | The origin-corrected final MSI's elevation request was explicitly presented but cancelled at the UAC consent boundary. An earlier post-hardening MSI request had also been cancelled; UAC was not bypassed or automated, so no product installation or registration occurred. A non-installing administrative extraction of the final MSI succeeded with exit 0 and produced the expected 0.7.1 executable. |
 | Launch and basic image operation | The administratively extracted executable reached a responsive `PhotoForge` window and closed cleanly. A basic operation through an actually installed MSI was not completed because the all-users install requires elevation. |
 | Start Menu/shortcut behavior | Not tested: the all-users MSI was not installed. Administrative extraction created no install registration. |
 | Uninstall and residue check | Not applicable to an installed product because installation never completed. Administrative extraction did not register a product, create installed-product shortcuts, or require uninstall. An elevated MSI uninstall was not tested. |
@@ -154,17 +154,17 @@ Pre-existing WebView2 user data must be distinguished from files introduced by t
 
 ## WebView2 network observation
 
-Configured launch arguments and supported-control review: the packaged window retains only `--disable-background-networking` in `additionalBrowserArgs`. Undocumented internal feature switches for browser UI or SmartScreen are not used. Microsoft documents `AdditionalBrowserArguments` as a browser-argument pass-through whose important switches may be ignored, and documents `IsReputationCheckingRequired` as the supported WebView2 SmartScreen control; PhotoForge leaves reputation checking at the runtime default and makes no firewall or hosts-file change. See [AdditionalBrowserArguments](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2environmentoptions.additionalbrowserarguments?view=webview2-dotnet-1.0.3800.47) and [IsReputationCheckingRequired](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings8?view=webview2-1.0.3650.58).
+Supported-control review: the packaged window starts on a script-free inert bundled document at the normal Tauri origin, preserving Tauri's per-webview origin metadata. It applies and reads back WebView2's documented `IsReputationCheckingRequired=false` and only then navigates to the application document. Top-level external navigation, popups, browser downloads, frames, objects, form submissions, and ordinary renderer fetch/XHR/WebSocket/EventSource destinations outside Tauri IPC are denied. PhotoForge supplies no custom browser argument, firewall rule, hosts-file entry, or undocumented feature switch. These controls are not a process firewall. See [the application/runtime boundary](webview-network-boundary.md), [Microsoft's WebView2 privacy documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy), and [`ICoreWebView2Settings8`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings8).
 
-Observation window, method, and operation: the exact final portable executable was launched idle at 2026-08-13T12:19:42.2917537Z for 20.503 seconds. A local PowerShell observer sampled non-loopback `Get-NetTCPConnection` ownership for the root PID, profile-bound WebView2 descendants, and system processes separately. No debug browser argument was present, and WebView2 runtime 151.0.4129.78 included `--disable-background-networking` in the root command line.
+Observation window, method, and operation: the origin-corrected final portable executable was launched idle at 2026-08-13T14:25:57.0619208Z for 25.187 seconds. A local PowerShell observer sampled non-loopback `Get-NetTCPConnection` ownership for root PID 23468, profile-bound WebView2 descendants, and system processes separately. No profile-bound WebView2 process existed before launch, and no debug/custom browser argument was present.
 
 | Process class | Source/destination/timing | Classification |
 | --- | --- | --- |
-| PhotoForge Rust application process | Root PID 21276 owned no sampled non-loopback TCP socket. | No PhotoForge application socket was observed. |
-| Microsoft Edge WebView2 subprocesses | Profile-bound WebView2 root PID 23816 held two established IPv6 TLS connections from ephemeral ports 57281/57282 to `[2603:1046:c0c:815::2]:443`, first seen at 1,367.4/1,367.1 ms and last seen at 20,381.3/20,381.2 ms, with 40 samples each. The local public address is intentionally omitted from the committed record. | Runtime traffic owned by WebView2; it is not attributed to PhotoForge mask code. |
-| Windows/system processes | The observer recorded 74 system/unattributed connections separately; most were baseline/time-wait entries, and six non-baseline Cloudflare IPv6 time-wait entries were not owned by the PhotoForge/WebView2 process tree. | No Windows-wide traffic is attributed to PhotoForge. |
+| PhotoForge Rust application process | Root PID 23468 owned no sampled non-loopback TCP socket. | No PhotoForge application socket was observed. |
+| Microsoft Edge WebView2 subprocesses | Profile-bound WebView2 browser-host PID 21696 held two established IPv6 TLS connections from ephemeral ports 55101/55102 to `[2603:1046:c0b:4d::2]:443`, first seen at 1,899.6/1,899.4 ms and last seen at 25,062.6/25,062.5 ms, with 55 samples each. The local public address is intentionally omitted from the committed record. | Runtime traffic owned by WebView2; it is not attributed to PhotoForge application code. |
+| Windows/system processes | The observer recorded 19 system/unattributed connections separately; these were not owned by the PhotoForge/WebView2 process tree. | No Windows-wide traffic is attributed to PhotoForge. |
 
-Conclusion: no non-loopback socket was owned by the PhotoForge Rust process, but the embedded WebView2 runtime did establish two TLS connections during idle startup despite `--disable-background-networking`. Therefore 0.7.1 makes no zero-network claim for the complete WebView2 process tree.
+Conclusion: no non-loopback socket was owned by the PhotoForge Rust process, but the embedded WebView2 runtime established two TLS connections during idle startup despite the supported application boundary. Microsoft documents that required WebView2 diagnostic collection is not fully controlled by the embedding application. Therefore 0.7.1 makes no zero-network claim for the complete WebView2 process tree.
 
 PhotoForge's selection, thumbnail, remap, progress, pressure, and refinement code contains no networking path. This is not a zero-connection guarantee for the complete process tree: WebView2 required diagnostics/configuration traffic is governed partly by Windows settings and is not fully controlled by the embedding application. Unsupported flags, firewall changes, and hosts-file workarounds are not used.
 
@@ -174,18 +174,18 @@ Release files belong in the repository's ignored `release` directory and are not
 
 | Artifact | Size | SHA-256 |
 | --- | ---: | --- |
-| `PhotoForge-portable.exe` | 14,738,432 bytes | `6f48d5cd2da925d8d5f7168671675fd94d0d591b0756600c78cbbeb5d68c634b` |
-| `PhotoForge_0.7.1_x64-setup.exe` | 3,361,424 bytes | `4044424be03ef700e5bb5b897acc9a3632b58a44b10e1f1d8d7ee832f3002bf8` |
-| `PhotoForge_0.7.1_x64_en-US.msi` | 4,907,008 bytes | `2d753ad5291f636484f229b8f92a3dc39398aeddc5a7caa427dfaf3b616ba53f` |
-| `SHA256SUMS.txt` | 284 bytes | `1e7c6cd68d3f730d093482959b0748ac9a6bd9ea87b72479dcf03f73d0e3e47a` |
+| `PhotoForge-portable.exe` | 14,744,064 bytes | `bd88cde252a1277baca7d8283af6b7ae937a002725c199a2d62936ee7076b0d2` |
+| `PhotoForge_0.7.1_x64-setup.exe` | 3,349,896 bytes | `0fe662b6cafcc4409b9cb11b15244cabf80593df9c8f8871024be957198f8c5e` |
+| `PhotoForge_0.7.1_x64_en-US.msi` | 4,956,160 bytes | `0aeb1d923516cc1b8e2ea96271893635b5471c6d92199c3b074d7468fc2d48ca` |
+| `SHA256SUMS.txt` | 284 bytes | `51e91aa17e934f5ad35ff5a7998334f9999306a358610f080e6d7e9d832d4a7f` |
 
-Artifact audit: the three release binaries match their Tauri build outputs byte for byte, and `certutil` independently reproduced every manifest hash. The manifest contains exactly the three expected entries with no malformed, duplicate, missing, or extra entry. Portable and NSIS resources report `PhotoForge` 0.7.1; MSI properties match the metadata above. All three binaries are Authenticode `NotSigned`; no signing certificate or secret was supplied.
+Artifact audit: the three release binaries match their Tauri build outputs byte for byte, and independent hashing reproduced every manifest hash. The manifest contains exactly the three expected current-0.7.1 entries with no malformed, duplicate, missing, or extra entry. Portable and NSIS resources report `PhotoForge` 0.7.1; MSI properties match the metadata above. `Get-AuthenticodeSignature` and Windows SDK SignTool independently report no signature on all three binaries; no trusted code-signing identity or service was supplied or discovered, and no self-signed substitute was used.
 
 ## Remaining limitations
 
 - Selection sessions are bounded WebView local state, not a general project-file system. Document association uses a hash of the normalized source path plus original image dimensions; no plaintext path or source-pixel/content hash is stored. Moving or renaming a file changes its current identity, while replacing it in place with different pixels at the same dimensions does not.
 - Manual gaps remain explicit above: the final 73-item GUI matrix was not completed; native 125%, 150%, and 200% display-scale passes were not run; and actual elevated MSI install/launch/uninstall was not completed because UAC consent was cancelled.
-- The release binaries are unsigned because no trusted code-signing certificate, private key, timestamp service, or signing authority was available. A self-signed certificate was not substituted for production signing.
+- The release binaries are unsigned because no CA-issued Code Signing identity with its private key, hardware-backed identity, or configured trusted signing service was supplied or discovered. A self-signed certificate was not substituted for production signing.
 
 ## Git publication
 

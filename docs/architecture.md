@@ -115,6 +115,7 @@ Generation races the request against document/request cancellation. The determin
 
 ## Security boundaries
 
+- The Windows webview is created on an inert bundled document at the exact Tauri origin, applies and verifies WebView2's supported SmartScreen setting, and then navigates to the application document. Top-level external navigation, popups, browser downloads, frames, objects, form submissions, and ordinary renderer fetch/XHR/WebSocket/EventSource destinations outside Tauri IPC are denied. This application boundary is not a process firewall and does not claim to suppress WebView2's independent required diagnostics; see [webview-network-boundary.md](webview-network-boundary.md).
 - Only native open/save dialogs choose paths.
 - File formats are detected from content and restricted to PNG, JPEG, and WebP.
 - Dimensions and encoded file size are checked before full decode.

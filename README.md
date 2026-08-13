@@ -42,7 +42,7 @@ This repository contains the Phase 0 foundation through the completed and harden
 
 ## Requirements
 
-- Windows 10 or 11 with the Microsoft Edge WebView2 runtime
+- Windows 10 or 11 with a current Evergreen Microsoft Edge WebView2 runtime that supports `ICoreWebView2Settings8`; startup fails closed on an older runtime that cannot apply and verify the documented reputation-checking policy
 - Node.js 20 or newer and npm
 - Rust stable with the `x86_64-pc-windows-msvc` toolchain
 - Microsoft C++ Build Tools with the Desktop development with C++ workload
@@ -97,6 +97,7 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Architecture](docs/architecture.md)
 - [Image processing](docs/image-processing.md)
 - [Privacy](docs/privacy.md)
+- [WebView2 network boundary](docs/webview-network-boundary.md)
 - [Performance](docs/performance.md)
 - [Roadmap](docs/roadmap.md)
 - [Phase checklist](docs/checklist.md)

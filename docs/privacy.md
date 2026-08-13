@@ -16,12 +16,12 @@ Professional tools, histograms, metadata inspection, workflow recording, batch p
 
 Phase 6 adds no network dependency, telemetry, cloud processing, hidden upload, external execution, model, model download, or neural inference. Safe EXIF inspection reads only the bounded local input file and does not alter metadata. The optional Phase 5 Ollama loopback planner remains the only networking exception and professional tools never invoke it.
 
-PhotoForge is designed to work fully offline.
+PhotoForge features do not require an internet connection.
 
 - Images are decoded and processed locally on the user's device.
 - PhotoForge does not upload images or edit data.
 - The initial version has no analytics, telemetry, crash reporting, or remote logging.
-- The Windows WebView2 host is asked to disable browser background networking, without preventing a deliberate loopback Ollama action. WebView2 is an operating-system component and its required diagnostic/configuration traffic remains governed by Windows; see the packaged observation below.
+- The Windows shell starts WebView2 on an inert bundled document at the Tauri origin, disables SmartScreen through Microsoft's documented setting, verifies that value, and only then navigates to the application document. Top-level external navigation, popups, browser downloads, frames, objects, form submissions, and ordinary renderer fetch/XHR/WebSocket/EventSource destinations outside Tauri IPC are denied. This is not a process firewall: WebView2 is an operating-system component whose required diagnostic/configuration traffic is not fully controlled by an embedding app; see [webview-network-boundary.md](webview-network-boundary.md).
 - Exported files are created only after the user explicitly chooses an output location.
 - Original image files are not modified by default, and export rejects the original's canonical path.
 - Interactive previews are local in-memory PNG data URLs; they are not sent to a service.
@@ -34,7 +34,7 @@ PhotoForge is designed to work fully offline.
 - Rule Planner requests are matched locally by fixed Rust rules. Ollama requests are sent only after an explicit user action to the configured loopback endpoint.
 - Remembered guided requests are optional, limited to 25 provider-tagged entries in local WebView storage, and cleared when prompt history is disabled. They contain no image pixels or generated analysis payload.
 
-The packaged application was observed with zero TCP connections during the Phase 1.1 startup/idle smoke test. On the Phase 7 validation machine, newer WebView2 151 instead opened two TLS connections from its browser-host process to Microsoft infrastructure despite the background-networking flag. PhotoForge made no application request and its Rust process opened no connection. [Microsoft documents](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy) that required WebView2 diagnostic collection follows Windows settings and is not fully controlled by the embedding application. This operating-system runtime observation is disclosed rather than described as application traffic or a zero-network guarantee.
+The packaged application was observed with zero TCP connections during the Phase 1.1 startup/idle smoke test. Newer WebView2 151 opened Microsoft TLS connections in subsequent observations, including after the supported application boundary above was applied and read back. PhotoForge's Rust process opened no connection. [Microsoft documents](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy) that required WebView2 diagnostic collection occurs regardless of the optional-diagnostics setting and that an embedding app does not control overall collection. This operating-system runtime observation is disclosed rather than described as application traffic or a zero-network guarantee.
 
 Development builds can print technical failures to local development tooling. User-facing errors contain concise messages rather than stack traces.
 

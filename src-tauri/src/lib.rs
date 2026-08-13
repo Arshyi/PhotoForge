@@ -6,6 +6,7 @@ mod error;
 mod image_processing;
 pub mod infrastructure;
 pub mod mask;
+mod network_policy;
 
 use application::AppState;
 use commands::{
@@ -29,6 +30,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .setup(|app| {
+            network_policy::create_main_window(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_image,
             render_preview,
