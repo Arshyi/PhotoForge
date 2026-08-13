@@ -68,7 +68,7 @@ This document separates implementation facts from measured release observations 
 | --- | --- |
 | Rust tests | 474 passed, 0 failed |
 | Frontend Vitest | 415 passed, 0 failed across 34 files |
-| `cargo fmt --check` | Passed |
+| `cargo fmt --all -- --check` | Passed |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
 | `npm run check` | 0 errors, 0 warnings |
 | `npm run build` | Succeeded; 167 modules transformed |
@@ -76,11 +76,11 @@ This document separates implementation facts from measured release observations 
 | `npm audit` / `npm audit --omit=dev` | 0 vulnerabilities in both full and production-only dependency graphs |
 | `cargo audit` | 0 vulnerability findings; 17 allowed maintenance/unsoundness warnings remain in transitive Tauri platform dependencies (16 unmaintained, one `glib` unsoundness advisory) |
 
-The final report must record the complete-suite totals, not only focused tests. Relevant coverage includes exact and interpolated geometry remaps, invalid perspective rejection, pressure resolution/replay, thumbnail cache invalidation, progress monotonicity/cancellation, refine preview isolation/apply/cancel/reset, strict preview-stage masks, session migration, embedded workflow masks, and stress/pathological input handling.
+The complete-suite totals above include exact and interpolated geometry remaps, invalid perspective rejection, pressure resolution/replay, thumbnail cache invalidation, progress monotonicity/cancellation, refine preview isolation/apply/cancel/reset, strict preview-stage masks, session migration, embedded workflow masks, and stress/pathological input handling.
 
 ## Release-mode performance
 
-Measured on 2026-08-11 with generated fixtures on Windows 11 Pro build 26200, Intel Core i7-12850HX (16 cores/24 logical processors), and 127.7 GiB physical RAM. Command: `cargo run --release --example mask_benchmark`.
+Measured on 2026-08-11 with generated fixtures on Windows 11 Pro build 26200, Intel Core i7-12850HX (16 cores/24 logical processors), and 127.7 GiB physical RAM. Root-safe command: `cargo run --manifest-path src-tauri/Cargo.toml --release --example mask_benchmark`.
 
 Each timing is a one-machine regression observation, not a cross-machine guarantee. Values must include all three required sizes and may not be cherry-picked.
 
@@ -113,22 +113,22 @@ Each timing is a one-machine regression observation, not a cross-machine guarant
 
 ## Packaged manual validation
 
-The following groups cover the requested 73-item matrix. Automated/backend evidence and hands-on packaged actions are reported separately; a unit test is not treated as a GUI pass.
+The requested 73-item matrix is retained as a local validation plan. It was not completed against the final binaries, and automated/backend evidence is not relabeled as a GUI pass. The official Computer Use integration initialized only after a temporary runtime repair, but it could not obtain approval for or discover a targetable PhotoForge window. The older PowerShell/UI Automation matrix runs were debugging runs against interim binaries and are deliberately excluded from final acceptance.
 
 | Matrix group | Items | Final evidence/status |
 | --- | --- | --- |
-| Selection creation/composition | Rectangle, ellipse, freehand, polygon, brush add/erase, pen pressure, Magic Wand, Color Range, Replace/Add/Subtract/Intersect | Automated Rust/frontend coverage passed for the listed tools, modes, pressure fallback, and bounded malformed inputs. The packaged flow exercised Select All and Magic Wand on a 24 MP image; it did not individually re-run every listed creation tool and composition mode by hand. |
-| Mask operations/refinement | Feather, expand, contract, invert, smooth, fill holes, islands, border, Refine, before/after comparison | Automated coverage passed for all listed mask operations. The packaged flow opened Refine, changed comparison/background views, applied the preview, and retained one active mask; the other operations were not each re-run by hand. |
-| Named masks/interchange | Create, rename, duplicate, delete, visibility, lock, reorder, load, save active, JSON/PNG import/export, thumbnails | Automated coverage passed for bounded state, all named-mask actions, lazy thumbnails, and JSON/PNG round trips. The packaged flow saved the active selection as `Mask 1` and rendered its named-mask row; GUI file-dialog automation for packaged import/export was not completed. |
-| Selective edits | Exposure, curves, HSL, temperature/tint, denoise, sharpen, local contrast, outside-mask | Automated pipeline and workflow coverage passed. The packaged flow applied Brightness at 14% inside a transformed mask; the remaining edit kinds and outside-mask scope were not each re-run by hand. |
-| History/workflows/sessions | Undo, redo, record/replay, missing-mask fail closed, session save/restore, Phase 1–6 regression | Automated migration, workflow validation/replay, fail-closed, history-retention, and compound geometry Undo/Redo coverage passed. Packaged Undo and Redo were exercised after rotation; workflow/session cases were not each re-run by hand. |
-| Fixtures/output integrity | Transparent PNG, single-color, noisy photo, document-like image, source unchanged, output decodes | Automated decode, bounds, round-trip, and export coverage passed. Packaged runs used a local 6000×4000 JPEG and a 6000×4000 single-color PNG and verified the input hash was unchanged. Transparent/noisy/document-like fixtures and packaged GUI export were not each completed by hand. |
-| Geometry | Crop, rotate, straighten, perspective, mask alignment after transform | Automated exact/interpolated remap, invalid-perspective, stage, and compound-history coverage passed. The packaged flow exercised 90° rotation, mask remap, masked adjustment, Undo, and Redo; crop, straighten, and perspective were not each re-run by hand. |
-| Async behavior | Large-image cancellation and numerical progress | A packaged 24 MP Magic Wand run displayed real numerical progress and a Cancel control; cancellation returned the UI to idle in 20.354 ms. The release benchmark measured backend cancellation acknowledgement at 0.936 ms. |
-| Display/window | High-DPI mapping; 100%, 125%, 150%, 200%; narrow and maximized | Coordinate and transformed-canvas tests passed. Hands-on package checks used the current 100% Windows scale and a standard window only; 125%, 150%, 200%, narrow, and maximized manual passes were not completed. |
-| Package forms | Portable, NSIS-installed, MSI-installed | The exact portable started responsively. The exact NSIS package completed install, launch, packaged selection/refine/geometry work, and uninstall. The MSI completed metadata audit, administrative extraction, and extracted-executable launch; an actual all-users MSI install was not completed because elevation was unavailable. |
+| Selection creation/composition | Rectangle, ellipse, freehand, polygon, brush add/erase, pen pressure, Magic Wand, Color Range, Replace/Add/Subtract/Intersect | Automated Rust/frontend coverage passed for the listed tools, modes, pressure fallback, cancellation, and bounded malformed inputs. These individual interactions were not all repeated through the final packaged GUI. |
+| Mask operations/refinement | Feather, expand, contract, invert, smooth, fill holes, islands, border, Refine, before/after comparison | Automated coverage passed for the listed operations, preview isolation, representative Decontaminate Colors preview, work limits, and one-entry Apply/zero-entry Cancel. The final packaged GUI matrix was not completed. |
+| Named masks/interchange | Create, rename, duplicate, delete, visibility, lock, reorder, load, save active, JSON/PNG import/export, thumbnails | Automated coverage passed for bounded state, named-mask actions, lazy thumbnails, secure JSON/PNG round trips, numerical progress, and cancellation. Native packaged file-dialog round trips were not accepted as final evidence. |
+| Selective edits | Exposure, curves, HSL, temperature/tint, denoise, sharpen, local contrast, outside-mask | Automated processor/workflow coverage passed, including strict stage-aligned masks and masked-only Decontaminate Colors. The edit kinds were not each repeated through the final packaged GUI. |
+| History/workflows/sessions | Undo, redo, record/replay, missing-mask fail closed, session save/restore, Phase 1–6 regression | Automated migration, deep workflow validation/replay, fail-closed behavior, history retention, rapid-slider coalescing, cancellation, and compound geometry Undo/Redo coverage passed. The final packaged workflow/session matrix was not completed. |
+| Fixtures/output integrity | Transparent PNG, single-color, noisy photo, document-like image, source unchanged, output decodes | Automated decode, bounds, round-trip, source-preservation, and export coverage passed. The fixture set was generated locally, but the final GUI fixture/export sequence was not completed. |
+| Geometry | Crop, rotate, straighten, perspective, reflection, lens distortion, mask alignment after transform | Automated exact/interpolated remap, invalid-transform rejection, stage, embedded-mask, cancellation, coalescing, and compound-history coverage passed. The exact final packaged GUI did not repeat every geometry case. |
+| Async behavior | Large-image cancellation and numerical progress | Automated request/currentness, monotonic-progress, JSON/PNG I/O, operation cancellation, and stale-result coverage passed. The release benchmark measured cancellation acknowledgement at 0.930 ms. The final packaged 24 MP progress/cancel sequence was not completed. |
+| Display/window | High-DPI mapping; 100%, 125%, 150%, 200%; narrow and maximized | Coordinate and transformed-canvas tests passed. The exact portable and installed NSIS executable opened responsive standard windows at the current 100% Windows scale; 125%, 150%, 200%, narrow, and maximized passes were not completed. |
+| Package forms | Portable, NSIS-installed, MSI-installed | The exact portable started responsively. The exact NSIS completed install, responsive launch, and clean uninstall. The MSI completed metadata audit, administrative extraction, and responsive extracted-executable launch; the requested elevated all-users installation was cancelled at the UAC boundary, so an installed-MSI lifecycle was not completed. |
 
-Deliberately retained evidence is under the ignored `release/validation` directory: `nsis-startup.png`, `nsis-landscape-open.png`, `nsis-selection-refine-rotate.png`, `packaged-wand-progress.png`, the generated 24 MP solid fixture, the packaged-flow/network scripts, and installer logs. These files are local release evidence and are not committed.
+Deliberately retained evidence is under the ignored `release/validation` directory: the final artifact audit, benchmark output, exact-final NSIS lifecycle summary, exact-final attributed network summary, MSI administrative-extraction log and payload, generated fixtures, observer/matrix scripts, and interim debugging runs. The interim GUI matrix directories are treated here as debugging evidence and are not final acceptance. These local files are not committed.
 
 ## Installer lifecycle
 
@@ -137,17 +137,17 @@ Deliberately retained evidence is under the ignored `release/validation` directo
 | Step | Final observation |
 | --- | --- |
 | Product/version metadata | `PhotoForge` 0.7.1; `ProductCode={538D9415-5A7F-4FB1-BC36-903412BBD018}`; stable `UpgradeCode={DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}`; `ALLUSERS=1`; manufacturer `photoforge`. |
-| Install and installed files | A direct non-elevated install of the exact final MSI failed with Windows Installer error 1925/status 1603 and rolled back cleanly. An elevation request could not be completed in the unattended environment. A non-installing administrative extraction of the final MSI succeeded with exit 0 and produced the expected 0.7.1 executable. |
+| Install and installed files | The exact final MSI's elevation request was cancelled at the UAC consent boundary and was not retried or automated, so no product installation or registration occurred. A non-installing administrative extraction of the final MSI succeeded with exit 0 and produced the expected 0.7.1 executable. |
 | Launch and basic image operation | The administratively extracted executable reached a responsive `PhotoForge` window and closed cleanly. A basic operation through an actually installed MSI was not completed because the all-users install requires elevation. |
 | Start Menu/shortcut behavior | Not tested: the all-users MSI was not installed. Administrative extraction created no install registration. |
-| Uninstall and residue check | Not applicable to an installed product because installation never completed. The failed direct attempt rolled back with no PhotoForge install record/files, and administrative extraction did not register a product. An elevated MSI uninstall was not tested. |
+| Uninstall and residue check | Not applicable to an installed product because installation never completed. Administrative extraction did not register a product, create installed-product shortcuts, or require uninstall. An elevated MSI uninstall was not tested. |
 
 ### NSIS
 
 | Step | Final observation |
 | --- | --- |
 | Install and registration | Silent per-user installation returned 0; installed `photoforge.exe` and `uninstall.exe`, created the user Start Menu shortcut and HKCU uninstall record, and reported version 0.7.1. |
-| Launch and basic image operation | The exact final installed executable reached a responsive `PhotoForge` window. The packaged flow opened a local image, created/saved/refined a selection, rotated it, used Undo/Redo, and applied Brightness inside the remapped mask while leaving the source hash unchanged. |
+| Launch and basic image operation | The exact final installed executable reached a responsive `PhotoForge` window with a nonzero window handle and closed cleanly. A final image-editing matrix could not be driven through the packaged GUI, so no packaged operation pass is claimed. |
 | Uninstall and residue check | Silent uninstall returned 0 and removed the executable, uninstaller, Start Menu shortcut, and HKCU uninstall record. The pre-existing WebView2 cache remained and was not misclassified as installer residue. |
 
 Pre-existing WebView2 user data must be distinguished from files introduced by the lifecycle under test; it should not be described as installer residue without evidence.
@@ -156,13 +156,13 @@ Pre-existing WebView2 user data must be distinguished from files introduced by t
 
 Configured launch arguments and supported-control review: the packaged window retains only `--disable-background-networking` in `additionalBrowserArgs`. Undocumented internal feature switches for browser UI or SmartScreen are not used. Microsoft documents `AdditionalBrowserArguments` as a browser-argument pass-through whose important switches may be ignored, and documents `IsReputationCheckingRequired` as the supported WebView2 SmartScreen control; PhotoForge leaves reputation checking at the runtime default and makes no firewall or hosts-file change. See [AdditionalBrowserArguments](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2environmentoptions.additionalbrowserarguments?view=webview2-dotnet-1.0.3800.47) and [IsReputationCheckingRequired](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings8?view=webview2-1.0.3650.58).
 
-Observation window, method, and operation: the exact final portable executable was launched idle at 2026-08-10T15:18:18.4764531Z for 15.286 seconds. A local PowerShell observer sampled non-loopback `Get-NetTCPConnection` ownership for the root PID and discovered descendants at 100 ms intervals; 27 connection samples were retained. No debug browser argument was present, and the WebView2 root command line contained `--disable-background-networking`.
+Observation window, method, and operation: the exact final portable executable was launched idle at 2026-08-13T12:19:42.2917537Z for 20.503 seconds. A local PowerShell observer sampled non-loopback `Get-NetTCPConnection` ownership for the root PID, profile-bound WebView2 descendants, and system processes separately. No debug browser argument was present, and WebView2 runtime 151.0.4129.78 included `--disable-background-networking` in the root command line.
 
 | Process class | Source/destination/timing | Classification |
 | --- | --- | --- |
-| PhotoForge Rust application process | PID 8760 owned no sampled non-loopback TCP socket. | No PhotoForge application socket was observed. |
-| Microsoft Edge WebView2 subprocesses | WebView2 root PID 28900 held two established IPv6 TLS connections from ephemeral ports 49832/49833 to `[2603:1046:c0b:819::2]:443`, first seen at 1,090.9/1,084.3 ms and last seen at 15,177.7/15,177.6 ms, with 27 samples each. The local public address is intentionally omitted from the committed record. | Runtime traffic owned by WebView2; it is not attributed to PhotoForge mask code. |
-| Windows/system processes | The scoped observer captured only PhotoForge and discovered descendants; unrelated system sockets were excluded. | No Windows-wide traffic claim is made. |
+| PhotoForge Rust application process | Root PID 21276 owned no sampled non-loopback TCP socket. | No PhotoForge application socket was observed. |
+| Microsoft Edge WebView2 subprocesses | Profile-bound WebView2 root PID 23816 held two established IPv6 TLS connections from ephemeral ports 57281/57282 to `[2603:1046:c0c:815::2]:443`, first seen at 1,367.4/1,367.1 ms and last seen at 20,381.3/20,381.2 ms, with 40 samples each. The local public address is intentionally omitted from the committed record. | Runtime traffic owned by WebView2; it is not attributed to PhotoForge mask code. |
+| Windows/system processes | The observer recorded 74 system/unattributed connections separately; most were baseline/time-wait entries, and six non-baseline Cloudflare IPv6 time-wait entries were not owned by the PhotoForge/WebView2 process tree. | No Windows-wide traffic is attributed to PhotoForge. |
 
 Conclusion: no non-loopback socket was owned by the PhotoForge Rust process, but the embedded WebView2 runtime did establish two TLS connections during idle startup despite `--disable-background-networking`. Therefore 0.7.1 makes no zero-network claim for the complete WebView2 process tree.
 
@@ -184,10 +184,10 @@ Artifact audit: the three release binaries match their Tauri build outputs byte 
 ## Remaining limitations
 
 - Selection sessions are bounded WebView local state, not a general project-file system. Document association uses a hash of the normalized source path plus original image dimensions; no plaintext path or source-pixel/content hash is stored. Moving or renaming a file changes its current identity, while replacing it in place with different pixels at the same dimensions does not.
-- Manual gaps remain explicit above: the full 73-item matrix was not repeated hands-on across every tool, scale, window mode, fixture, and package form; actual elevated MSI install/uninstall and packaged GUI export were not completed.
+- Manual gaps remain explicit above: the final 73-item GUI matrix was not completed; native 125%, 150%, and 200% display-scale passes were not run; and actual elevated MSI install/launch/uninstall was not completed because UAC consent was cancelled.
+- The release binaries are unsigned because no trusted code-signing certificate, private key, timestamp service, or signing authority was available. A self-signed certificate was not substituted for production signing.
 
 ## Git publication
 
-- Implementation commit: `0b98a53510853523be5e84525b0df32dd26d31da` (`Complete and harden Phase 7 selections`).
-- Publication record: this correction is committed with the requested release title `Complete and harden Phase 7 selections and masking`; its immutable hash is reported in the post-push release handoff rather than embedded self-referentially here.
-- Publication target: `main` on `origin`. The follow-up preserves the already-published implementation commit instead of rewriting shared history; final local/remote hash equality is recorded in the release handoff.
+- Integrated Phase 7.1 implementation commit: `e8f5d7469cbc3e904c9e07d3c117cdd3fcca6c7f` (`Complete and harden Phase 7 selections`).
+- Publication target: `main` on `origin`. This release-record correction preserves published history; its immutable hash and final local/origin/live-remote equality are reported in the post-push handoff rather than embedded self-referentially here.
