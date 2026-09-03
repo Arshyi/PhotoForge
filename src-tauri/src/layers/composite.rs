@@ -60,9 +60,10 @@ impl RenderContext<'_> {
 
 /// Renders a document's visible composite, clipped to the document canvas.
 ///
-/// The traversal is deterministic: layers composite strictly bottom to top, one
-/// thread, in a fixed order, so two renders of the same document and buffers
-/// produce byte-identical output.
+/// The traversal is deterministic: layers composite strictly bottom to top in
+/// a fixed order. Work within one layer may use disjoint parallel row bands;
+/// because rows never overlap and there is no reduction, two renders of the
+/// same document and buffers still produce byte-identical output.
 pub fn render_document(
     document: &LayerDocument,
     source: &dyn PixelSource,
@@ -217,32 +218,124 @@ fn draw_source(
         }
     }
 
-    for y in y0..y1 {
-        context.check_cancelled()?;
-        for x in x0..x1 {
-            let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
-            let Some(sample) = sample_rgba(source, local_x, local_y) else {
-                continue;
-            };
-            let coverage = opacity
-                * mask_coverage(
-                    mask.as_ref(),
-                    inverted,
-                    local_x,
-                    local_y,
-                    source_width,
-                    source_height,
-                );
-            if coverage <= 0.0 || sample[3] <= 0.0 {
-                continue;
+    context.check_cancelled()?;
+    let backdrop_width = backdrop.width();
+    let mask_reference = mask.as_ref();
+
+    // One destination row is written by exactly one worker and never read by
+    // another, so splitting the region into row bands keeps the result
+    // byte-identical to a single-threaded run while using the available cores.
+    for_each_row_band(
+        backdrop.as_mut(),
+        backdrop_width,
+        y0,
+        y1,
+        context.cancel,
+        |y, row| {
+            for x in x0..x1 {
+                let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
+                let Some(sample) = sample_rgba(source, local_x, local_y) else {
+                    continue;
+                };
+                let coverage = opacity
+                    * mask_coverage(
+                        mask_reference,
+                        inverted,
+                        local_x,
+                        local_y,
+                        source_width,
+                        source_height,
+                    );
+                if coverage <= 0.0 || sample[3] <= 0.0 {
+                    continue;
+                }
+                let source_pixel = [sample[0], sample[1], sample[2], sample[3] * coverage];
+                let index = x as usize * 4;
+                let existing = [
+                    f32::from(row[index]) / 255.0,
+                    f32::from(row[index + 1]) / 255.0,
+                    f32::from(row[index + 2]) / 255.0,
+                    f32::from(row[index + 3]) / 255.0,
+                ];
+                let result = composite_pixel(existing, source_pixel, blend);
+                for channel in 0..4 {
+                    row[index + channel] = to_byte(result[channel]);
+                }
             }
-            let source_pixel = [sample[0], sample[1], sample[2], sample[3] * coverage];
-            let existing = backdrop.get_pixel(x, y);
-            let result = composite_pixel(unpack(existing), source_pixel, blend);
-            backdrop.put_pixel(x, y, pack(result));
-        }
-    }
+        },
+    )?;
+    context.check_cancelled()?;
     Ok(())
+}
+
+/// Number of worker threads a render may use. Bounded so a large document
+/// cannot spawn an unreasonable number of threads on a many-core machine.
+const MAX_RENDER_THREADS: usize = 8;
+/// Below this many rows the coordination cost outweighs the parallelism.
+const MIN_ROWS_PER_THREAD: u32 = 24;
+
+/// Runs `apply` over each destination row in `y0..y1`, in parallel row bands
+/// where that is worthwhile.
+///
+/// Bands are disjoint slices of the same buffer, so no row is written twice and
+/// no reduction happens. That is what keeps the output deterministic regardless
+/// of how the work is divided or how the threads are scheduled.
+fn for_each_row_band<F>(
+    pixels: &mut [u8],
+    width: u32,
+    y0: u32,
+    y1: u32,
+    cancel: Option<&AtomicBool>,
+    apply: F,
+) -> Result<(), AppError>
+where
+    F: Fn(u32, &mut [u8]) + Sync,
+{
+    if y1 <= y0 {
+        return Ok(());
+    }
+    let row_bytes = width as usize * 4;
+    if row_bytes == 0 {
+        return Ok(());
+    }
+    let rows = y1 - y0;
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(MAX_RENDER_THREADS);
+    let threads = available.min((rows / MIN_ROWS_PER_THREAD).max(1) as usize);
+
+    let region = &mut pixels[y0 as usize * row_bytes..y1 as usize * row_bytes];
+    if threads <= 1 {
+        for (offset, row) in region.chunks_mut(row_bytes).enumerate() {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(AppError::RenderCancelled);
+            }
+            apply(y0 + offset as u32, row);
+        }
+        return Ok(());
+    }
+
+    let band_rows = rows.div_ceil(threads as u32) as usize;
+    std::thread::scope(|scope| {
+        for (band, chunk) in region.chunks_mut(band_rows * row_bytes).enumerate() {
+            let first_row = y0 + (band * band_rows) as u32;
+            let apply = &apply;
+            scope.spawn(move || {
+                for (offset, row) in chunk.chunks_mut(row_bytes).enumerate() {
+                    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                        break;
+                    }
+                    apply(first_row + offset as u32, row);
+                }
+            });
+        }
+    });
+    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        Err(AppError::RenderCancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// Plain source-over of a whole-pixel-aligned buffer.
@@ -338,37 +431,57 @@ fn apply_adjustment(
     let opacity = clamp_unit(layer.opacity);
     let blend = layer.blend_mode;
 
-    for y in 0..context.canvas_height {
-        context.check_cancelled()?;
-        for x in 0..context.canvas_width {
-            let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
-            let coverage = opacity
-                * mask_coverage(
-                    mask.as_ref(),
-                    inverted,
-                    local_x,
-                    local_y,
-                    context.canvas_width,
-                    context.canvas_height,
-                );
-            if coverage <= 0.0 {
-                continue;
+    context.check_cancelled()?;
+    let canvas_width = context.canvas_width;
+    let canvas_height = context.canvas_height;
+    let mask_reference = mask.as_ref();
+    let adjusted_raw = adjusted.as_raw();
+
+    for_each_row_band(
+        backdrop.as_mut(),
+        canvas_width,
+        0,
+        canvas_height,
+        context.cancel,
+        |y, row| {
+            let adjusted_row = y as usize * canvas_width as usize * 4;
+            for x in 0..canvas_width {
+                let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
+                let coverage = opacity
+                    * mask_coverage(
+                        mask_reference,
+                        inverted,
+                        local_x,
+                        local_y,
+                        canvas_width,
+                        canvas_height,
+                    );
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let index = x as usize * 4;
+                let source_index = adjusted_row + index;
+                let base = [
+                    f32::from(row[index]) / 255.0,
+                    f32::from(row[index + 1]) / 255.0,
+                    f32::from(row[index + 2]) / 255.0,
+                ];
+                let changed = [
+                    f32::from(adjusted_raw[source_index]) / 255.0,
+                    f32::from(adjusted_raw[source_index + 1]) / 255.0,
+                    f32::from(adjusted_raw[source_index + 2]) / 255.0,
+                ];
+                let blended = blend.blend(base, changed);
+                for channel in 0..3 {
+                    row[index + channel] =
+                        to_byte(base[channel] + coverage * (blended[channel] - base[channel]));
+                }
+                // Alpha is deliberately untouched: an adjustment layer changes
+                // colour without contributing coverage.
             }
-            let base = unpack(backdrop.get_pixel(x, y));
-            let changed = unpack(adjusted.get_pixel(x, y));
-            let blended = blend.blend(
-                [base[0], base[1], base[2]],
-                [changed[0], changed[1], changed[2]],
-            );
-            let mixed = [
-                base[0] + coverage * (blended[0] - base[0]),
-                base[1] + coverage * (blended[1] - base[1]),
-                base[2] + coverage * (blended[2] - base[2]),
-                base[3],
-            ];
-            backdrop.put_pixel(x, y, pack(mixed));
-        }
-    }
+        },
+    )?;
+    context.check_cancelled()?;
     Ok(())
 }
 
@@ -381,6 +494,7 @@ fn unpack(pixel: &Rgba<u8>) -> [f32; 4] {
     ]
 }
 
+#[cfg(test)]
 fn pack(color: [f32; 4]) -> Rgba<u8> {
     Rgba([
         to_byte(color[0]),
@@ -1361,6 +1475,59 @@ mod tests {
         let pixel = render(&document, &source).get_pixel(0, 0).0;
         assert!(pixel[0].abs_diff(128) <= 1, "{pixel:?}");
         assert_eq!(pixel[3], 255);
+    }
+
+    /// The compositor splits tall regions across worker threads. Row bands are
+    /// disjoint and nothing is reduced, so the result must not depend on how
+    /// the work was divided or scheduled.
+    #[test]
+    fn a_canvas_tall_enough_to_be_split_across_threads_stays_deterministic() {
+        let (width, height) = (40_u32, 400_u32);
+        let mut bottom = RgbaImage::new(width, height);
+        let mut top = RgbaImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let value = ((x * 7 + y * 13) % 256) as u8;
+                bottom.put_pixel(x, y, Rgba([value, 255 - value, value / 2, 255]));
+                top.put_pixel(x, y, Rgba([255 - value, value, value / 3, 200]));
+            }
+        }
+        let mut source = MapSource::default();
+        source.insert("pxbottom", bottom);
+        source.insert("pxtop", top);
+
+        let mut upper = pixel_layer("top", width, height);
+        upper.blend_mode = BlendMode::Overlay;
+        upper.opacity = 0.63;
+        let mut mask = MaskBitmap::empty(width, height).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                mask.set(x, y, ((x + y) % 256) as u8);
+            }
+        }
+        upper.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+
+        let document = document_with(
+            vec![
+                pixel_layer("bottom", width, height),
+                upper,
+                adjustment_layer("adj", EditOperation::Contrast { amount: 0.2 }),
+            ],
+            width,
+            height,
+        );
+
+        let first = render(&document, &source);
+        for _ in 0..4 {
+            assert_eq!(render(&document, &source).as_raw(), first.as_raw());
+        }
+        // A pixel from the middle of the canvas actually changed, so the test
+        // is not comparing two blank buffers.
+        assert_ne!(first.get_pixel(20, 200).0, [0, 0, 0, 0]);
     }
 
     #[test]

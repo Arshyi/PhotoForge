@@ -24,6 +24,15 @@ the existing Phase 7 mask engine unchanged.
   drag-and-drop reorders each collapsing into one logical step
 - **An explicit editing target** so painting into a mask can never be mistaken
   for painting into pixels
+- **Editable curves and selective-colour adjustment layers**, including a
+  keyboard-operable curve editor
+- **Bounded local recovery snapshots** for unsaved work, with a startup recovery
+  choice and no cloud storage
+- **Workflow schema 2 layer steps** with fail-closed selectors and planner-safe
+  restrictions; schema 1 workflows still load unchanged
+- **Batch rendering of `.photoforge` projects** without modifying the project
+  file
+- **Sibling multi-selection and grouping** in the Layers panel
 
 Opening an ordinary photo still produces a single background layer and behaves
 exactly as it did in 0.7.1; the layer machinery only engages once the document
@@ -151,10 +160,23 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Mask file format](docs/mask-file-format.md)
 - [Phase 7 results](docs/phase-7-results.md)
 - [Phase 7.1 results](docs/phase-7.1-results.md)
+- [Layers](docs/layers.md)
+- [Compositing](docs/compositing.md)
+- [Project format](docs/project-format.md)
+- [Phase 8 results](docs/phase-8-results.md)
 
 ## Honest scope
 
-PhotoForge 0.7.1 completes and hardens the local Phase 7 coverage-mask system while preserving the Phase 6 editing and workflow boundary. Rule Planner remains the default, current planners truthfully report that selection planning is unavailable, optional Ollama remains a text-only local planning adapter, and the Deterministic Engine is the only component that changes pixels. Decontaminate Colors is an opt-in, masked-only classical operation: it replaces color spill on partially selected edge pixels from nearby confident foreground samples, preserves alpha, and does not identify a subject or invent detail. PhotoForge does not install or download models, send images or masks to Ollama, execute model-supplied code, call cloud providers, execute plugins, generate missing image content, or reconstruct factual details that were never captured. Semantic selection, layers, OCR, neural restoration, super-resolution, inpainting, and generative editing remain outside this release.
+PhotoForge 0.8.0 adds deterministic local layers, editable projects, bounded local
+recovery, layer-aware workflows, and project batch rendering while preserving the
+Phase 7.1 mask boundary. Rule Planner remains the default; optional Ollama remains
+a text-only local planning adapter and receives no image, mask, layer tree, or
+path. The Deterministic Engine remains the only component that changes pixels.
+PhotoForge does not install or download models, execute model-supplied code, call
+cloud providers, execute plugins, generate missing content, or reconstruct
+factual detail that was never captured. Pass-through groups, colour management,
+PSD compatibility, GPU compositing, semantic selection, OCR, neural restoration,
+super-resolution, inpainting, and generative editing remain outside this release.
 
 ## License
 

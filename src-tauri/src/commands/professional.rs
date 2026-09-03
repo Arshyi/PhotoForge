@@ -326,6 +326,7 @@ mod tests {
                 folder: String::new(),
                 favorite: false,
                 operations: vec![EditOperation::Grayscale],
+                layer_steps: Vec::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
             },

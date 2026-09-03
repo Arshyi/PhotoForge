@@ -1,5 +1,6 @@
 <script lang="ts">
   import SliderControl from './SliderControl.svelte';
+  import CurveEditor from './CurveEditor.svelte';
   import {
     adjustmentDefinitions,
     definitionFor,
@@ -9,7 +10,7 @@
     writeField,
     type ScalarField
   } from '../layers/adjustments';
-  import type { BaseEditOperation, HslAdjustment, HslSettings } from '../types/editor';
+  import type { BaseEditOperation, CurveSet, HslAdjustment, HslSettings } from '../types/editor';
 
   /** `null` means the dialog is closed. */
   export let operation: BaseEditOperation | null = null;
@@ -25,6 +26,12 @@
   $: definition = operation ? definitionFor(operation.type) : null;
   $: levels = operation?.type === 'levels' ? operation : null;
   $: hslSettings = operation?.type === 'hsl' ? operation.settings : null;
+  $: curveSet = operation?.type === 'curves' ? operation.curves : null;
+
+  function updateCurves(curves: CurveSet, coalesceKey?: string) {
+    if (!operation || operation.type !== 'curves') return;
+    onchange({ ...operation, curves }, coalesceKey);
+  }
 
   function choose(type: string) {
     const chosen = adjustmentDefinitions.find((entry) => entry.type === type);
@@ -156,6 +163,8 @@
             format={(value) => value.toFixed(2)}
             onchange={(value) => updateLevels('gamma', value)}
           />
+        {:else if curveSet}
+          <CurveEditor curves={curveSet} onchange={updateCurves} />
         {:else if hslSettings}
           <div class="hsl-bands">
             {#each hslBands as band (band)}

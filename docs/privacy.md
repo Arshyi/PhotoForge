@@ -19,9 +19,16 @@ same limits as an ordinary image import.
 Projects are written only to a location the user picks through the native save
 dialog, and only with the `.photoforge` extension. Saving is atomic — a
 temporary sibling file is flushed and renamed — so a failed save never damages
-an existing project. Nothing is written in the background: 0.8.0 has no
-autosave. Unsaved layer changes are tracked and the user is prompted before an
-action would discard them.
+an existing project. Unsaved layer changes are tracked and the user is prompted
+before an action would discard them.
+
+The one bounded background write is local crash recovery. Every 90 seconds,
+while a layer document is dirty and editing/export work is idle, PhotoForge may
+write a `.photoforge-recovery` project payload plus a JSON sidecar under
+`%LOCALAPPDATA%\PhotoForge\recovery`. The sidecar contains the document display
+name, timestamp, and source project path when one exists. At most three
+snapshots are kept; saving, recovering, or discarding clears recovery data.
+Recovery never writes to the source project and never uploads anything.
 
 Layer pixel buffers live in process memory for the open document only. Opening
 another image or project releases every previous buffer, and buffers unreachable

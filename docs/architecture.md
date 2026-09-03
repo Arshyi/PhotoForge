@@ -32,6 +32,15 @@ Rendering keeps the existing stale-result protocol: a layer render records its
 own request generation, takes a bounded gate, rechecks document and request
 identifiers before encoding, and clones only `Arc` handles before moving CPU
 work to a blocking worker — the session lock is never held during pixel work.
+Within that worker, expensive per-row compositing may use disjoint deterministic
+row bands across at most eight scoped threads. There is no parallel reduction,
+so scheduling cannot change the output bytes.
+
+`layers::workflow` owns schema-2 layer steps and deterministic selectors;
+schema-1 workflow files remain valid but cannot carry layer steps.
+`layers::recovery` writes bounded local project snapshots under a distinct
+extension and restores them through the ordinary project decoder. Batch workers
+can render a `.photoforge` input to a composite without mutating the project.
 
 A document that is still one plain full-canvas pixel layer keeps using the
 original Phase 7.1 preview and export path entirely, so ordinary photo editing

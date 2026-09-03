@@ -17,7 +17,7 @@ pub fn preview_batch(
     workflow: &Workflow,
 ) -> Result<BatchPreview, AppError> {
     options.validate()?;
-    workflow.validate()?;
+    validate_batch_workflow(workflow)?;
     let input = canonical_folder(&options.input_folder)?;
     let output = canonical_folder(&options.output_folder)?;
     let files = discover_images(&input, options.recursive)?;
@@ -53,7 +53,7 @@ pub fn run_batch(
     cancelled: Arc<AtomicBool>,
 ) -> Result<BatchStatus, AppError> {
     options.validate()?;
-    workflow.validate()?;
+    validate_batch_workflow(&workflow)?;
     let started = Instant::now();
     set_status(&status, |value| {
         *value = BatchStatus {
@@ -133,16 +133,22 @@ pub fn run_batch(
                     update_estimate(&status, started);
                     continue;
                 }
-                let result = load_image(path).and_then(|loaded| {
-                    let processed = apply_pipeline(loaded.original.as_ref(), &workflow.operations)?;
+                let result = (|| {
+                    let (source, source_path) = if is_project(path) {
+                        load_project_composite(path)?
+                    } else {
+                        let loaded = load_image(path)?;
+                        (loaded.original.as_ref().clone(), loaded.path)
+                    };
+                    let processed = apply_pipeline(&source, &workflow.operations)?;
                     save_image_with_profile(
                         &processed,
-                        &loaded.path,
+                        &source_path,
                         &target,
                         options.export_profile,
                     )?;
                     Ok(())
-                });
+                })();
                 match result {
                     Ok(()) => {
                         set_status(&status, |value| value.completed += 1);
@@ -183,6 +189,21 @@ pub fn run_batch(
         .lock()
         .map(|value| value.clone())
         .map_err(|_| AppError::BatchFailure("batch status is unavailable".into()))
+}
+
+/// Batch currently applies a workflow's document-level image operations to
+/// each rendered input. Layer steps need a live layer document, selection, and
+/// ordered pixel-store mutations, which this worker does not provide yet.
+/// Reject them at the boundary instead of accepting the workflow and silently
+/// exporting an image that omitted part (or all) of the requested work.
+fn validate_batch_workflow(workflow: &Workflow) -> Result<(), AppError> {
+    workflow.validate()?;
+    if !workflow.layer_steps.is_empty() {
+        return Err(AppError::BatchFailure(
+            "layer-aware workflow steps are not supported by batch processing".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn discover_images(folder: &Path, recursive: bool) -> Result<Vec<PathBuf>, AppError> {
@@ -232,7 +253,45 @@ fn supported_image(path: &Path) -> bool {
             .map(str::to_ascii_lowercase)
             .as_deref(),
         Some("png" | "jpg" | "jpeg" | "webp")
-    )
+    ) || is_project(path)
+}
+
+/// A saved PhotoForge project is accepted as a batch input. Batch renders its
+/// visible composite and exports that; it never edits the layer tree, and the
+/// project file itself is only ever read.
+fn is_project(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some(crate::layers::PROJECT_EXTENSION)
+}
+
+/// Renders a project's composite so the ordinary batch export path can write it.
+fn load_project_composite(path: &Path) -> Result<(image::DynamicImage, PathBuf), AppError> {
+    let project = crate::layers::load_project(path)?;
+    let mut store = crate::layers::LayerPixelStore::default();
+    store.reset(
+        project.document.canvas_width,
+        project.document.canvas_height,
+    )?;
+    for (pixel_id, image) in project.pixels {
+        store.register_with_id(&pixel_id, image)?;
+    }
+    let resolved = store.resolve(&project.document.referenced_pixel_ids(), false)?;
+    let composite = crate::layers::render_layers(
+        &project.document.layers,
+        project.document.canvas_width,
+        project.document.canvas_height,
+        &resolved,
+        crate::layers::RenderOptions::default(),
+    )?;
+    // The project's own document pipeline runs first, then the workflow's.
+    let rendered = apply_pipeline(
+        &image::DynamicImage::ImageRgba8(composite),
+        &project.document_operations,
+    )?;
+    Ok((rendered, path.to_path_buf()))
 }
 
 fn output_path(
@@ -354,6 +413,7 @@ mod tests {
             folder: String::new(),
             favorite: false,
             operations: vec![EditOperation::Brightness { amount: 0.1 }],
+            layer_steps: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -411,6 +471,65 @@ mod tests {
     }
 
     #[test]
+    fn project_files_are_accepted_as_batch_inputs() {
+        assert!(supported_image(Path::new("a.photoforge")));
+        assert!(is_project(Path::new("a.PHOTOFORGE")));
+        assert!(!is_project(Path::new("a.png")));
+        assert!(!supported_image(Path::new("notes.txt")));
+        assert!(!supported_image(Path::new("a.photoforge-recovery")));
+    }
+
+    #[test]
+    fn a_batch_exports_a_project_composite_without_modifying_the_project() {
+        use crate::layers::{LayerDocument, LayerPixelStore};
+        use image::{Rgba, RgbaImage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let project_path = directory.path().join("doc.photoforge");
+
+        // Two stacked layers so the export proves compositing actually ran.
+        let mut store = LayerPixelStore::default();
+        store.reset(4, 4).unwrap();
+        let bottom = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255]));
+        let mut top = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        top.put_pixel(0, 0, Rgba([0, 0, 0, 0]));
+
+        let mut document = LayerDocument::new(4, 4);
+        document.layers = vec![
+            crate::layers::test_pixel_layer("bottom", "pxb", 4, 4),
+            crate::layers::test_pixel_layer("top", "pxt", 4, 4),
+        ];
+        crate::layers::save_project(
+            &project_path,
+            &document,
+            &[],
+            &[("pxb".to_string(), &bottom), ("pxt".to_string(), &top)],
+            "0.8.0",
+            "",
+            "",
+        )
+        .unwrap();
+        let original = fs::read(&project_path).unwrap();
+
+        let (composite, source) = load_project_composite(&project_path).unwrap();
+        let rgba = composite.to_rgba8();
+        // The top layer covers the bottom except where it is transparent.
+        assert_eq!(rgba.get_pixel(1, 1).0, [255, 0, 0, 255]);
+        assert_eq!(rgba.get_pixel(0, 0).0, [0, 0, 255, 255]);
+        assert_eq!(source, project_path);
+        // Reading a project for batch never writes to it.
+        assert_eq!(fs::read(&project_path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_corrupt_project_fails_that_batch_item_rather_than_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("broken.photoforge");
+        fs::write(&path, b"not a project").unwrap();
+        assert!(load_project_composite(&path).is_err());
+    }
+
+    #[test]
     fn profiles_select_expected_extensions() {
         for (profile, extension) in [
             (ExportProfile::Web, "jpg"),
@@ -437,6 +556,47 @@ mod tests {
         let preview = preview_batch(&options(&input, &output), &workflow()).unwrap();
         assert_eq!(preview.discovered, 1);
         assert_eq!(preview.sample_outputs.len(), 1);
+        assert!(fs::read_dir(output).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn batch_preview_rejects_layer_steps_instead_of_silently_ignoring_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        let mut workflow = workflow();
+        workflow.layer_steps = vec![crate::layers::LayerWorkflowStep::SetVisibility {
+            selector: crate::layers::LayerSelector::Active,
+            visible: false,
+        }];
+
+        let error = preview_batch(&options(&input, &output), &workflow).unwrap_err();
+        assert!(matches!(error, AppError::BatchFailure(_)));
+        assert!(error.to_string().contains("layer-aware workflow steps"));
+    }
+
+    #[test]
+    fn batch_run_rejects_layer_steps_before_writing_outputs_or_a_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        RgbaImage::new(2, 2).save(input.join("one.png")).unwrap();
+        let mut workflow = workflow();
+        workflow.layer_steps = vec![crate::layers::LayerWorkflowStep::Flatten];
+
+        let error = run_batch(
+            9,
+            options(&input, &output),
+            workflow,
+            Arc::new(Mutex::new(BatchStatus::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::BatchFailure(_)));
         assert!(fs::read_dir(output).unwrap().next().is_none());
     }
 

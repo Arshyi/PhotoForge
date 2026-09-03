@@ -104,7 +104,13 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Copy-on-write pixel buffers shared between layers, bounded and released with history
 - Explicit editing target so painting into a mask cannot be mistaken for painting into pixels
 - Existing Phase 1–7.1 behavior preserved: a plain single-layer document keeps the original render and export path
-- Not implemented: pass-through groups, autosave/recovery, layer-aware workflow steps, batch project processing, GPU acceleration, colour management, PSD support, text/vector/smart-object/procedural/neural layers
+- Editable curves and selective-colour adjustment layers, including a keyboard-operable curve editor
+- Bounded periodic local recovery snapshots with startup recovery and explicit discard
+- Workflow schema 2 layer steps, deterministic fail-closed selectors, and planner-safe restrictions
+- Batch rendering of `.photoforge` projects without modifying their source files
+- Sibling multi-selection and grouping in the Layers panel
+- Deterministic row-band compositor parallelism across at most eight CPU threads
+- Not implemented: pass-through groups, GPU acceleration, colour management, PSD support, text/vector/smart-object/procedural/neural layers
 
 ## Later, optional AI work
 

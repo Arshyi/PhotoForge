@@ -4,26 +4,55 @@ Workflows are reusable, local, typed edit pipelines introduced in PhotoForge 0.6
 
 ## Workflows and layers in 0.8.0
 
-Workflows remain document-pipeline recordings and are **unchanged** by Phase 8.
-The workflow schema version stays at 1, existing Phase 6 and 7 workflow files
-load and replay exactly as before, and no migration is performed on them.
+A workflow's `operations` still apply to the document pipeline, which in a
+layered document runs on the finished composite. Replaying one therefore
+produces the same visible result it always did.
 
-A workflow's operations apply to the document pipeline, which in a layered
-document runs on the finished composite. Replaying a workflow therefore produces
-the same visible result it always did, and it cannot silently target the wrong
-layer because it does not reference layers at all.
+### Schema versions
 
-Layer-aware workflow steps — select layer, apply to layer, create adjustment
-layer, create mask from selection, set opacity, set blend mode, merge, export
-composite — are **not** implemented in 0.8.0. The design constraint for a future
-phase is recorded here so it is not lost: such a step must reference a stable
-layer identifier or a deterministic selector, must fail closed when the
-referenced layer is missing rather than falling back to another layer, and must
-carry its own schema version bump. The layer model already provides the stable
-identifiers this requires.
+Phase 8 introduces workflow schema version **2**, which adds an optional
+`layerSteps` list. Version 1 files carry none, still load and replay exactly as
+before, and are **not** migrated or rewritten. A version 1 document that
+contains layer steps is rejected as a mismatch rather than accepted silently.
 
-Batch processing is likewise unchanged. Ordinary image batches behave exactly as
-in 0.7.1. Batch processing of `.photoforge` project files is not implemented.
+### Layer steps
+
+| Step | Effect |
+| --- | --- |
+| `select_layer` | Makes a layer active |
+| `set_visibility` | Shows or hides a layer |
+| `set_opacity` | Sets layer opacity |
+| `set_blend_mode` | Sets the layer blend mode |
+| `create_adjustment_layer` | Adds a parametric adjustment layer |
+| `apply_to_layer` | Applies operations destructively to one pixel layer |
+| `create_mask_from_selection` | Masks a layer with the current selection |
+| `merge_down` | Merges a layer into the one beneath it |
+| `flatten` | Flattens every visible layer |
+| `export_composite` | Exports the visible composite |
+
+### Selectors, and why replay cannot target the wrong layer
+
+A step names its layer through a deterministic selector: an exact identifier,
+the active layer, the layer a previous step created, a unique name, the bottom,
+or the top of the stack.
+
+Replay fails closed. A selector that cannot be resolved, a name matching more
+than one layer, a step needing a pixel layer that resolved to a group, or a
+merge with nothing beneath it all abort the replay. The whole workflow is
+resolved against the document **before** any of it is applied, so a replay is
+never half-applied and never falls back to a different layer.
+
+`apply_to_layer` and `create_adjustment_layer` reject geometry operations,
+because crop, rotation, straighten, perspective, and lens correction reshape the
+canvas and belong to the document pipeline rather than to one layer.
+
+### Batch
+
+Ordinary image batches behave exactly as in 0.7.1. A saved `.photoforge`
+project is additionally accepted as a batch input: batch renders its visible
+composite, applies the project's own document pipeline, then the workflow's
+operations, and exports the result. The project file is only ever read — never
+rewritten — and a corrupt project fails that one item rather than the run.
 
 ## Library and editor
 

@@ -460,6 +460,7 @@ impl EditPlanner for RulePlanner {
             warnings,
             operations,
             operation_explanations,
+            layer_steps: Vec::new(),
         };
         validate_edit_plan(&plan)?;
         Ok(plan)
@@ -467,6 +468,10 @@ impl EditPlanner for RulePlanner {
 }
 
 pub fn validate_edit_plan(plan: &EditPlan) -> Result<(), AppError> {
+    // A planner never sees layer identifiers, so any step naming one directly
+    // would have to have been invented. This rejects that structurally rather
+    // than trusting the planner to behave.
+    crate::layers::validate_planner_layer_steps(&plan.layer_steps)?;
     let summary = plan.summary.trim();
     if summary.is_empty() || summary.chars().count() > 240 {
         return Err(AppError::InvalidPlan(
@@ -992,6 +997,7 @@ mod tests {
             warnings: Vec::new(),
             operations,
             operation_explanations,
+            layer_steps: Vec::new(),
         }
     }
 

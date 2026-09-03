@@ -2,7 +2,11 @@ use super::EditOperation;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 
-pub const WORKFLOW_SCHEMA_VERSION: u32 = 1;
+/// Current workflow schema. Version 2 adds optional layer steps; version 1
+/// files carry none and are still read without being rewritten.
+pub const WORKFLOW_SCHEMA_VERSION: u32 = 2;
+/// Oldest workflow schema this build still accepts.
+pub const MIN_WORKFLOW_SCHEMA_VERSION: u32 = 1;
 pub const MAX_WORKFLOW_OPERATIONS: usize = 200;
 pub const MAX_BATCH_FILES: usize = 10_000;
 pub const MAX_BATCH_WORKERS: usize = 8;
@@ -56,6 +60,9 @@ pub struct Workflow {
     #[serde(default)]
     pub favorite: bool,
     pub operations: Vec<EditOperation>,
+    /// Layer-aware steps, empty for every Phase 6 and 7 workflow.
+    #[serde(default)]
+    pub layer_steps: Vec<crate::layers::LayerWorkflowStep>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -79,11 +86,19 @@ impl Workflow {
                 "folder or description exceeds its local storage limit".into(),
             ));
         }
-        if self.operations.is_empty() || self.operations.len() > MAX_WORKFLOW_OPERATIONS {
+        if self.operations.len() > MAX_WORKFLOW_OPERATIONS {
             return Err(AppError::WorkflowValidation(format!(
                 "workflows require 1 to {MAX_WORKFLOW_OPERATIONS} operations"
             )));
         }
+        // A workflow has to do something: document operations, layer steps, or
+        // both.
+        if self.operations.is_empty() && self.layer_steps.is_empty() {
+            return Err(AppError::WorkflowValidation(format!(
+                "workflows require 1 to {MAX_WORKFLOW_OPERATIONS} operations"
+            )));
+        }
+        crate::layers::validate_layer_steps(&self.layer_steps)?;
         for operation in &self.operations {
             if matches!(operation, EditOperation::DecontaminateColors { .. }) {
                 return Err(AppError::WorkflowValidation(
@@ -105,10 +120,18 @@ pub struct WorkflowDocument {
 
 impl WorkflowDocument {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.schema_version != WORKFLOW_SCHEMA_VERSION {
+        if !(MIN_WORKFLOW_SCHEMA_VERSION..=WORKFLOW_SCHEMA_VERSION).contains(&self.schema_version) {
             return Err(AppError::WorkflowValidation(format!(
-                "unsupported workflow schema version {}; expected {}",
-                self.schema_version, WORKFLOW_SCHEMA_VERSION
+                "unsupported workflow schema version {}; expected {} to {}",
+                self.schema_version, MIN_WORKFLOW_SCHEMA_VERSION, WORKFLOW_SCHEMA_VERSION
+            )));
+        }
+        // A version 1 document predates layer steps, so carrying any is a
+        // mismatch rather than something to accept silently.
+        if self.schema_version < WORKFLOW_SCHEMA_VERSION && !self.workflow.layer_steps.is_empty() {
+            return Err(AppError::WorkflowValidation(format!(
+                "a schema version {} workflow cannot contain layer steps",
+                self.schema_version
             )));
         }
         self.workflow.validate()
@@ -298,6 +321,7 @@ mod tests {
             folder: "Restoration".into(),
             favorite: true,
             operations: vec![EditOperation::Brightness { amount: 0.1 }],
+            layer_steps: Vec::new(),
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         }

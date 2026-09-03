@@ -516,6 +516,35 @@ aside {
   .performance-results p { grid-column: auto; }
 }
 
+/* Recovery offer after an abnormal exit left an unsaved snapshot behind. */
+.recovery-banner {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: min(620px, calc(100vw - 28px));
+  padding: 11px 14px;
+  transform: translateX(-50%);
+  border: 1px solid #7d6a3f;
+  border-radius: 10px;
+  background: rgba(38, 33, 20, .97);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .45);
+}
+.recovery-banner > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.recovery-banner strong { color: var(--ink); font-size: .74rem; }
+.recovery-banner small {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: .6rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recovery-actions { display: flex; flex-shrink: 0; gap: 6px; }
+.recovery-actions button { padding: 6px 12px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }

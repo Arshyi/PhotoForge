@@ -182,8 +182,16 @@ files, mask files, and selection sessions are unchanged and are still read by
 
 ## Recovery
 
-0.8.0 tracks unsaved layer changes and prompts before an action would discard
-them. It does **not** yet write periodic recovery snapshots or restore
-automatically after an abnormal exit; that is recorded as not implemented in
-[phase-8-results.md](phase-8-results.md). No project is ever overwritten
-silently, and there is no cloud autosave of any kind.
+While a layer document has unsaved changes, 0.8.0 writes a recovery snapshot
+every 90 seconds under `%LOCALAPPDATA%\PhotoForge\recovery`. The snapshot uses
+the distinct `.photoforge-recovery` extension and contains an ordinary validated
+project payload; a small JSON sidecar records its display name, timestamp, and
+source project path when one exists. At most three snapshots are retained.
+
+The project payload is written through a temporary file and synchronized before
+it is persisted. A missing or unreadable sidecar is skipped, and a corrupt
+snapshot is rejected by the same checksummed reader as an ordinary project. On
+startup PhotoForge offers the newest readable snapshot. Recovered work remains
+unsaved until the user saves it, while saving a project, accepting a recovery,
+or explicitly discarding it removes the applicable recovery data. The user's
+project file is never overwritten by recovery and nothing is uploaded.

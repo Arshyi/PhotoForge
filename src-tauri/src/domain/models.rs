@@ -622,6 +622,11 @@ pub struct EditPlan {
     pub warnings: Vec<String>,
     pub operations: Vec<EditOperation>,
     pub operation_explanations: Vec<String>,
+    /// Optional non-destructive proposal: layer steps the user can apply
+    /// instead of, or alongside, the document operations. Planners may only
+    /// emit selectors they cannot fabricate; see `layers::workflow`.
+    #[serde(default)]
+    pub layer_steps: Vec<crate::layers::LayerWorkflowStep>,
 }
 
 #[derive(Debug, Clone, Serialize)]

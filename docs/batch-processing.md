@@ -1,6 +1,7 @@
 # Batch processing
 
-PhotoForge 0.6.0 can replay a saved workflow across PNG, JPEG, and WebP files in a local folder.
+PhotoForge can replay a saved workflow across PNG, JPEG, WebP, and
+`.photoforge` project files in a local folder.
 
 ## Safety model
 
@@ -9,6 +10,10 @@ PhotoForge 0.6.0 can replay a saved workflow across PNG, JPEG, and WebP files in
 - Recursive discovery is opt-in.
 - Workers are explicitly bounded from 1 to 8; the default is 2.
 - Each worker decodes one image, applies the shared deterministic pipeline, exports it, and releases it before claiming another image.
+- For a `.photoforge` input, the worker validates the project, renders its visible
+  layer composite, applies the project's own document operations, then applies
+  the batch workflow. The project is read-only and is never flattened or
+  rewritten.
 - Duplicate generated output paths are claimed once. Existing outputs are skipped unless overwrite permission is explicitly enabled.
 - Original paths remain protected by the same export boundary used by the interactive editor.
 - Cancellation is cooperative and checked before each file. In-flight files finish safely; no new files are claimed.
@@ -22,3 +27,6 @@ Batch Preview discovers files, shows up to 12 sample output paths, reports exist
 Templates accept `{name}`, `{index}`, `{ext}`, and `{workflow}`. Unsafe filename characters are replaced and the final name is bounded. Export profiles select JPEG for Web/Print/High JPEG, PNG for Archive/Lossless, and WebP for Maximum Compression.
 
 Every non-preview batch writes `photoforge-batch-<id>.log` in the output folder. The log contains one tab-separated OK, SKIPPED, or FAILED row per processed input. The UI retains a bounded failure summary of the first 100 errors.
+
+A corrupt project fails only that item and is recorded in the batch result; it
+does not stop unrelated inputs from completing.

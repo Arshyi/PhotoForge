@@ -63,6 +63,7 @@ function props(document: LayerDocument) {
     disabled: false,
     busy: false,
     hasSelection: false,
+    selectedIds: [] as string[],
     onselect: vi.fn(),
     ontoggle: vi.fn(),
     onrename: vi.fn(),
@@ -103,7 +104,51 @@ describe('LayersPanel', () => {
     const value = props(document);
     render(LayersPanel, { props: value });
     await fireEvent.click(screen.getByRole('button', { name: 'Select Background' }));
-    expect(value.onselect).toHaveBeenCalledWith(background.id);
+    expect(value.onselect).toHaveBeenCalledWith(background.id, false);
+  });
+
+  it('reports an additive click so several layers can be selected', async () => {
+    const { document, background } = selectedDocument();
+    const value = props(document);
+    render(LayersPanel, { props: value });
+    const row = screen.getByRole('button', { name: 'Select Background' });
+
+    await fireEvent.click(row, { ctrlKey: true });
+    expect(value.onselect).toHaveBeenLastCalledWith(background.id, true);
+    await fireEvent.click(row, { shiftKey: true });
+    expect(value.onselect).toHaveBeenLastCalledWith(background.id, true);
+    await fireEvent.click(row, { metaKey: true });
+    expect(value.onselect).toHaveBeenLastCalledWith(background.id, true);
+  });
+
+  it('marks every selected layer while keeping one active', () => {
+    const { document, background, top } = selectedDocument();
+    const value = { ...props(document), selectedIds: [top.id, background.id] };
+    render(LayersPanel, { props: value });
+    const items = screen.getAllByRole('treeitem');
+    expect(items.every((item) => item.getAttribute('aria-selected') === 'true')).toBe(true);
+    // Exactly one row is the active one.
+    expect(items.filter((item) => item.className.includes('active'))).toHaveLength(1);
+    expect(screen.getByText(/2 selected/)).toBeTruthy();
+  });
+
+  it('offers to group the whole selection when more than one layer is chosen', async () => {
+    const { document, background, top } = selectedDocument();
+    const value = { ...props(document), selectedIds: [top.id, background.id] };
+    render(LayersPanel, { props: value });
+    const button = screen.getByRole('button', { name: 'Group 2' });
+    await fireEvent.click(button);
+    expect(value.onaction).toHaveBeenCalledWith('group', top.id);
+  });
+
+  it('still allows grouping when a group is the only selected layer', () => {
+    const group = createGroupLayer('Group', [pixel('Child')]);
+    const document = { ...createDocument(16, 16, [group]), activeLayerId: group.id };
+    render(LayersPanel, { props: props(document) });
+    // A lone group cannot be grouped into itself.
+    expect((screen.getByRole('button', { name: 'Group' }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
   });
 
   it('marks the selected layer for assistive technology', () => {

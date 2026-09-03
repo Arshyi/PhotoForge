@@ -141,3 +141,46 @@ export function saveLayerProject(
 export function loadLayerProject(path: string): Promise<ProjectLoadResult> {
   return invoke<ProjectLoadResult>('load_layer_project', { path });
 }
+
+export interface RecoveryRecord {
+  projectPath: string | null;
+  documentName: string;
+  savedAt: string;
+  snapshotPath: string;
+  bytes: number;
+}
+
+export function writeRecoverySnapshot(
+  document: LayerDocument,
+  operations: EditOperation[],
+  projectPath: string | null,
+  documentName: string,
+  savedAt: string
+): Promise<RecoveryRecord> {
+  return invoke<RecoveryRecord>('write_recovery_snapshot', {
+    document,
+    operations,
+    projectPath,
+    documentName,
+    savedAt
+  });
+}
+
+export function listRecoverySnapshots(): Promise<{ snapshots: RecoveryRecord[] }> {
+  return invoke<{ snapshots: RecoveryRecord[] }>('list_recovery_snapshots');
+}
+
+export function restoreRecoverySnapshot(path: string): Promise<ProjectLoadResult> {
+  return invoke<ProjectLoadResult>('restore_recovery_snapshot', { path });
+}
+
+export function discardRecoverySnapshot(path: string | null): Promise<number> {
+  return invoke<number>('discard_recovery_snapshot', { path });
+}
+
+export function planLayerWorkflowSteps(
+  document: LayerDocument,
+  steps: unknown[]
+): Promise<{ targets: string[]; steps: number }> {
+  return invoke<{ targets: string[]; steps: number }>('plan_layer_workflow', { document, steps });
+}

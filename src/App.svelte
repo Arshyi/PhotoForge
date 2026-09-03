@@ -163,7 +163,11 @@
     applyOperationsToLayer,
     createLayerMask,
     createLayerPixels,
+    discardRecoverySnapshot,
     exportLayerComposite,
+    listRecoverySnapshots,
+    restoreRecoverySnapshot,
+    writeRecoverySnapshot,
     flattenLayerDocument,
     importLayerImage,
     layerMaskFromSelection,
@@ -270,6 +274,11 @@
   let adjustmentDraft: import('./lib/types/editor').BaseEditOperation | null = null;
   let adjustmentMode: 'create' | 'edit' = 'create';
   let adjustmentLayerId: string | null = null;
+  let recoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryOffer: import('./lib/layers/commands').RecoveryRecord | null = null;
+  let recoveryBusy = false;
+  /** Layers selected alongside the active one, for grouping several at once. */
+  let selectedLayerIds: string[] = [];
 
   $: comparisonUsesSplitView = comparison && (comparisonMode === 'split' || valueFor(operations, 'rotate', 0) % 360 !== 0);
   $: selectionCanvasWidth = selectionState.canvasWidth || metadata?.width || 0;
@@ -289,6 +298,8 @@
   onMount(() => {
     guidedSettings = loadGuidedSettings();
     shortcuts = loadShortcuts();
+    void checkForRecovery();
+    startRecoveryTimer();
     exportProfile = (localStorage.getItem('photoforge.lastExportProfile') as ExportProfile | null) ?? 'lossless';
     let unlisten: (() => void) | undefined;
     const persistBeforeClose = () => persistSelectionState();
@@ -431,6 +442,7 @@
       window.removeEventListener('keydown', handleKeys);
       window.removeEventListener('beforeunload', persistBeforeClose);
       if (renderTimer) clearTimeout(renderTimer);
+      if (recoveryTimer) clearInterval(recoveryTimer);
       if (toastTimer) clearTimeout(toastTimer);
       if (maskProgressTimer) clearTimeout(maskProgressTimer);
       if (refineTimer) clearTimeout(refineTimer);
@@ -1003,6 +1015,7 @@
     projectPath = path;
     projectDirty = false;
     projectCreatedAt = createdAt;
+    selectedLayerIds = [];
     closeAdjustmentEditor();
     void refreshThumbnails();
   }
@@ -1025,6 +1038,7 @@
     recordHistoryMutation('layer', layerHistory.undoDepth > before);
     syncHistoryActions();
     projectDirty = true;
+    selectedLayerIds = selectedLayerIds.filter((id) => findLayer(layerDocument as LayerDocument, id));
     schedulePreview();
     void refreshThumbnails();
     void releaseUnreferencedPixels();
@@ -1090,14 +1104,33 @@
     return layerDocument;
   }
 
-  function selectLayer(id: string) {
+  function selectLayer(id: string, additive = false) {
     const document = requireLayerDocument();
-    if (!document || document.activeLayerId === id) return;
-    // Selecting a layer is a view change, not an edit, so it never enters
-    // history and never marks the project dirty.
-    layerDocument = { ...document, activeLayerId: id };
-    layerHistory.replaceCurrent(layerDocument);
-    const layer = findLayer(layerDocument, id);
+    if (!document) return;
+
+    if (additive) {
+      // Extending the selection keeps the clicked layer active and toggles it
+      // in and out of the wider set. Grouping several layers at once needs
+      // siblings, so a selection that spans parents is trimmed back.
+      const current = new Set(selectedLayerIds.length ? selectedLayerIds : [document.activeLayerId ?? '']);
+      current.delete('');
+      if (current.has(id) && current.size > 1) current.delete(id);
+      else current.add(id);
+      const parent = parentOf(document, id);
+      selectedLayerIds = [...current].filter(
+        (candidate) => findLayer(document, candidate) && parentOf(document, candidate) === parent
+      );
+    } else {
+      selectedLayerIds = [id];
+    }
+
+    if (document.activeLayerId !== id) {
+      // Selecting a layer is a view change, not an edit, so it never enters
+      // history and never marks the project dirty.
+      layerDocument = { ...document, activeLayerId: id };
+      layerHistory.replaceCurrent(layerDocument);
+    }
+    const layer = findLayer(layerDocument as LayerDocument, id);
     if (layer?.content.type === 'adjustment') editTarget = 'selection';
     else if (editTarget === 'mask' && !layer?.mask) editTarget = 'layer';
   }
@@ -1219,12 +1252,17 @@
         return;
       }
       case 'group': {
-        const { document: next, group } = groupLayers(document, [layerId as string], 'Group');
+        const targets = selectedLayerIds.length > 1
+          ? selectedLayerIds.filter((id) => findLayer(document, id))
+          : [layerId as string];
+        const { document: next, group } = groupLayers(document, targets, 'Group');
         if (!group) {
-          notify('Those layers cannot be grouped together.', 'error');
+          notify('Only layers that share a parent can be grouped together.', 'error');
           return;
         }
-        commitLayers(next, 'Group layers');
+        if (commitLayers(next, targets.length > 1 ? 'Group layers' : 'Group layer')) {
+          selectedLayerIds = [group.id];
+        }
         return;
       }
       case 'ungroup': {
@@ -1622,6 +1660,7 @@
       );
       projectPath = result.outputPath;
       projectDirty = false;
+      await clearRecoverySnapshots();
       notify(`Project saved (${formatBytes(result.bytes)})`);
     } catch (error) {
       notify(errorMessage(error), 'error');
@@ -1677,6 +1716,110 @@
     return window.confirm(
       'This document has unsaved layer changes. Continue and discard them?'
     );
+  }
+
+  /** How often an unsaved document is snapshotted to the local recovery folder. */
+  const RECOVERY_INTERVAL_MS = 90_000;
+
+  function startRecoveryTimer() {
+    if (recoveryTimer) clearInterval(recoveryTimer);
+    recoveryTimer = setInterval(() => void captureRecoverySnapshot(), RECOVERY_INTERVAL_MS);
+  }
+
+  /**
+   * Writes a bounded recovery snapshot of the working document.
+   *
+   * Snapshots go to PhotoForge's own local folder under their own extension;
+   * the user's project file is never written to, and nothing leaves the machine.
+   */
+  async function captureRecoverySnapshot() {
+    if (!layerDocument || !projectDirty || recoveryBusy || exporting || layerBusy) return;
+    recoveryBusy = true;
+    try {
+      await writeRecoverySnapshot(
+        layerDocument,
+        cloneOperations(operations),
+        projectPath,
+        documentTitle || metadata?.filename || 'Untitled',
+        timestamp()
+      );
+    } catch {
+      // Recovery is best effort and must never interrupt editing.
+    } finally {
+      recoveryBusy = false;
+    }
+  }
+
+  /** Drops recovery snapshots once the work they protected has been saved. */
+  async function clearRecoverySnapshots() {
+    try {
+      await discardRecoverySnapshot(null);
+    } catch {
+      // Nothing to clean up, or the folder is unavailable.
+    }
+  }
+
+  /** Offers the newest snapshot after an abnormal exit left one behind. */
+  async function checkForRecovery() {
+    try {
+      const { snapshots } = await listRecoverySnapshots();
+      recoveryOffer = snapshots.at(-1) ?? null;
+    } catch {
+      recoveryOffer = null;
+    }
+  }
+
+  async function acceptRecovery() {
+    const offer = recoveryOffer;
+    if (!offer) return;
+    recoveryOffer = null;
+    layerBusy = true;
+    try {
+      const result = await restoreRecoverySnapshot(offer.snapshotPath);
+      documentId += 1;
+      metadata = {
+        filename: offer.documentName,
+        width: result.canvasWidth,
+        height: result.canvasHeight,
+        format: 'PhotoForge',
+        fileSize: 0,
+        colorSpace: 'sRGB',
+        bitDepth: 8,
+        hasAlpha: true,
+        createdAt: result.createdAt || null,
+        modifiedAt: result.modifiedAt || null,
+        cameraModel: null,
+        exifAvailable: false
+      };
+      operations = history.replace(result.operations);
+      selectionState = selectionHistory.replace(createSelectionState());
+      historyEvents = [];
+      redoEvents = [];
+      analysis = null;
+      startLayerDocument(result.document, offer.projectPath, result.createdAt);
+      // Recovered work has not been saved anywhere the user chose, so it stays
+      // marked unsaved until they save it themselves.
+      projectDirty = true;
+      syncHistoryActions();
+      schedulePreview();
+      await discardRecoverySnapshot(offer.snapshotPath);
+      notify(`Recovered ${offer.documentName}. Save it to keep the recovered work.`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function dismissRecovery() {
+    const offer = recoveryOffer;
+    recoveryOffer = null;
+    if (!offer) return;
+    try {
+      await discardRecoverySnapshot(offer.snapshotPath);
+    } catch {
+      // The snapshot is already gone.
+    }
   }
 
   function setNumeric(
@@ -2708,6 +2851,7 @@
             disabled={!metadata || opening || exporting || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
             busy={layerBusy}
             hasSelection={hasActiveSelection}
+            selectedIds={selectedLayerIds}
             onselect={selectLayer}
             ontoggle={toggleLayerField}
             onrename={renameLayer}
@@ -2919,6 +3063,25 @@
     onapply={applyRefineSelection}
     oncancel={cancelRefineSelection}
   />
+{/if}
+
+{#if recoveryOffer}
+  <div class="recovery-banner" role="alertdialog" aria-label="Recovered work available">
+    <div>
+      <strong>PhotoForge found unsaved work</strong>
+      <small>
+        {recoveryOffer.documentName} · saved {recoveryOffer.savedAt} ·
+        {formatBytes(recoveryOffer.bytes)}
+        {#if recoveryOffer.projectPath}
+          · from {recoveryOffer.projectPath.split(/[\\/]/).pop()}
+        {/if}
+      </small>
+    </div>
+    <div class="recovery-actions">
+      <button type="button" disabled={layerBusy} on:click={acceptRecovery}>Recover</button>
+      <button type="button" disabled={layerBusy} on:click={dismissRecovery}>Discard</button>
+    </div>
+  </div>
 {/if}
 
 <AdjustmentLayerDialog

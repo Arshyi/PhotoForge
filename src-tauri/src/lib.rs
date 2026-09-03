@@ -13,22 +13,23 @@ use application::AppState;
 use commands::{
     analyze_image, apply_operations_to_layer, cancel_batch, cancel_mask_operation,
     cancel_ollama_plan, color_range_selection, compare_planners, compose_selection_masks,
-    create_layer_mask, create_layer_pixels, create_point_operation, discover_models, export_image,
-    export_layer_composite, export_mask_file, export_mask_png, export_with_profile,
-    export_workflow, flatten_layer_document, generate_edit_plan, generate_histogram,
-    generate_ollama_plan, get_batch_status, get_component_diagnostics, get_component_snapshot,
-    get_mask_progress, get_ollama_diagnostics, import_layer_image, import_mask_file,
-    import_mask_png, import_workflow, inspect_image_pixel, inspect_selection_mask,
-    layer_mask_from_selection, layer_store_report, load_layer_project, magic_wand_selection,
-    measure_component_performance, merge_layer_pixels, open_image, preview_batch_workflow,
-    rasterize_layer_transform, rasterize_selection, refine_selection_mask, refresh_ollama_models,
-    remap_selection_masks, render_layer_composite, render_layer_thumbnail, render_preview,
+    create_layer_mask, create_layer_pixels, create_point_operation, discard_recovery_snapshot,
+    discover_models, export_image, export_layer_composite, export_mask_file, export_mask_png,
+    export_with_profile, export_workflow, flatten_layer_document, generate_edit_plan,
+    generate_histogram, generate_ollama_plan, get_batch_status, get_component_diagnostics,
+    get_component_snapshot, get_mask_progress, get_ollama_diagnostics, import_layer_image,
+    import_mask_file, import_mask_png, import_workflow, inspect_image_pixel,
+    inspect_selection_mask, layer_mask_from_selection, layer_store_report, list_recovery_snapshots,
+    load_layer_project, magic_wand_selection, measure_component_performance, merge_layer_pixels,
+    open_image, plan_layer_workflow, preview_batch_workflow, rasterize_layer_transform,
+    rasterize_selection, refine_selection_mask, refresh_ollama_models, remap_selection_masks,
+    render_layer_composite, render_layer_thumbnail, render_preview, restore_recovery_snapshot,
     retain_layer_pixels, save_layer_project, scan_plugins, select_planner_provider,
     select_restoration_engine, selection_from_layer_mask, start_batch_workflow,
     test_ollama_connection, transform_selection_mask, update_component_configuration,
     validate_guided_plan, validate_layer_document, validate_mask_snapshot, validate_ollama_json,
     validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
-    validate_workspace_layout,
+    validate_workspace_layout, write_recovery_snapshot,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -107,7 +108,12 @@ pub fn run() {
             retain_layer_pixels,
             layer_store_report,
             save_layer_project,
-            load_layer_project
+            load_layer_project,
+            write_recovery_snapshot,
+            list_recovery_snapshots,
+            restore_recovery_snapshot,
+            discard_recovery_snapshot,
+            plan_layer_workflow
         ])
         .run(tauri::generate_context!())
         .expect("PhotoForge failed to start");

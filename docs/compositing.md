@@ -196,10 +196,12 @@ layer masks live in canvas space instead, and validation enforces that.
 
 ## Determinism
 
-A render is single-threaded, traverses in a fixed order, and performs no
-parallel reduction, so two renders of the same document and buffers produce
-byte-identical output. This is asserted directly in the test suite, including
-across a 50-layer document.
+A render traverses layers in a fixed order. Per-pixel work may be split into
+disjoint row bands across at most eight scoped worker threads, but no row is
+written twice and no parallel reduction occurs. The result therefore does not
+depend on scheduling. Byte-identical repeated output is asserted directly,
+including across a 50-layer document and a tall masked, blended, adjusted
+document that exercises the parallel path.
 
 ## Preview scale
 

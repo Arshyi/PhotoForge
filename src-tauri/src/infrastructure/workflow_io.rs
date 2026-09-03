@@ -83,6 +83,7 @@ mod tests {
                 folder: String::new(),
                 favorite: false,
                 operations: vec![EditOperation::Grayscale],
+                layer_steps: Vec::new(),
                 created_at: String::new(),
                 updated_at: String::new(),
             },
@@ -107,11 +108,81 @@ mod tests {
 
     #[test]
     fn import_rejects_unsupported_schema() {
+        for version in [0, 3, 99] {
+            let json = serde_json::to_string(&WorkflowDocument {
+                schema_version: version,
+                ..document()
+            })
+            .unwrap();
+            assert!(
+                matches!(
+                    parse_workflow_json(&json),
+                    Err(AppError::WorkflowValidation(_))
+                ),
+                "schema version {version} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn import_still_accepts_a_phase_six_and_seven_schema_one_workflow() {
+        // A version 1 file has no layer steps and must load untouched.
         let json = serde_json::to_string(&WorkflowDocument {
-            schema_version: 2,
+            schema_version: 1,
             ..document()
         })
         .unwrap();
+        let parsed = parse_workflow_json(&json).unwrap();
+        assert_eq!(parsed.schema_version, 1);
+        assert!(parsed.workflow.layer_steps.is_empty());
+        assert_eq!(parsed.workflow.operations.len(), 1);
+    }
+
+    #[test]
+    fn a_schema_one_workflow_carrying_layer_steps_is_rejected() {
+        let mut document = document();
+        document.schema_version = 1;
+        document.workflow.layer_steps = vec![crate::layers::LayerWorkflowStep::Flatten];
+        let json = serde_json::to_string(&document).unwrap();
+        assert!(matches!(
+            parse_workflow_json(&json),
+            Err(AppError::WorkflowValidation(_))
+        ));
+    }
+
+    #[test]
+    fn a_schema_two_workflow_round_trips_with_its_layer_steps() {
+        let mut source = document();
+        source.workflow.layer_steps = vec![
+            crate::layers::LayerWorkflowStep::CreateAdjustmentLayer {
+                operation: Box::new(EditOperation::Contrast { amount: 0.2 }),
+                name: Some("Punch".into()),
+            },
+            crate::layers::LayerWorkflowStep::SetOpacity {
+                selector: crate::layers::LayerSelector::LastCreated,
+                opacity: 0.6,
+            },
+        ];
+        let json = serde_json::to_string(&source).unwrap();
+        let parsed = parse_workflow_json(&json).unwrap();
+        assert_eq!(parsed.workflow.layer_steps, source.workflow.layer_steps);
+    }
+
+    #[test]
+    fn a_workflow_of_only_layer_steps_is_valid() {
+        let mut source = document();
+        source.workflow.operations = Vec::new();
+        source.workflow.layer_steps = vec![crate::layers::LayerWorkflowStep::Flatten];
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(parse_workflow_json(&json).is_ok());
+    }
+
+    #[test]
+    fn a_workflow_that_does_nothing_at_all_is_rejected() {
+        let mut source = document();
+        source.workflow.operations = Vec::new();
+        source.workflow.layer_steps = Vec::new();
+        let json = serde_json::to_string(&source).unwrap();
         assert!(matches!(
             parse_workflow_json(&json),
             Err(AppError::WorkflowValidation(_))

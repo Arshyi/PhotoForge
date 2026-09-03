@@ -329,6 +329,7 @@ pub fn validate_ollama_plan(
             .map(|operation| operation_explanation(operation).to_string())
             .collect(),
         operations,
+        layer_steps: Vec::new(),
     };
     if let Err(error) = validate_edit_plan(&plan) {
         report.errors.push(error.to_string());

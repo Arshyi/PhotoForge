@@ -50,11 +50,18 @@ Parametric, non-destructive colour and tone. The layer stores an `EditOperation`
 and re-evaluates it on every render; it never stores baked pixels. Changing a
 parameter recomputes the result.
 
-Supported adjustments include exposure/brightness, contrast, levels, HSL,
-temperature/tint, auto white balance, local contrast, sharpen, edge-aware
-sharpen, denoise, deblock, mild deblur, uneven-lighting correction, blur,
-black-and-white, and sepia — the restoration operations from Phases 2–3
+Supported adjustments: exposure/brightness, contrast, levels, curves, HSL,
+temperature/tint, selective colour, auto white balance, local contrast, sharpen,
+edge-aware sharpen, denoise, deblock, mild deblur, uneven-lighting correction,
+blur, black-and-white, and sepia — the restoration operations from Phases 2-3
 included.
+
+Every one of them is editable after the fact. Double-clicking an adjustment
+layer reopens its controls: sliders for scalar parameters, numeric fields plus a
+gamma slider for levels, per-band sliders for HSL, and a direct-manipulation
+curve editor with an RGB/R/G/B channel selector where points can be dragged,
+added by clicking the grid, removed with Alt-click or Delete, and nudged with
+the arrow keys.
 
 ### Types designed for but not implemented
 
@@ -237,13 +244,46 @@ history and never marks the project as modified.
 | Layer name | 120 characters |
 | Layer metadata | 16 entries, 512 characters each |
 
+## Autosave and recovery
+
+While a document has unsaved layer changes, PhotoForge writes a bounded recovery
+snapshot to the local `PhotoForgeecovery` folder every 90 seconds. Snapshots
+use the `.photoforge-recovery` extension so they can never be mistaken for, or
+overwrite, a project the user saved; at most three are kept, oldest pruned
+first; and each is written atomically.
+
+A snapshot is an ordinary project container plus a small sidecar recording where
+it came from, so restoring one goes through exactly the same validated,
+checksummed reader a project does - a corrupt snapshot is rejected rather than
+half-read.
+
+On startup, if a snapshot is present, PhotoForge offers to recover it. Recovered
+work is marked unsaved until the user saves it somewhere they chose. Saving a
+project clears the snapshots. Nothing is uploaded and no cloud autosave exists.
+
+## Layer-aware workflows
+
+Workflows can carry layer steps at schema version 2: select layer, set
+visibility, set opacity, set blend mode, create adjustment layer, apply
+operations to a layer, create a mask from the selection, merge down, flatten,
+and export the composite. Version 1 files carry none and still load unchanged.
+
+Steps name layers through deterministic selectors - an exact identifier, the
+active layer, the layer a previous step created, a unique name, the bottom, or
+the top. A selector that cannot be resolved, or a name that matches more than
+one layer, fails the replay rather than retargeting silently, and the whole
+workflow is checked before any of it is applied, so a replay is never
+half-applied.
+
+The guided planner may also propose layer steps. It is restricted to selectors
+it cannot fabricate - only the active layer and the layer the plan just created
+- and it may not propose merge, flatten, or export. That restriction is enforced
+by validation rather than by convention, so a planner cannot invent a layer
+identifier even if it tries.
+
 ## Known limitations in 0.8.0
 
 - **Pass-through groups are not implemented.** Groups are isolated.
-- **Curves and selective colour have no adjustment-layer parameter editor.** The
-  compositor, project format, and workflows handle them correctly, and they can
-  be created programmatically, but the 0.8.0 dialog edits scalar adjustments,
-  levels, and HSL only.
 - **Blending is not linear-light and PhotoForge is not colour managed.** See
   [compositing.md](compositing.md#colour-space-honestly).
 - **Compositing is CPU-only.** There is no GPU acceleration in this release.
@@ -251,6 +291,6 @@ history and never marks the project as modified.
   [phase-8-results.md](phase-8-results.md) for measured figures.
 - **No PSD support.** PhotoForge cannot read or write Photoshop documents.
 - Text, vector, smart-object, procedural, and neural layers are not implemented.
-- Multiple-layer selection in the panel is limited to one layer at a time;
-  grouping operates on the selected layer, and multi-select grouping is
-  available through the tree API but not yet through the panel.
+- Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
+  a layer to the selection, and a selection that would span different parents is
+  trimmed back, because only siblings can be grouped.

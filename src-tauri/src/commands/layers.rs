@@ -747,3 +747,137 @@ pub async fn load_layer_project(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
     })
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryListResult {
+    pub snapshots: Vec<crate::layers::RecoveryRecord>,
+}
+
+/// Writes a periodic recovery snapshot of the working document.
+///
+/// The snapshot lands in the local recovery folder under its own extension and
+/// never touches the user's project file.
+#[tauri::command]
+pub async fn write_recovery_snapshot(
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    project_path: Option<String>,
+    document_name: String,
+    saved_at: String,
+    state: State<'_, AppState>,
+) -> Result<crate::layers::RecoveryRecord, AppError> {
+    document.validate()?;
+    let buffers = {
+        let store = state
+            .layers
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
+        let mut buffers = Vec::new();
+        for pixel_id in document.referenced_pixel_ids() {
+            buffers.push((pixel_id.clone(), store.full(&pixel_id)?));
+        }
+        buffers
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let borrowed: Vec<(String, &RgbaImage)> = buffers
+            .iter()
+            .map(|(id, image)| (id.clone(), image.as_ref()))
+            .collect();
+        crate::layers::write_recovery_snapshot(
+            &document,
+            &operations,
+            &borrowed,
+            project_path.as_deref(),
+            &document_name,
+            env!("CARGO_PKG_VERSION"),
+            &saved_at,
+            None,
+        )
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("recovery worker stopped".into()))?
+}
+
+#[tauri::command]
+pub async fn list_recovery_snapshots() -> Result<RecoveryListResult, AppError> {
+    Ok(RecoveryListResult {
+        snapshots: crate::layers::list_recovery_snapshots(None)?,
+    })
+}
+
+/// Restores a snapshot and rebinds the session pixel store to it.
+#[tauri::command]
+pub async fn restore_recovery_snapshot(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectLoadResult, AppError> {
+    let snapshot = PathBuf::from(path);
+    let started = Instant::now();
+    let loaded = tauri::async_runtime::spawn_blocking(move || {
+        crate::layers::read_managed_snapshot(&snapshot)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("recovery worker stopped".into()))??;
+
+    let mut store = state
+        .layers
+        .lock()
+        .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
+    store.reset(loaded.document.canvas_width, loaded.document.canvas_height)?;
+    for (pixel_id, image) in loaded.pixels {
+        store.register_with_id(&pixel_id, image)?;
+    }
+    drop(store);
+
+    Ok(ProjectLoadResult {
+        canvas_width: loaded.document.canvas_width,
+        canvas_height: loaded.document.canvas_height,
+        document: loaded.document,
+        operations: loaded.document_operations,
+        application_version: loaded.application_version,
+        created_at: loaded.created_at,
+        modified_at: loaded.modified_at,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+#[tauri::command]
+pub async fn discard_recovery_snapshot(path: Option<String>) -> Result<usize, AppError> {
+    match path {
+        Some(path) => {
+            crate::layers::discard_managed_snapshot(&PathBuf::from(path))?;
+            Ok(1)
+        }
+        None => crate::layers::discard_recovery_snapshots(None),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerWorkflowPlan {
+    /// Resolved layer identifier per step; empty where a step has no target.
+    pub targets: Vec<String>,
+    pub steps: usize,
+}
+
+/// Resolves every selector in a layer workflow against the current document
+/// before any of it runs, so a replay never half-applies or silently retargets.
+#[tauri::command]
+pub async fn plan_layer_workflow(
+    document: LayerDocument,
+    steps: Vec<crate::layers::LayerWorkflowStep>,
+) -> Result<LayerWorkflowPlan, AppError> {
+    document.validate()?;
+    let targets = crate::layers::plan_layer_steps(&document, &steps)?;
+    for (step, target) in steps.iter().zip(&targets) {
+        if !target.is_empty() {
+            crate::layers::check_layer_step_kind(&document, step, target)?;
+        }
+    }
+    Ok(LayerWorkflowPlan {
+        steps: steps.len(),
+        targets,
+    })
+}

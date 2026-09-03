@@ -21,8 +21,10 @@
   export let disabled = false;
   export let busy = false;
   export let hasSelection = false;
+  /** Layers selected alongside the active one, for acting on several at once. */
+  export let selectedIds: string[] = [];
 
-  export let onselect: (id: string) => void;
+  export let onselect: (id: string, additive: boolean) => void;
   export let ontoggle: (id: string, field: 'visible' | 'locked' | 'collapsed') => void;
   export let onrename: (id: string, name: string) => void;
   export let onopacity: (id: string, value: number) => void;
@@ -45,6 +47,11 @@
   $: selectedHasMask = Boolean(selected?.mask);
   $: totalLayers = rows.length;
   $: locked = Boolean(selected?.locked);
+  $: multiSelection = selectedIds.length > 1;
+
+  function isSelected(id: string): boolean {
+    return document.activeLayerId === id || selectedIds.includes(id);
+  }
 
   function beginRename(layer: Layer) {
     if (disabled) return;
@@ -150,7 +157,11 @@
   <div class="layers-heading">
     <div>
       <h2 id="layers-heading"><span aria-hidden="true">▤</span> Layers</h2>
-      <small>{totalLayers} {totalLayers === 1 ? 'layer' : 'layers'}</small>
+      <small>
+        {totalLayers} {totalLayers === 1 ? 'layer' : 'layers'}{multiSelection
+          ? ` · ${selectedIds.length} selected`
+          : ''}
+      </small>
     </div>
     <div class="create-actions">
       <button
@@ -281,10 +292,11 @@
     {#each rows as row (row.layer.id)}
       <li
         role="treeitem"
-        aria-selected={document.activeLayerId === row.layer.id}
+        aria-selected={isSelected(row.layer.id)}
         aria-expanded={row.layer.content.type === 'group' ? !row.layer.collapsed : undefined}
         aria-level={row.depth + 1}
-        class:selected={document.activeLayerId === row.layer.id}
+        class:selected={isSelected(row.layer.id)}
+        class:active={document.activeLayerId === row.layer.id}
         class:dimmed={!row.layer.visible || row.hiddenByAncestor}
         class:locked={row.layer.locked}
         class:dragging={draggingId === row.layer.id}
@@ -329,7 +341,7 @@
             class="select-layer"
             aria-label={`Select ${row.layer.name}`}
             {disabled}
-            on:click={() => onselect(row.layer.id)}
+            on:click={(event) => onselect(row.layer.id, event.ctrlKey || event.metaKey || event.shiftKey)}
             on:dblclick={() =>
               row.layer.content.type === 'adjustment'
                 ? onaction('edit_adjustment', row.layer.id)
@@ -493,9 +505,12 @@
     <div class="layer-actions" role="group" aria-label="Layer actions">
       <button
         type="button"
-        disabled={disabled || selectedIsGroup}
-        title="Group the selected layer (Ctrl+G)"
-        on:click={() => onaction('group', selected?.id)}>Group</button
+        disabled={disabled || (selectedIsGroup && !multiSelection)}
+        title={multiSelection
+          ? `Group the ${selectedIds.length} selected layers (Ctrl+G)`
+          : 'Group the selected layer (Ctrl+G)'}
+        on:click={() => onaction('group', selected?.id)}
+        >{multiSelection ? `Group ${selectedIds.length}` : 'Group'}</button
       >
       <button
         type="button"
@@ -565,7 +580,8 @@
   .property-row input[type='range'] { width: 100%; }
   .layer-list { display: grid; gap: 3px; max-height: 340px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
   .layer-list li { position: relative; padding: 4px; border: 1px solid transparent; border-radius: 7px; background: rgba(255,255,255,.015); }
-  .layer-list li.selected { border-color: var(--accent); background: rgba(192,231,126,.08); }
+  .layer-list li.selected { border-color: rgba(192,231,126,.5); background: rgba(192,231,126,.05); }
+  .layer-list li.active { border-color: var(--accent); background: rgba(192,231,126,.08); }
   .layer-list li.dimmed .row-main { opacity: .45; }
   .layer-list li.locked { background: rgba(255,255,255,.03); }
   .layer-list li.dragging { opacity: .5; }
