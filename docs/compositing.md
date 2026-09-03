@@ -143,17 +143,43 @@ W3C `ClipColor` procedure.
 
 ## Groups
 
-Groups are **isolated**. Children composite onto a transparent buffer of their
-own, and only the finished group result is blended into the parent using the
-group's own mask, opacity, and blend mode. This is why two stacked opaque
-children inside a 50% group read as a single 50% result rather than two
-separately faded layers.
+A group composites in one of two modes.
 
-**Pass-through groups are not implemented.** An adjustment layer inside a group
-affects only the layers below it *within that group*; it cannot reach the
-backdrop outside. This is the simpler of the two correct models, and the one
-0.8.0 commits to. PhotoForge does not claim Photoshop-compatible group
-semantics.
+### Isolated (the default)
+
+Children composite onto a transparent buffer of their own, and only the finished
+group result is blended into the parent using the group's own mask, opacity, and
+blend mode. This is why two stacked opaque children inside a 50% group read as a
+single 50% result rather than two separately faded layers, and why an adjustment
+layer inside the group cannot reach the backdrop beneath it.
+
+### Pass-through
+
+The children are handed the accumulated backdrop instead of a blank one, so an
+adjustment layer inside the group also affects the layers below it. The group's
+opacity and mask then decide how much of the reworked backdrop replaces the
+original:
+
+```text
+ao = ab + t * (as - ab)
+Co = (Cb*ab + t * (Cs*as - Cb*ab)) / ao        where t = opacity * mask coverage
+```
+
+The interpolation is done on premultiplied values and converted back to straight
+alpha. Cross-fading straight colours directly would darken or lighten wherever
+the two composites differ in coverage, which is exactly where a pass-through
+group's seam falls.
+
+A pass-through group must use the **Normal** blend mode: pass-through is itself
+the group's blend behaviour, so carrying a second mode would be ambiguous.
+Validation rejects that combination rather than silently choosing a meaning.
+
+Groups default to isolated, and a project written before pass-through existed
+omits the field entirely and restores as isolated, so no existing document
+changes appearance.
+
+PhotoForge does not claim full Photoshop-compatible group semantics — only that
+these two models behave as documented here.
 
 ## Adjustment layers
 

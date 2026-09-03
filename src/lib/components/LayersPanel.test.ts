@@ -498,6 +498,45 @@ describe('LayersPanel', () => {
     );
   });
 
+  it('offers a pass-through toggle only for groups', () => {
+    const { document } = selectedDocument();
+    render(LayersPanel, { props: props(document) });
+    expect(screen.queryByLabelText('Pass through')).toBeNull();
+
+    const group = createGroupLayer('Group', [pixel('Child')]);
+    const grouped = { ...createDocument(16, 16, [group]), activeLayerId: group.id };
+    render(LayersPanel, { props: props(grouped) });
+    expect(screen.getByLabelText('Pass through')).toBeTruthy();
+  });
+
+  it('raises the pass-through action and explains each mode', async () => {
+    const group = createGroupLayer('Group', [pixel('Child')]);
+    const document = { ...createDocument(16, 16, [group]), activeLayerId: group.id };
+    const value = props(document);
+    const { rerender } = render(LayersPanel, { props: value });
+
+    expect((screen.getByLabelText('Pass through') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText(/isolated: its adjustments stay inside it/)).toBeTruthy();
+
+    await fireEvent.change(screen.getByLabelText('Pass through'));
+    expect(value.onaction).toHaveBeenCalledWith('toggle_pass_through', group.id);
+
+    const passThrough = createGroupLayer('Group', [pixel('Child')], undefined, false);
+    await rerender({
+      ...value,
+      document: { ...createDocument(16, 16, [passThrough]), activeLayerId: passThrough.id }
+    });
+    expect((screen.getByLabelText('Pass through') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/also affect the layers below it/)).toBeTruthy();
+  });
+
+  it('locks the blend mode to Normal for a pass-through group', async () => {
+    const passThrough = createGroupLayer('Group', [pixel('Child')], undefined, false);
+    const document = { ...createDocument(16, 16, [passThrough]), activeLayerId: passThrough.id };
+    render(LayersPanel, { props: props(document) });
+    expect((screen.getByLabelText('Blend') as HTMLSelectElement).disabled).toBe(true);
+  });
+
   it('enables ungroup only for a selected group', () => {
     const group = createGroupLayer('Group', [pixel('Child')]);
     const document = { ...createDocument(16, 16, [group]), activeLayerId: group.id };

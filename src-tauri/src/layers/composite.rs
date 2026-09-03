@@ -132,6 +132,27 @@ fn composite_stack(
         });
     }
     let mut backdrop = context.blank_canvas();
+    composite_onto(&mut backdrop, layers, context, depth)?;
+    Ok(backdrop)
+}
+
+/// Composites a stack of siblings onto an existing backdrop.
+///
+/// Splitting this out from `composite_stack` is what makes pass-through groups
+/// possible: an isolated group gets a fresh transparent canvas, while a
+/// pass-through group is handed a copy of whatever is already beneath it.
+fn composite_onto(
+    backdrop: &mut RgbaImage,
+    layers: &[Layer],
+    context: &RenderContext<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    if depth > MAX_GROUP_DEPTH {
+        return Err(AppError::LayerDepthExceeded {
+            depth,
+            limit: MAX_GROUP_DEPTH,
+        });
+    }
     for layer in layers {
         context.check_cancelled()?;
         // A hidden layer and a fully transparent layer contribute nothing in
@@ -142,21 +163,107 @@ fn composite_stack(
         match &layer.content {
             LayerContent::Pixel { pixel_id, .. } => {
                 let buffer = context.source.resolve(pixel_id)?;
-                draw_source(&mut backdrop, buffer.as_ref(), layer, context)?;
+                draw_source(backdrop, buffer.as_ref(), layer, context)?;
             }
-            LayerContent::Group { children } => {
+            LayerContent::Group { children, isolated } => {
                 if children.is_empty() {
                     continue;
                 }
-                let rendered = composite_stack(children, context, depth + 1)?;
-                draw_source(&mut backdrop, &rendered, layer, context)?;
+                if *isolated {
+                    let rendered = composite_stack(children, context, depth + 1)?;
+                    draw_source(backdrop, &rendered, layer, context)?;
+                } else {
+                    // Pass-through: the children see the accumulated backdrop,
+                    // so an adjustment inside the group also reaches the layers
+                    // below it. The group's own opacity and mask then decide how
+                    // much of that reworked backdrop replaces the original.
+                    let mut reworked = backdrop.clone();
+                    composite_onto(&mut reworked, children, context, depth + 1)?;
+                    cross_fade(backdrop, &reworked, layer, context)?;
+                }
             }
             LayerContent::Adjustment { operation } => {
-                apply_adjustment(&mut backdrop, operation, layer, context)?;
+                apply_adjustment(backdrop, operation, layer, context)?;
             }
         }
     }
-    Ok(backdrop)
+    Ok(())
+}
+
+/// Interpolates a pass-through group's reworked backdrop back over the original,
+/// weighted by the group's opacity and mask.
+///
+/// Both sides are complete composites, so the blend happens in premultiplied
+/// space and is converted back to straight alpha. Interpolating straight colours
+/// directly would darken or lighten wherever the two differ in coverage.
+fn cross_fade(
+    backdrop: &mut RgbaImage,
+    reworked: &RgbaImage,
+    layer: &Layer,
+    context: &RenderContext<'_>,
+) -> Result<(), AppError> {
+    let opacity = clamp_unit(layer.opacity);
+    let mask = decoded_mask(layer)?;
+    let inverted = mask_inverted(layer);
+    let transform = render_transform(&layer.transform, context.scale);
+    let inverse = transform.inverse(context.canvas_width, context.canvas_height)?;
+
+    // A fully opaque, unmasked pass-through group is exactly its reworked
+    // backdrop, which is the common case and needs no per-pixel mixing.
+    if opacity >= 1.0 && mask.is_none() {
+        backdrop.copy_from_slice(reworked.as_raw());
+        return Ok(());
+    }
+
+    let canvas_width = context.canvas_width;
+    let canvas_height = context.canvas_height;
+    let mask_reference = mask.as_ref();
+    let reworked_raw = reworked.as_raw();
+
+    for_each_row_band(
+        backdrop.as_mut(),
+        canvas_width,
+        0,
+        canvas_height,
+        context.cancel,
+        |y, row| {
+            let source_row = y as usize * canvas_width as usize * 4;
+            for x in 0..canvas_width {
+                let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
+                let coverage = opacity
+                    * mask_coverage(
+                        mask_reference,
+                        inverted,
+                        local_x,
+                        local_y,
+                        canvas_width,
+                        canvas_height,
+                    );
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let index = x as usize * 4;
+                let source_index = source_row + index;
+                let base_alpha = f32::from(row[index + 3]) / 255.0;
+                let next_alpha = f32::from(reworked_raw[source_index + 3]) / 255.0;
+                let out_alpha = base_alpha + coverage * (next_alpha - base_alpha);
+                if out_alpha <= 0.0 {
+                    for channel in 0..4 {
+                        row[index + channel] = 0;
+                    }
+                    continue;
+                }
+                for channel in 0..3 {
+                    let base = f32::from(row[index + channel]) / 255.0 * base_alpha;
+                    let next = f32::from(reworked_raw[source_index + channel]) / 255.0 * next_alpha;
+                    let mixed = base + coverage * (next - base);
+                    row[index + channel] = to_byte(mixed / out_alpha);
+                }
+                row[index + 3] = to_byte(out_alpha);
+            }
+        },
+    )?;
+    Ok(())
 }
 
 /// Scales a layer transform into render space. Only the translation depends on
@@ -1528,6 +1635,173 @@ mod tests {
         // A pixel from the middle of the canvas actually changed, so the test
         // is not comparing two blank buffers.
         assert_ne!(first.get_pixel(20, 200).0, [0, 0, 0, 0]);
+    }
+
+    /// The defining difference between the two group models: an adjustment
+    /// inside an isolated group cannot touch the backdrop beneath it, and the
+    /// same adjustment inside a pass-through group can.
+    #[test]
+    fn a_pass_through_group_lets_its_adjustment_reach_the_backdrop() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(2, 2, [200, 40, 40, 255]));
+
+        let build = |group: Layer| document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        let adjustment = || adjustment_layer("adj", EditOperation::Grayscale);
+
+        let isolated = render(&build(group_layer("g", vec![adjustment()])), &source);
+        let pass_through = render(&build(pass_through_group("g", vec![adjustment()])), &source);
+
+        // Isolated: the group's own buffer is empty, so the backdrop shows through
+        // untouched.
+        assert_eq!(isolated.get_pixel(0, 0).0, [200, 40, 40, 255]);
+        // Pass-through: the adjustment greyed the backdrop beneath the group.
+        let mixed = pass_through.get_pixel(0, 0).0;
+        assert_eq!(mixed[0], mixed[1]);
+        assert_eq!(mixed[1], mixed[2]);
+        assert_eq!(mixed[3], 255);
+        assert_ne!(mixed[0], 200);
+    }
+
+    #[test]
+    fn an_opaque_unmasked_pass_through_group_is_exactly_its_reworked_backdrop() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(3, 3, [120, 180, 60, 255]));
+        source.insert("pxtop", solid(3, 3, [10, 20, 30, 255]));
+
+        // Placing the same layers inside a fully open pass-through group must
+        // read identically to placing them in the root stack.
+        let flat = document_with(
+            vec![
+                pixel_layer("back", 3, 3),
+                adjustment_layer("adj", EditOperation::Brightness { amount: 0.2 }),
+                pixel_layer("top", 3, 3),
+            ],
+            3,
+            3,
+        );
+        let grouped = document_with(
+            vec![
+                pixel_layer("back", 3, 3),
+                pass_through_group(
+                    "g",
+                    vec![
+                        adjustment_layer("adj", EditOperation::Brightness { amount: 0.2 }),
+                        pixel_layer("top", 3, 3),
+                    ],
+                ),
+            ],
+            3,
+            3,
+        );
+        assert_eq!(
+            render(&flat, &source).as_raw(),
+            render(&grouped, &source).as_raw()
+        );
+    }
+
+    #[test]
+    fn pass_through_group_opacity_fades_between_the_two_backdrops() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(2, 2, [0, 0, 0, 255]));
+
+        let mut group = pass_through_group(
+            "g",
+            vec![adjustment_layer(
+                "adj",
+                EditOperation::Brightness { amount: 1.0 },
+            )],
+        );
+        group.opacity = 0.5;
+        let document = document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        let pixel = render(&document, &source).get_pixel(0, 0).0;
+        // Full strength would take black to white; half opacity lands midway.
+        assert!(pixel[0].abs_diff(128) <= 2, "{pixel:?}");
+        assert_eq!(pixel[3], 255);
+    }
+
+    #[test]
+    fn a_pass_through_group_mask_limits_where_the_rework_applies() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(2, 1, [0, 0, 0, 255]));
+
+        let mut mask = MaskBitmap::empty(2, 1).unwrap();
+        mask.set(0, 0, 255);
+        let mut group = pass_through_group(
+            "g",
+            vec![adjustment_layer(
+                "adj",
+                EditOperation::Brightness { amount: 1.0 },
+            )],
+        );
+        group.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+        let document = document_with(vec![pixel_layer("back", 2, 1), group], 2, 1);
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(rendered.get_pixel(1, 0).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn pass_through_preserves_alpha_where_the_backdrop_is_transparent() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(2, 2, CLEAR));
+        let group = pass_through_group(
+            "g",
+            vec![adjustment_layer(
+                "adj",
+                EditOperation::Brightness { amount: 0.5 },
+            )],
+        );
+        let document = document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        for pixel in render(&document, &source).pixels() {
+            assert_eq!(pixel.0[3], 0, "pass-through must not create coverage");
+        }
+    }
+
+    #[test]
+    fn a_pass_through_group_must_use_the_normal_blend_mode() {
+        let mut group = pass_through_group("g", vec![pixel_layer("child", 2, 2)]);
+        group.blend_mode = BlendMode::Multiply;
+        let document = document_with(vec![group], 2, 2);
+        assert!(matches!(
+            render_document(&document, &MapSource::default(), RenderOptions::default()),
+            Err(AppError::InvalidLayerDocument(_))
+        ));
+    }
+
+    #[test]
+    fn a_group_without_the_isolated_field_restores_as_isolated() {
+        // Every project written before pass-through existed omits the field, so
+        // the default has to keep those documents looking the same.
+        let json = r#"{"type":"group","children":[]}"#;
+        let content: LayerContent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            content,
+            LayerContent::Group { isolated: true, .. }
+        ));
+    }
+
+    #[test]
+    fn nested_pass_through_groups_compose_through_both_levels() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(2, 2, [40, 40, 40, 255]));
+        let inner = pass_through_group(
+            "inner",
+            vec![adjustment_layer(
+                "adj",
+                EditOperation::Brightness { amount: 0.2 },
+            )],
+        );
+        let outer = pass_through_group("outer", vec![inner]);
+        let document = document_with(vec![pixel_layer("back", 2, 2), outer], 2, 2);
+        // 0.2 * 255 = 51 reaches the backdrop through two pass-through levels.
+        assert_eq!(
+            render(&document, &source).get_pixel(0, 0).0,
+            [91, 91, 91, 255]
+        );
     }
 
     #[test]

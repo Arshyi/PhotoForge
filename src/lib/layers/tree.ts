@@ -69,8 +69,18 @@ export function createPixelLayer(
   return baseLayer(name, { type: 'pixel', pixelId, width, height }, now);
 }
 
-export function createGroupLayer(name: string, children: Layer[] = [], now?: Date): Layer {
-  return baseLayer(name, { type: 'group', children }, now);
+export function createGroupLayer(
+  name: string,
+  children: Layer[] = [],
+  now?: Date,
+  isolated = true
+): Layer {
+  return baseLayer(name, { type: 'group', children, isolated }, now);
+}
+
+/** True for a group whose children composite against the backdrop beneath it. */
+export function isPassThrough(layer: Layer): boolean {
+  return layer.content.type === 'group' && !layer.content.isolated;
 }
 
 export function createAdjustmentLayer(
@@ -191,7 +201,11 @@ function replaceAt(layers: Layer[], path: number[], replacement: Layer | null): 
   if (!parent || parent.content.type !== 'group') return layers;
   next[index] = {
     ...parent,
-    content: { type: 'group', children: replaceAt(parent.content.children, rest, replacement) }
+    content: {
+      type: 'group',
+      children: replaceAt(parent.content.children, rest, replacement),
+      isolated: parent.content.isolated
+    }
   };
   return next;
 }
@@ -208,7 +222,11 @@ function insertAt(layers: Layer[], path: number[], index: number, layer: Layer):
   if (!parent || parent.content.type !== 'group') return layers;
   next[step] = {
     ...parent,
-    content: { type: 'group', children: insertAt(parent.content.children, rest, index, layer) }
+    content: {
+      type: 'group',
+      children: insertAt(parent.content.children, rest, index, layer),
+      isolated: parent.content.isolated
+    }
   };
   return next;
 }
@@ -355,7 +373,11 @@ function withNewIds(layer: Layer, name: string | null, now?: Date): Layer {
   const stamp = timestamp(now);
   const content: LayerContent =
     layer.content.type === 'group'
-      ? { type: 'group', children: layer.content.children.map((child) => withNewIds(child, null, now)) }
+      ? {
+          type: 'group',
+          children: layer.content.children.map((child) => withNewIds(child, null, now)),
+          isolated: layer.content.isolated
+        }
       : layer.content;
   return {
     ...layer,

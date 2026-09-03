@@ -71,15 +71,32 @@ introduce one, and it checks descendancy before detaching anything.
 
 ## Group behaviour
 
-Groups are **isolated**: children composite onto their own transparent buffer,
-and only the finished result is blended into the parent with the group's mask,
-opacity, and blend mode. Two stacked opaque children in a 50% group read as one
-50% result.
+Both models are implemented and a group can be switched between them.
 
-**Pass-through groups are not implemented.** An adjustment layer inside a group
-affects only the layers below it within that group. This is the simpler correct
-model and 0.8.0 commits to it. PhotoForge does not claim Photoshop-compatible
-group semantics.
+**Isolated** (the default) composites children onto their own transparent
+buffer, and only the finished result is blended into the parent with the group's
+mask, opacity, and blend mode. Two stacked opaque children in a 50% group read
+as one 50% result, and an adjustment inside the group cannot reach the backdrop
+beneath it.
+
+**Pass-through** hands the children the accumulated backdrop instead, so an
+adjustment inside the group also affects the layers below it. The group's own
+opacity and mask then decide how much of the reworked backdrop replaces the
+original; that mix happens in premultiplied space so differing coverage cannot
+darken or lighten the seam. A pass-through group must use the Normal blend mode,
+because pass-through *is* its blend behaviour — a second mode would be
+ambiguous, and validation rejects it rather than silently picking a meaning.
+
+Groups default to isolated, and a project written before pass-through existed
+omits the field and restores as isolated, so no existing document changes
+appearance. Tested: the two models genuinely differ for the same adjustment; a
+fully open pass-through group renders identically to putting its children in the
+root stack; opacity fades between the two backdrops; a mask limits where the
+rework applies; pass-through never creates coverage over a transparent backdrop;
+and nested pass-through groups compose through both levels.
+
+PhotoForge still does not claim full Photoshop-compatible group semantics — only
+that these two models behave as described here.
 
 ## Adjustment layers
 
@@ -361,11 +378,11 @@ Ctrl+Shift+I, and the single-letter tool keys are untouched.
 
 | Suite | Before (0.7.1) | After (0.8.0) | Added |
 | --- | --- | --- | --- |
-| Rust | 481 | **688** | 207 |
-| Frontend | 415 | **593** | 178 |
-| **Total** | 896 | **1,281** | 385 |
+| Rust | 481 | **700** | 219 |
+| Frontend | 415 | **596** | 181 |
+| **Total** | 896 | **1,296** | 400 |
 
-Of these, 199 Rust tests and 174 frontend tests are layer-specific. All previous
+Of these, 211 Rust tests and 177 frontend tests are layer-specific. All previous
 tests still pass unchanged; no test, lint rule, or type check was weakened.
 
 Backend coverage includes layer creation and deletion, stable identifiers,
@@ -374,7 +391,7 @@ transforms, all sixteen blend modes, alpha compositing, masks, adjustment
 layers, merge, flatten, project serialization, project corruption and truncation,
 migration and version rejection, archive traversal rejection, oversized
 allocation rejection, renderer determinism, fast-path equivalence, parallel-band
-determinism, cache behaviour, undo/redo, recovery snapshots (round trip,
+determinism, both group compositing models, cache behaviour, undo/redo, recovery snapshots (round trip,
 pruning, corruption, extension safety, leaving the source project untouched),
 layer workflow selectors and fail-closed resolution, planner-safety enforcement,
 workflow schema 1/2 compatibility, and batch project composites.
@@ -398,8 +415,8 @@ the visible drop hint as well as the resulting call.
 | --- | --- |
 | `cargo fmt --check` | Clean |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Clean |
-| `cargo test --all-targets --all-features` | 688 passed, 0 failed |
-| `npm test` | 593 passed, 0 failed |
+| `cargo test --all-targets --all-features` | 700 passed, 0 failed |
+| `npm test` | 596 passed, 0 failed |
 | `npm run check` (svelte-check) | 406 files, 0 errors, 0 warnings |
 | `npm run build` | Succeeded |
 | `cargo tauri build` | Succeeded, both bundles produced |
@@ -509,9 +526,9 @@ manifest and then independently recomputed and compared.
 
 | Artifact | Size | SHA-256 |
 | --- | --- | --- |
-| `PhotoForge-portable.exe` | 16,500,736 bytes | `6dc805c2304580332b5748eafba4631368d8b7d74489c6165e286da5066e8c32` |
-| `PhotoForge_0.8.0_x64-setup.exe` | 3,685,835 bytes | `df57a7fe8a305e1fc5db6da7519a586bd1a4dbae6958e1d6ad50582373db8d4a` |
-| `PhotoForge_0.8.0_x64_en-US.msi` | 5,443,584 bytes | `5287405d35490d473092fb1b64ef1d4c2996fc7128aced5b9d6835aefae78e9e` |
+| `PhotoForge-portable.exe` | 16,520,704 bytes | `3c18260b1b1490756ce332c7ef936cc395776c89707e6d43df50d103d46d6af4` |
+| `PhotoForge_0.8.0_x64-setup.exe` | 3,695,839 bytes | `0ee4aa9a9c7b2369256b425b353a9bf4039796b85980327f0722c2d561303f12` |
+| `PhotoForge_0.8.0_x64_en-US.msi` | 5,451,776 bytes | `0a14ef7ddc8363e4a6024a2644dbba3b7be8f569dd77e3c220d5267305874234` |
 
 `SHA256SUMS.txt` contains exactly these three entries and all three re-verified
 as MATCH. The portable executable and NSIS installer report `ProductVersion`
@@ -521,12 +538,37 @@ self-signed substitute was used.
 
 ## Packaging validation
 
-The rebuilt portable executable was launched and observed: it started, stayed
-running, reported `Responding: True`, presented a main window titled
-`PhotoForge`, used about 42 MB working set, and spawned the expected
-`msedgewebview2.exe` child. It was then terminated cleanly, and the local
-recovery folder was confirmed empty afterwards — nothing was left behind by a
-session with no unsaved work.
+**Portable.** The rebuilt executable started, stayed running, reported
+`Responding: True`, presented a main window titled `PhotoForge`, used about
+42 MB working set, and spawned the expected `msedgewebview2.exe` child. It was
+terminated cleanly, and the local recovery folder was confirmed empty
+afterwards — nothing left behind by a session with no unsaved work.
+
+**NSIS, full per-user lifecycle.** Performed end to end without crossing a UAC
+boundary, because the installer supports a current-user install:
+
+| Step | Result |
+| --- | --- |
+| Silent install (`/S /CURRENTUSER`) | Exit code 0 |
+| Installed files | `photoforge.exe` (16,520,704 bytes) and `uninstall.exe` (79,104 bytes) in `%LOCALAPPDATA%\PhotoForge` |
+| Registration | `HKCU` uninstall entry: name `PhotoForge`, version `0.8.0`, correct install location and uninstall string |
+| Start Menu | `PhotoForge.lnk` created, resolving to the installed executable |
+| Installed version metadata | `ProductName` PhotoForge, `ProductVersion` 0.8.0 |
+| Launch | Started, `Responding: True`, window titled `PhotoForge`, ~30 MB working set, terminated cleanly |
+| Silent uninstall (`/S /CURRENTUSER`) | Exit code 0 |
+| Residue | Install directory removed, Start Menu shortcut removed, `HKCU` uninstall key removed, no stray process, no configuration or recovery files left |
+
+One honest detail: the executable inside the NSIS package hashes
+`d25d3509cc49cd9af08fdc39043c7095b9c17defdc85d7d4673805baaeffdb62`, which is
+**not** the same as the standalone portable binary. That is expected — Tauri
+patches the executable with NSIS bundle-type information before packaging it —
+but it means the installed binary is a variant of the portable one rather than
+a byte-identical copy, and the manifest hashes cover the shipped artifacts, not
+the executable extracted from inside them.
+
+**MSI: still not exercised.** The MSI is an all-users package whose install
+requires elevation. UAC was not bypassed or automated, so its install, launch,
+uninstall, and residue behaviour remain unverified.
 
 ---
 
@@ -536,17 +578,16 @@ Stated plainly, without hedging.
 
 ## Not implemented
 
-1. **Pass-through groups.** Groups are isolated only.
-2. **Text, vector, smart-object, procedural, and neural layers.** Designed for,
+1. **Text, vector, smart-object, procedural, and neural layers.** Designed for,
    not built.
-3. **GPU acceleration.** Compositing is CPU-only. The current CPU renderer may
+2. **GPU acceleration.** Compositing is CPU-only. The current CPU renderer may
    use deterministic row bands across at most eight threads.
-4. **Colour management.** No ICC handling; blending is in encoded sRGB.
-5. **PSD compatibility.** PhotoForge cannot read or write Photoshop documents.
+3. **Colour management.** No ICC handling; blending is in encoded sRGB.
+4. **PSD compatibility.** PhotoForge cannot read or write Photoshop documents.
 
 ## Not verified
 
-6. **The manual GUI matrix was not performed.** No interactive desktop
+5. **The manual GUI matrix was not performed.** No interactive desktop
     automation was available in this environment. Creating, deleting,
     duplicating, reordering, dragging into and out of groups, collapsing,
     renaming, toggling visibility, changing opacity and blend mode, masks,
@@ -557,18 +598,18 @@ Stated plainly, without hedging.
     starts, responds, and shows its main window. Everything else rests on the
     automated suite, which covers the panel's rendering and callbacks in jsdom
     but not real pointer input, real rendering, or DPI behaviour.
-7. **NSIS and MSI install, launch, uninstall, and residue checks were not
-    performed.** Both installers build and hash correctly, but installing them
-    requires a UAC consent boundary that was not crossed. UAC was not bypassed or
-    automated.
-8. **No zero-network claim is made.** As in 0.7.1, the embedded WebView2
+6. **The MSI lifecycle was not exercised.** The MSI builds and hashes
+    correctly, but it is an all-users package whose installation requires
+    elevation, and UAC was not bypassed or automated. The NSIS installer's full
+    per-user lifecycle *was* verified and is recorded above.
+7. **No zero-network claim is made.** As in 0.7.1, the embedded WebView2
     runtime performs its own diagnostics that the embedding application does not
     fully control. PhotoForge application code makes no network request; the
     complete WebView2 process tree is not claimed to be silent.
 
 ## Known performance limitation
 
-9. **Documents with many translucent or blended layers still have visible
+8. **Documents with many translucent or blended layers still have visible
    latency** — roughly 440 ms per preview at 50 layers and 904 ms at 100 layers,
    1920x1080, on the measured machine. Tiling, dirty regions, and cached group
    composites remain unimplemented; bounded row-band parallelism is implemented.

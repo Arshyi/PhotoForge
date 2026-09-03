@@ -1296,6 +1296,25 @@
         );
         return;
       }
+      case 'toggle_pass_through': {
+        if (layer?.content.type !== 'group') return;
+        const nextIsolated = !layer.content.isolated;
+        commitLayers(
+          updateLayer(document, layerId as string, (entry) =>
+            entry.content.type === 'group'
+              ? {
+                  ...entry,
+                  // A pass-through group has no blend mode of its own, so
+                  // switching to it also returns the mode to Normal.
+                  blendMode: nextIsolated ? entry.blendMode : 'normal',
+                  content: { ...entry.content, isolated: nextIsolated }
+                }
+              : entry
+          ),
+          nextIsolated ? 'Isolate group' : 'Pass-through group'
+        );
+        return;
+      }
       case 'edit_adjustment': {
         if (layer?.content.type !== 'adjustment') return;
         openAdjustmentEditor(layer.id, layer.content.operation);

@@ -25,6 +25,12 @@ pub const MAX_TIMESTAMP_CHARS: usize = 64;
 pub const MAX_CANVAS_DIMENSION: u32 = 20_000;
 pub const MAX_CANVAS_PIXELS: u64 = 40_000_000;
 
+/// Groups are isolated unless a project says otherwise, so a document written
+/// before pass-through existed restores with exactly its original appearance.
+const fn default_isolated() -> bool {
+    true
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_LAYER_ID_CHARS
@@ -51,6 +57,14 @@ pub enum LayerContent {
     Group {
         #[serde(default)]
         children: Vec<Layer>,
+        /// Whether the group composites against its own transparent buffer.
+        ///
+        /// Isolated (the default, and what every pre-0.8.0 project restores as)
+        /// keeps a group's adjustment layers from reaching the backdrop beneath
+        /// it. Pass-through lets the children see and modify that backdrop, so
+        /// an adjustment inside the group also affects layers below it.
+        #[serde(default = "default_isolated")]
+        isolated: bool,
     },
     /// Parametric content. The stored `EditOperation` is the same validated
     /// type the destructive pipeline uses, so an adjustment layer never bakes
@@ -172,16 +186,28 @@ impl Layer {
 
     pub fn children(&self) -> &[Layer] {
         match &self.content {
-            LayerContent::Group { children } => children,
+            LayerContent::Group { children, .. } => children,
             _ => &[],
         }
     }
 
     pub fn children_mut(&mut self) -> Option<&mut Vec<Layer>> {
         match &mut self.content {
-            LayerContent::Group { children } => Some(children),
+            LayerContent::Group { children, .. } => Some(children),
             _ => None,
         }
+    }
+
+    /// True for a group whose children composite against the backdrop beneath
+    /// it rather than against a transparent buffer of their own.
+    pub fn is_pass_through(&self) -> bool {
+        matches!(
+            &self.content,
+            LayerContent::Group {
+                isolated: false,
+                ..
+            }
+        )
     }
 
     /// The layer's own pixel dimensions, which need not match the canvas.
@@ -232,7 +258,17 @@ impl Layer {
                 }
                 validate_dimensions(*width, *height)?;
             }
-            LayerContent::Group { .. } => {}
+            LayerContent::Group { isolated, .. } => {
+                // Pass-through *is* the group's blend behaviour, so a
+                // pass-through group carrying a second blend mode would be
+                // ambiguous. Rejecting it keeps the model unambiguous rather
+                // than silently picking one meaning.
+                if !isolated && self.blend_mode != BlendMode::Normal {
+                    return Err(AppError::InvalidLayerDocument(
+                        "a pass-through group must use the Normal blend mode".into(),
+                    ));
+                }
+            }
             LayerContent::Adjustment { operation } => {
                 if !operation.supports_adjustment_layer() {
                     return Err(AppError::UnsupportedAdjustmentLayer(
@@ -586,6 +622,15 @@ pub(crate) mod fixtures {
         }
     }
 
+    pub fn pass_through_group(id: &str, children: Vec<Layer>) -> Layer {
+        let mut layer = group_layer(id, children);
+        layer.content = LayerContent::Group {
+            children: layer.children().to_vec(),
+            isolated: false,
+        };
+        layer
+    }
+
     pub fn group_layer(id: &str, children: Vec<Layer>) -> Layer {
         Layer {
             id: id.to_string(),
@@ -598,7 +643,10 @@ pub(crate) mod fixtures {
             mask: None,
             collapsed: false,
             metadata: LayerMetadata::default(),
-            content: LayerContent::Group { children },
+            content: LayerContent::Group {
+                children,
+                isolated: true,
+            },
         }
     }
 

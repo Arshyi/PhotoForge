@@ -1,6 +1,6 @@
 <script lang="ts">
   import MaskThumbnail from './MaskThumbnail.svelte';
-  import { activeLayer, childrenOf, displayRows } from '../layers/tree';
+  import { activeLayer, childrenOf, displayRows, isPassThrough } from '../layers/tree';
   import {
     blendModes,
     layerKindIcons,
@@ -43,6 +43,7 @@
   $: rows = displayRows(document);
   $: selected = activeLayer(document);
   $: selectedIsGroup = selected?.content.type === 'group';
+  $: selectedIsPassThrough = Boolean(selected && isPassThrough(selected));
   $: selectedIsAdjustment = selected?.content.type === 'adjustment';
   $: selectedHasMask = Boolean(selected?.mask);
   $: totalLayers = rows.length;
@@ -253,12 +254,32 @@
 
   {#if selected}
     <div class="layer-properties" class:disabled={disabled || locked}>
+      {#if selectedIsGroup}
+        <div class="property-row checkbox">
+          <label for="layer-passthrough">Pass through</label>
+          <input
+            id="layer-passthrough"
+            type="checkbox"
+            checked={selectedIsPassThrough}
+            disabled={disabled || locked}
+            on:change={() => onaction('toggle_pass_through', selected?.id)}
+          />
+          <small>
+            {selectedIsPassThrough
+              ? 'Adjustments inside this group also affect the layers below it.'
+              : 'This group is isolated: its adjustments stay inside it.'}
+          </small>
+        </div>
+      {/if}
       <div class="property-row">
         <label for="layer-blend-select">Blend</label>
         <select
           id="layer-blend-select"
           value={selected.blendMode}
-          disabled={disabled || locked}
+          disabled={disabled || locked || selectedIsPassThrough}
+          title={selectedIsPassThrough
+            ? 'A pass-through group always uses Normal; switch it to isolated to choose a blend mode.'
+            : undefined}
           on:change={(event) =>
             onblend(
               selected?.id ?? '',
@@ -576,6 +597,9 @@
   .layer-properties.disabled { opacity: .6; }
   .property-row { display: grid; grid-template-columns: 54px 1fr; align-items: center; gap: 7px; color: var(--ink-soft); font-size: .64rem; }
   .property-row.range { grid-template-columns: 54px 1fr 42px; }
+  .property-row.checkbox { grid-template-columns: 74px auto 1fr; }
+  .property-row.checkbox small { color: var(--ink-faint); font-size: .56rem; line-height: 1.3; }
+  .property-row.checkbox input { justify-self: start; }
   .property-row output { color: var(--ink); font-family: var(--font-mono); font-size: .62rem; text-align: right; }
   .property-row input[type='range'] { width: 100%; }
   .layer-list { display: grid; gap: 3px; max-height: 340px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }

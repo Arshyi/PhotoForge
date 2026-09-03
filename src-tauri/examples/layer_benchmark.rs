@@ -74,7 +74,10 @@ fn pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> Layer {
 
 fn group_layer(id: &str, children: Vec<Layer>) -> Layer {
     Layer {
-        content: LayerContent::Group { children },
+        content: LayerContent::Group {
+            children,
+            isolated: true,
+        },
         ..pixel_layer(id, "unused", 1, 1)
     }
 }

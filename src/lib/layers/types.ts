@@ -82,7 +82,7 @@ export interface LayerMetadata {
 
 export type LayerContent =
   | { type: 'pixel'; pixelId: string; width: number; height: number }
-  | { type: 'group'; children: Layer[] }
+  | { type: 'group'; children: Layer[]; isolated: boolean }
   | { type: 'adjustment'; operation: BaseEditOperation };
 
 export interface Layer {
@@ -197,4 +197,5 @@ export type LayerPanelAction =
   | 'mask_load_selection'
   | 'edit_adjustment'
   | 'reset_transform'
-  | 'rasterize_transform';
+  | 'rasterize_transform'
+  | 'toggle_pass_through';

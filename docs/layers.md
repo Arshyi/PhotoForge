@@ -41,8 +41,9 @@ carries pixels, which is what makes cloning, undo, and serialization cheap.
 ### Group layer
 
 A named, nestable container. Groups have their own visibility, lock, opacity,
-blend mode, optional mask, and collapse state. Group compositing is **isolated**
-— see [compositing.md](compositing.md#groups).
+blend mode, optional mask, and collapse state, plus a choice between **isolated**
+and **pass-through** compositing — see [compositing.md](compositing.md#groups).
+Isolated is the default and is what every pre-0.8.0 project restores as.
 
 ### Adjustment layer
 
@@ -247,7 +248,8 @@ history and never marks the project as modified.
 ## Autosave and recovery
 
 While a document has unsaved layer changes, PhotoForge writes a bounded recovery
-snapshot to the local `PhotoForgeecovery` folder every 90 seconds. Snapshots
+snapshot to the local `PhotoForge
+ecovery` folder every 90 seconds. Snapshots
 use the `.photoforge-recovery` extension so they can never be mistaken for, or
 overwrite, a project the user saved; at most three are kept, oldest pruned
 first; and each is written atomically.
@@ -283,7 +285,6 @@ identifier even if it tries.
 
 ## Known limitations in 0.8.0
 
-- **Pass-through groups are not implemented.** Groups are isolated.
 - **Blending is not linear-light and PhotoForge is not colour managed.** See
   [compositing.md](compositing.md#colour-space-honestly).
 - **Compositing is CPU-only.** There is no GPU acceleration in this release.
