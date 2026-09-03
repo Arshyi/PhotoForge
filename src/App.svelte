@@ -132,9 +132,63 @@
     type WorkspaceMutationGuard
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
+  import LayersPanel from './lib/components/LayersPanel.svelte';
+  import AdjustmentLayerDialog from './lib/components/AdjustmentLayerDialog.svelte';
+  import { LayerHistory } from './lib/layers/history';
+  import { ThumbnailCache, thumbnailKey } from './lib/layers/thumbnails';
+  import { adjustmentDefinitions, definitionFor } from './lib/layers/adjustments';
+  import {
+    activeLayer as activeLayerOf,
+    childrenOf,
+    createAdjustmentLayer,
+    createDocument,
+    createGroupLayer,
+    createPixelLayer,
+    duplicateLayer,
+    eachLayer,
+    findLayer,
+    groupLayers,
+    insertLayer,
+    isSimpleDocument,
+    moveLayer,
+    parentOf,
+    pathTo,
+    removeLayer,
+    timestamp,
+    ungroupLayer,
+    updateLayer,
+    validateDocument
+  } from './lib/layers/tree';
+  import {
+    applyOperationsToLayer,
+    createLayerMask,
+    createLayerPixels,
+    exportLayerComposite,
+    flattenLayerDocument,
+    importLayerImage,
+    layerMaskFromSelection,
+    loadLayerProject,
+    mergeLayerPixels,
+    rasterizeLayerTransform,
+    renderLayerComposite,
+    renderLayerThumbnail,
+    retainLayerPixels,
+    saveLayerProject,
+    selectionFromLayerMask
+  } from './lib/layers/commands';
+  import type {
+    AdjustmentTarget,
+    BlendMode,
+    EditTarget,
+    Layer,
+    LayerDocument,
+    LayerPanelAction
+  } from './lib/layers/types';
 
   const history = new EditHistory();
   const selectionHistory = new SelectionHistory();
+  const layerHistory = new LayerHistory();
+  const thumbnailCache = new ThumbnailCache();
   let operations: EditOperation[] = [];
   let metadata: ImageMetadata | null = null;
   let originalUrl: string | null = null;
@@ -204,11 +258,33 @@
   let pendingGeometryCommit: PendingGeometryCommit | null = null;
   let geometryCommitTimer: ReturnType<typeof setTimeout> | undefined;
 
+  let layerDocument: LayerDocument | null = null;
+  let layerThumbnails: Record<string, string> = {};
+  let editTarget: EditTarget = 'layer';
+  let adjustmentTarget: AdjustmentTarget = 'document';
+  let layerBusy = false;
+  let thumbnailGeneration = 0;
+  let projectPath: string | null = null;
+  let projectDirty = false;
+  let projectCreatedAt = '';
+  let adjustmentDraft: import('./lib/types/editor').BaseEditOperation | null = null;
+  let adjustmentMode: 'create' | 'edit' = 'create';
+  let adjustmentLayerId: string | null = null;
+
   $: comparisonUsesSplitView = comparison && (comparisonMode === 'split' || valueFor(operations, 'rotate', 0) % 360 !== 0);
   $: selectionCanvasWidth = selectionState.canvasWidth || metadata?.width || 0;
   $: selectionCanvasHeight = selectionState.canvasHeight || metadata?.height || 0;
   $: selectionPanelHistory = selectionPanelHistoryAvailability(historyEvents, redoEvents);
   $: geometryMutationBusy = geometryTransactionRunning || Boolean(pendingGeometryCommit);
+  // A document that is still one plain full-canvas layer keeps using the
+  // original render and export path, so ordinary photo editing behaves exactly
+  // as it did before layers existed.
+  $: layeredDocument = Boolean(layerDocument) && !isSimpleDocument(layerDocument as LayerDocument);
+  $: selectedLayer = layerDocument ? activeLayerOf(layerDocument) : null;
+  $: hasActiveSelection = Boolean(selectionState.activeMask);
+  $: documentTitle = projectPath
+    ? projectPath.split(/[\\/]/).pop() ?? 'Project'
+    : metadata?.filename ?? '';
 
   onMount(() => {
     guidedSettings = loadGuidedSettings();
@@ -239,6 +315,39 @@
       if (!textFocused && metadata) {
         const command = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
+        // Layer shortcuts. These use combinations Phase 1-7.1 left unassigned;
+        // Ctrl+Z/Y, Ctrl+O/S, and the single-letter tool keys are untouched.
+        if (layerDocument && command && event.shiftKey && key === 'n') {
+          event.preventDefault();
+          void createLayer('pixel');
+          return;
+        }
+        if (layerDocument && command && !event.shiftKey && key === 'j') {
+          event.preventDefault();
+          void handleLayerAction('duplicate');
+          return;
+        }
+        if (layerDocument && command && !event.shiftKey && key === 'g') {
+          event.preventDefault();
+          void handleLayerAction('group');
+          return;
+        }
+        if (layerDocument && command && event.shiftKey && key === 'g') {
+          event.preventDefault();
+          void handleLayerAction('ungroup');
+          return;
+        }
+        if (
+          layerDocument &&
+          !command &&
+          !event.altKey &&
+          event.key === 'Delete' &&
+          layerDocument.activeLayerId
+        ) {
+          event.preventDefault();
+          void handleLayerAction('delete');
+          return;
+        }
         if (command && key === 'a') {
           event.preventDefault();
           void applyMaskOperation({ type: 'select_all' });
@@ -422,6 +531,19 @@
         geometryOperationsToEditOperations(restoredSelection.geometryOperations)
       );
       selectionState = selectionHistory.replace(restoredSelection);
+      // An opened image becomes a document with a single background pixel layer.
+      // The rendered result is identical to Phase 7.1 until the user adds to it.
+      startLayerDocument(
+        createDocument(result.metadata.width, result.metadata.height, [
+          createPixelLayer(
+            'Background',
+            result.backgroundPixelId,
+            result.metadata.width,
+            result.metadata.height
+          )
+        ]),
+        null
+      );
       if (!selectionState.activeMask) selectionState = { ...selectionState, applyScope: 'global' };
       historyEvents = [];
       redoEvents = [];
@@ -497,13 +619,18 @@
         const ownRequest = requestId;
         const ownDocument = documentId;
         const pipeline = cloneOperations(operations);
+        const composite = layerDocument && layeredDocument ? layerDocument : null;
         processing = true;
         try {
-          const result = await invoke<PreviewResult>('render_preview', {
-            operations: pipeline,
-            documentId: ownDocument,
-            requestId: ownRequest
-          });
+          // A layered document renders through the compositor; a plain
+          // single-layer document keeps the original preview path.
+          const result = composite
+            ? await renderLayerComposite(composite, pipeline, ownDocument, ownRequest)
+            : await invoke<PreviewResult>('render_preview', {
+                operations: pipeline,
+                documentId: ownDocument,
+                requestId: ownRequest
+              });
           if (
             result.isCurrent &&
             result.requestId === requestId &&
@@ -820,6 +947,7 @@
     redoEvents = [];
     history.clearRedo();
     selectionHistory.clearRedo();
+    layerHistory.clearRedo();
     reconcileHistoryRetention();
   }
 
@@ -827,16 +955,19 @@
     const retained = retainedHistorySuffix(
       historyEvents,
       history.undoDepth,
-      selectionHistory.undoDepth
+      selectionHistory.undoDepth,
+      layerHistory.undoDepth
     );
     historyEvents = retained.events;
     history.retainUndoDepth(retained.editDepth);
     selectionHistory.retainUndoDepth(retained.selectionDepth);
+    layerHistory.retainUndoDepth(retained.layerDepth);
   }
 
   function resetHistoryAtCurrentState() {
     operations = history.replace(operations);
     selectionState = selectionHistory.replace(selectionState);
+    if (layerDocument) layerDocument = layerHistory.replace(layerDocument, 'Current state');
     historyEvents = [];
     redoEvents = [];
   }
@@ -861,20 +992,719 @@
     canRedo = redoEvents.length > 0;
   }
 
+  /** Binds the session to a new layer document and clears layer-side caches. */
+  function startLayerDocument(next: LayerDocument, path: string | null, createdAt = timestamp()) {
+    layerDocument = layerHistory.replace(next, 'Open');
+    thumbnailCache.clear();
+    layerThumbnails = {};
+    thumbnailGeneration += 1;
+    editTarget = 'layer';
+    adjustmentTarget = 'document';
+    projectPath = path;
+    projectDirty = false;
+    projectCreatedAt = createdAt;
+    closeAdjustmentEditor();
+    void refreshThumbnails();
+  }
+
+  /**
+   * Commits a layer-tree change as one undoable step.
+   *
+   * `coalesceKey` folds a continuous gesture — an opacity drag, a drag-and-drop
+   * reorder — into a single logical undo entry.
+   */
+  function commitLayers(next: LayerDocument, label: string, coalesceKey?: string): boolean {
+    if (!layerDocument || next === layerDocument) return false;
+    const problems = validateDocument(next);
+    if (problems.length) {
+      notify(problems[0], 'error');
+      return false;
+    }
+    const before = layerHistory.undoDepth;
+    layerDocument = layerHistory.commit(next, label, coalesceKey);
+    recordHistoryMutation('layer', layerHistory.undoDepth > before);
+    syncHistoryActions();
+    projectDirty = true;
+    schedulePreview();
+    void refreshThumbnails();
+    void releaseUnreferencedPixels();
+    return true;
+  }
+
+  /**
+   * Releases pixel buffers no longer reachable from the document or its undo
+   * history, so merged and replaced buffers do not accumulate in the session.
+   */
+  async function releaseUnreferencedPixels() {
+    try {
+      await retainLayerPixels(layerHistory.reachablePixelIds());
+    } catch {
+      // Reclaiming memory is best effort; a failure never blocks editing.
+    }
+  }
+
+  /**
+   * Renders thumbnails for rows whose content actually changed. The cache key
+   * covers everything that can alter a thumbnail, so renaming or selecting a
+   * layer never triggers a render.
+   */
+  async function refreshThumbnails() {
+    const document = layerDocument;
+    if (!document) return;
+    const ownGeneration = thumbnailGeneration;
+    const layers = eachLayer(document);
+    thumbnailCache.retain(layers.map((layer) => layer.id));
+
+    for (const layer of layers) {
+      if (layer.content.type === 'adjustment') continue;
+      const key = thumbnailKey(layer, document);
+      const cached = thumbnailCache.get(layer.id, key);
+      if (cached) {
+        if (layerThumbnails[layer.id] !== cached) {
+          layerThumbnails = { ...layerThumbnails, [layer.id]: cached };
+        }
+        continue;
+      }
+      if (thumbnailCache.isPending(layer.id, key)) continue;
+      thumbnailCache.beginPending(layer.id, key);
+      try {
+        const result = await renderLayerThumbnail(document, layer.id, 68);
+        if (ownGeneration !== thumbnailGeneration) return;
+        if (result.dataUrl) {
+          thumbnailCache.set(layer.id, key, result.dataUrl);
+          layerThumbnails = { ...layerThumbnails, [layer.id]: result.dataUrl };
+        }
+      } catch {
+        // A thumbnail is presentation only; the row falls back to a type icon.
+      } finally {
+        thumbnailCache.endPending(layer.id, key);
+      }
+    }
+  }
+
+  function requireLayerDocument(): LayerDocument | null {
+    if (!layerDocument) {
+      notify('Open an image before editing layers.', 'error');
+      return null;
+    }
+    return layerDocument;
+  }
+
+  function selectLayer(id: string) {
+    const document = requireLayerDocument();
+    if (!document || document.activeLayerId === id) return;
+    // Selecting a layer is a view change, not an edit, so it never enters
+    // history and never marks the project dirty.
+    layerDocument = { ...document, activeLayerId: id };
+    layerHistory.replaceCurrent(layerDocument);
+    const layer = findLayer(layerDocument, id);
+    if (layer?.content.type === 'adjustment') editTarget = 'selection';
+    else if (editTarget === 'mask' && !layer?.mask) editTarget = 'layer';
+  }
+
+  function toggleLayerField(id: string, field: 'visible' | 'locked' | 'collapsed') {
+    const document = requireLayerDocument();
+    if (!document) return;
+    const labels = { visible: 'Layer visibility', locked: 'Lock layer', collapsed: 'Collapse group' };
+    commitLayers(
+      updateLayer(document, id, (layer) => ({ ...layer, [field]: !layer[field] })),
+      labels[field]
+    );
+  }
+
+  function renameLayer(id: string, name: string) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    commitLayers(updateLayer(document, id, (layer) => ({ ...layer, name })), 'Rename layer');
+  }
+
+  function setLayerOpacity(id: string, value: number) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    const opacity = Math.min(1, Math.max(0, value));
+    commitLayers(
+      updateLayer(document, id, (layer) => ({ ...layer, opacity })),
+      'Layer opacity',
+      `layer-opacity:${id}`
+    );
+  }
+
+  function setLayerBlendMode(id: string, mode: BlendMode) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    commitLayers(
+      updateLayer(document, id, (layer) => ({ ...layer, blendMode: mode })),
+      'Blend mode'
+    );
+  }
+
+  function reorderLayer(id: string, parentId: string | null, index: number) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    const next = moveLayer(document, id, parentId, index);
+    if (next === document) {
+      notify('That move is not allowed: a group cannot contain itself.', 'error');
+      return;
+    }
+    commitLayers(next, 'Reorder layer', `layer-move:${id}`);
+  }
+
+  async function createLayer(kind: 'pixel' | 'group' | 'adjustment' | 'import') {
+    const document = requireLayerDocument();
+    if (!document || layerBusy) return;
+    if (kind === 'adjustment') {
+      openAdjustmentEditor(null, adjustmentDefinitions[0].build());
+      return;
+    }
+    if (kind === 'group') {
+      const group = createGroupLayer('Group');
+      commitLayers(
+        insertLayer(document, group, null, document.layers.length),
+        'New group'
+      );
+      return;
+    }
+
+    layerBusy = true;
+    try {
+      if (kind === 'pixel') {
+        const created = await createLayerPixels(document.canvasWidth, document.canvasHeight);
+        const layer = createPixelLayer('Layer', created.pixelId, created.width, created.height);
+        commitLayers(insertLayer(document, layer, null, document.layers.length), 'New layer');
+      } else {
+        const path = await open({
+          multiple: false,
+          filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+        });
+        if (typeof path !== 'string') return;
+        const imported = await importLayerImage(path);
+        const layer = createPixelLayer(
+          imported.filename ?? 'Placed image',
+          imported.pixelId,
+          imported.width,
+          imported.height
+        );
+        commitLayers(
+          insertLayer(document, layer, null, document.layers.length),
+          'Place image as layer'
+        );
+      }
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function handleLayerAction(action: LayerPanelAction, id?: string) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    const layerId = id ?? document.activeLayerId;
+    if (!layerId && action !== 'flatten') return;
+    const layer = layerId ? findLayer(document, layerId) : null;
+    if (!layer && action !== 'flatten') return;
+
+    switch (action) {
+      case 'duplicate': {
+        const { document: next } = duplicateLayer(document, layerId as string);
+        commitLayers(next, 'Duplicate layer');
+        return;
+      }
+      case 'delete': {
+        if (layer?.locked) {
+          notify('Unlock this layer before deleting it.', 'error');
+          return;
+        }
+        commitLayers(removeLayer(document, layerId as string), 'Delete layer');
+        return;
+      }
+      case 'group': {
+        const { document: next, group } = groupLayers(document, [layerId as string], 'Group');
+        if (!group) {
+          notify('Those layers cannot be grouped together.', 'error');
+          return;
+        }
+        commitLayers(next, 'Group layers');
+        return;
+      }
+      case 'ungroup': {
+        commitLayers(ungroupLayer(document, layerId as string), 'Ungroup');
+        return;
+      }
+      case 'merge_down':
+        await mergeDown(document, layerId as string);
+        return;
+      case 'flatten':
+        await flattenDocument(document);
+        return;
+      case 'rasterize_transform':
+        await rasterizeTransform(document, layerId as string);
+        return;
+      case 'reset_transform': {
+        commitLayers(
+          updateLayer(document, layerId as string, (entry) => ({
+            ...entry,
+            transform: {
+              translateX: 0,
+              translateY: 0,
+              scaleX: 1,
+              scaleY: 1,
+              rotationDegrees: 0,
+              flipHorizontal: false,
+              flipVertical: false
+            }
+          })),
+          'Reset transform'
+        );
+        return;
+      }
+      case 'edit_adjustment': {
+        if (layer?.content.type !== 'adjustment') return;
+        openAdjustmentEditor(layer.id, layer.content.operation);
+        return;
+      }
+      default:
+        await handleMaskAction(action, document, layerId as string);
+    }
+  }
+
+  async function handleMaskAction(
+    action: LayerPanelAction,
+    document: LayerDocument,
+    layerId: string
+  ) {
+    const layer = findLayer(document, layerId);
+    if (!layer) return;
+    try {
+      switch (action) {
+        case 'mask_white':
+        case 'mask_black': {
+          const created = await createLayerMask(document, layerId, action === 'mask_white');
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({
+              ...entry,
+              mask: { snapshot: created.snapshot, enabled: true, inverted: false }
+            })),
+            action === 'mask_white' ? 'Add mask' : 'Add hiding mask'
+          );
+          editTarget = 'mask';
+          return;
+        }
+        case 'mask_from_selection': {
+          if (!selectionState.activeMask) {
+            notify('Make a selection first.', 'error');
+            return;
+          }
+          const created = await layerMaskFromSelection(
+            document,
+            layerId,
+            selectionState.activeMask
+          );
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({
+              ...entry,
+              mask: { snapshot: created.snapshot, enabled: true, inverted: false }
+            })),
+            layer.mask ? 'Replace mask from selection' : 'Mask from selection'
+          );
+          editTarget = 'mask';
+          return;
+        }
+        case 'mask_load_selection': {
+          const loaded = await selectionFromLayerMask(document, layerId);
+          const diagnostics = await inspectSelectionMask(loaded.snapshot).catch(() => null);
+          commitSelectionState({
+            ...selectionState,
+            activeMask: loaded.snapshot,
+            activeDiagnostics: diagnostics,
+            canvasWidth: loaded.width,
+            canvasHeight: loaded.height
+          });
+          notify('The layer mask is now the active selection.');
+          return;
+        }
+        case 'mask_invert': {
+          if (!layer.mask) return;
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({
+              ...entry,
+              mask: entry.mask ? { ...entry.mask, inverted: !entry.mask.inverted } : null
+            })),
+            'Invert mask'
+          );
+          return;
+        }
+        case 'mask_toggle': {
+          if (!layer.mask) return;
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({
+              ...entry,
+              mask: entry.mask ? { ...entry.mask, enabled: !entry.mask.enabled } : null
+            })),
+            layer.mask.enabled ? 'Disable mask' : 'Enable mask'
+          );
+          return;
+        }
+        case 'mask_delete': {
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({ ...entry, mask: null })),
+            'Delete mask'
+          );
+          if (editTarget === 'mask') editTarget = 'layer';
+          return;
+        }
+        case 'mask_apply': {
+          if (!layer.mask || layer.content.type !== 'pixel') return;
+          layerBusy = true;
+          const masked = { ...layer, mask: layer.mask };
+          const isolated = createDocument(document.canvasWidth, document.canvasHeight, [
+            { ...masked, transform: masked.transform, opacity: 1, blendMode: 'normal' }
+          ]);
+          const baked = await mergeLayerPixels(isolated, [masked.id]);
+          commitLayers(
+            updateLayer(document, layerId, (entry) => ({
+              ...entry,
+              mask: null,
+              transform: {
+                translateX: 0,
+                translateY: 0,
+                scaleX: 1,
+                scaleY: 1,
+                rotationDegrees: 0,
+                flipHorizontal: false,
+                flipVertical: false
+              },
+              content: {
+                type: 'pixel',
+                pixelId: baked.pixelId,
+                width: baked.width,
+                height: baked.height
+              }
+            })),
+            'Apply mask'
+          );
+          if (editTarget === 'mask') editTarget = 'layer';
+          return;
+        }
+        default:
+          return;
+      }
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function mergeDown(document: LayerDocument, layerId: string) {
+    const path = pathTo(document, layerId);
+    if (!path || path[path.length - 1] === 0) {
+      notify('There is no layer beneath this one to merge into.', 'error');
+      return;
+    }
+    const parentId = parentOf(document, layerId);
+    const siblings = parentId
+      ? childrenOf(findLayer(document, parentId) as Layer)
+      : document.layers;
+    const index = path[path.length - 1];
+    const below = siblings[index - 1];
+    if (!below) return;
+
+    layerBusy = true;
+    try {
+      const merged = await mergeLayerPixels(document, [below.id, layerId]);
+      const replacement = createPixelLayer(
+        below.name,
+        merged.pixelId,
+        merged.width,
+        merged.height
+      );
+      let next = removeLayer(document, layerId);
+      next = removeLayer(next, below.id);
+      next = insertLayer(next, replacement, parentId, index - 1);
+      commitLayers(next, 'Merge down');
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function flattenDocument(document: LayerDocument) {
+    if (document.layers.length === 0) return;
+    layerBusy = true;
+    try {
+      const flattened = await flattenLayerDocument(document);
+      const replacement = createPixelLayer(
+        'Background',
+        flattened.pixelId,
+        flattened.width,
+        flattened.height
+      );
+      commitLayers(
+        createDocument(document.canvasWidth, document.canvasHeight, [replacement]),
+        'Flatten image'
+      );
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function rasterizeTransform(document: LayerDocument, layerId: string) {
+    layerBusy = true;
+    try {
+      const baked = await rasterizeLayerTransform(document, layerId);
+      commitLayers(
+        updateLayer(document, layerId, (entry) => ({
+          ...entry,
+          transform: {
+            translateX: 0,
+            translateY: 0,
+            scaleX: 1,
+            scaleY: 1,
+            rotationDegrees: 0,
+            flipHorizontal: false,
+            flipVertical: false
+          },
+          mask: null,
+          content: {
+            type: 'pixel',
+            pixelId: baked.pixelId,
+            width: baked.width,
+            height: baked.height
+          }
+        })),
+        'Rasterize transform'
+      );
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  function openAdjustmentEditor(
+    layerId: string | null,
+    operation: import('./lib/types/editor').BaseEditOperation
+  ) {
+    adjustmentLayerId = layerId;
+    adjustmentMode = layerId ? 'edit' : 'create';
+    adjustmentDraft = operation;
+  }
+
+  function closeAdjustmentEditor() {
+    adjustmentDraft = null;
+    adjustmentLayerId = null;
+  }
+
+  /**
+   * Live-previews an adjustment while its dialog is open. Editing an existing
+   * layer commits through history with a coalescing key so a slider drag stays
+   * one undo step; creating one only updates the draft until it is confirmed.
+   */
+  function updateAdjustmentDraft(
+    operation: import('./lib/types/editor').BaseEditOperation,
+    coalesceKey?: string
+  ) {
+    adjustmentDraft = operation;
+    const document = layerDocument;
+    if (!document || !adjustmentLayerId) return;
+    commitLayers(
+      updateLayer(document, adjustmentLayerId, (layer) =>
+        layer.content.type === 'adjustment'
+          ? { ...layer, content: { type: 'adjustment', operation } }
+          : layer
+      ),
+      'Adjustment settings',
+      coalesceKey
+    );
+  }
+
+  function confirmAdjustment(operation: import('./lib/types/editor').BaseEditOperation) {
+    const document = layerDocument;
+    if (!document) {
+      closeAdjustmentEditor();
+      return;
+    }
+    if (adjustmentLayerId) {
+      layerHistory.endCoalescing();
+      closeAdjustmentEditor();
+      return;
+    }
+    const layer = createAdjustmentLayer(
+      definitionFor(operation.type)?.label ?? 'Adjustment',
+      operation
+    );
+    commitLayers(
+      insertLayer(document, layer, null, document.layers.length),
+      'New adjustment layer'
+    );
+    closeAdjustmentEditor();
+  }
+
+  /**
+   * Routes a global adjustment according to the panel's target selector.
+   * `document` preserves the pre-Phase-8 behaviour exactly and stays the default.
+   */
+  function routeAdjustment(operation: EditOperation, applyToDocument: () => boolean): boolean {
+    if (adjustmentTarget === 'document' || !layerDocument) return applyToDocument();
+    const base = operation.type === 'masked' ? operation.operation : operation;
+    if (adjustmentTarget === 'adjustmentLayer') {
+      if (!definitionFor(base.type)) {
+        notify('That adjustment cannot become an adjustment layer yet.', 'error');
+        return applyToDocument();
+      }
+      const layer = createAdjustmentLayer(definitionFor(base.type)?.label ?? base.type, base);
+      return commitLayers(
+        insertLayer(layerDocument, layer, null, layerDocument.layers.length),
+        'New adjustment layer'
+      );
+    }
+    void applyOperationsDestructively(base);
+    return true;
+  }
+
+  async function applyOperationsDestructively(
+    operation: import('./lib/types/editor').BaseEditOperation
+  ) {
+    const document = layerDocument;
+    const layerId = document?.activeLayerId;
+    if (!document || !layerId) return;
+    const layer = findLayer(document, layerId);
+    if (layer?.content.type !== 'pixel') {
+      notify('Select a pixel layer to apply this adjustment directly.', 'error');
+      return;
+    }
+    layerBusy = true;
+    try {
+      const result = await applyOperationsToLayer(document, layerId, [operation]);
+      commitLayers(
+        updateLayer(document, layerId, (entry) => ({
+          ...entry,
+          content: {
+            type: 'pixel',
+            pixelId: result.pixelId,
+            width: result.width,
+            height: result.height
+          }
+        })),
+        'Apply to layer'
+      );
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function saveProject(saveAs: boolean) {
+    const document = layerDocument;
+    if (!document) return;
+    let target = projectPath;
+    if (saveAs || !target) {
+      const chosen = await save({
+        defaultPath: `${(metadata?.filename ?? 'project').replace(/\.[^.]+$/, '')}.photoforge`,
+        filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
+      });
+      if (typeof chosen !== 'string') return;
+      target = chosen;
+    }
+    layerBusy = true;
+    try {
+      const result = await saveLayerProject(
+        target,
+        document,
+        cloneOperations(operations),
+        projectCreatedAt || timestamp(),
+        timestamp()
+      );
+      projectPath = result.outputPath;
+      projectDirty = false;
+      notify(`Project saved (${formatBytes(result.bytes)})`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  async function openProject() {
+    if (!confirmDiscardChanges()) return;
+    const chosen = await open({
+      multiple: false,
+      filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
+    });
+    if (typeof chosen !== 'string') return;
+    layerBusy = true;
+    try {
+      const result = await loadLayerProject(chosen);
+      documentId += 1;
+      metadata = {
+        filename: chosen.split(/[\\/]/).pop() ?? 'project.photoforge',
+        width: result.canvasWidth,
+        height: result.canvasHeight,
+        format: 'PhotoForge',
+        fileSize: 0,
+        colorSpace: 'sRGB',
+        bitDepth: 8,
+        hasAlpha: true,
+        createdAt: result.createdAt || null,
+        modifiedAt: result.modifiedAt || null,
+        cameraModel: null,
+        exifAvailable: false
+      };
+      operations = history.replace(result.operations);
+      selectionState = selectionHistory.replace(createSelectionState());
+      historyEvents = [];
+      redoEvents = [];
+      analysis = null;
+      startLayerDocument(result.document, chosen, result.createdAt);
+      syncHistoryActions();
+      schedulePreview();
+      notify(`Project opened (${result.document.layers.length} top-level layers)`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  /** Returns false when the user chooses to keep unsaved layer work. */
+  function confirmDiscardChanges(): boolean {
+    if (!projectDirty) return true;
+    return window.confirm(
+      'This document has unsaved layer changes. Continue and discard them?'
+    );
+  }
+
   function setNumeric(
     type: OperationType,
     value: number,
     defaultValue: number,
     build: (input: number) => EditOperation
   ) {
-    commit(
-      replaceOperation(operations, build(value), Math.abs(value - defaultValue) > 0.0001),
-      type
-    );
+    const enabled = Math.abs(value - defaultValue) > 0.0001;
+    const operation = build(value);
+    // Only a change that actually turns the adjustment on can be redirected to a
+    // layer; returning to the default belongs to the document pipeline so the
+    // existing control keeps behaving as its own reset.
+    if (enabled && adjustmentTarget !== 'document') {
+      routeAdjustment(operation, () =>
+        commit(replaceOperation(operations, operation, enabled), type)
+      );
+      return;
+    }
+    commit(replaceOperation(operations, operation, enabled), type);
   }
 
   function toggle(operation: EditOperation) {
     const enabled = !operations.some((candidate) => operationType(candidate) === operationType(operation));
+    if (enabled && adjustmentTarget !== 'document') {
+      routeAdjustment(operation, () => commit(replaceOperation(operations, operation, enabled)));
+      return;
+    }
     commit(replaceOperation(operations, operation, enabled));
   }
 
@@ -883,6 +1713,12 @@
     enabled: boolean,
     coalesceKey?: string
   ) {
+    if (enabled && adjustmentTarget !== 'document') {
+      routeAdjustment(operation, () =>
+        commit(replaceOperation(operations, operation, enabled), coalesceKey)
+      );
+      return;
+    }
     commit(replaceOperation(operations, operation, enabled), coalesceKey);
   }
 
@@ -900,7 +1736,8 @@
     const paired = kind === 'geometry' || kind === 'compound';
     if ((paired && (!history.canUndo || !selectionHistory.canUndo)) ||
       (kind === 'edit' && !history.canUndo) ||
-      (kind === 'selection' && !selectionHistory.canUndo)) {
+      (kind === 'selection' && !selectionHistory.canUndo) ||
+      (kind === 'layer' && !layerHistory.canUndo)) {
       resetHistoryAtCurrentState();
       syncHistoryActions();
       notify('History was reset because its paired snapshots were unavailable.', 'error');
@@ -909,6 +1746,7 @@
     historyEvents = historyEvents.slice(0, -1);
     history.endCoalescing();
     selectionHistory.endCoalescing();
+    layerHistory.endCoalescing();
     if (paired) {
       operations = history.undo();
       selectionState = selectionHistory.undo();
@@ -917,6 +1755,11 @@
     } else if (kind === 'edit') {
       operations = history.undo();
       schedulePreview();
+    } else if (kind === 'layer') {
+      layerDocument = layerHistory.undo();
+      projectDirty = true;
+      schedulePreview();
+      void refreshThumbnails();
     } else {
       selectionState = selectionHistory.undo();
       persistSelectionState();
@@ -932,7 +1775,8 @@
     const paired = kind === 'geometry' || kind === 'compound';
     if ((paired && (!history.canRedo || !selectionHistory.canRedo)) ||
       (kind === 'edit' && !history.canRedo) ||
-      (kind === 'selection' && !selectionHistory.canRedo)) {
+      (kind === 'selection' && !selectionHistory.canRedo) ||
+      (kind === 'layer' && !layerHistory.canRedo)) {
       resetHistoryAtCurrentState();
       syncHistoryActions();
       notify('Redo history was reset because its paired snapshots were unavailable.', 'error');
@@ -941,6 +1785,7 @@
     redoEvents = redoEvents.slice(0, -1);
     history.endCoalescing();
     selectionHistory.endCoalescing();
+    layerHistory.endCoalescing();
     if (paired) {
       operations = history.redo();
       selectionState = selectionHistory.redo();
@@ -949,6 +1794,11 @@
     } else if (kind === 'edit') {
       operations = history.redo();
       schedulePreview();
+    } else if (kind === 'layer') {
+      layerDocument = layerHistory.redo();
+      projectDirty = true;
+      schedulePreview();
+      void refreshThumbnails();
     } else {
       selectionState = selectionHistory.redo();
       persistSelectionState();
@@ -1663,11 +2513,16 @@
       const exportOperations = cloneOperations(operations);
       exporting = true;
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
-      const result = await invoke<ExportResult>('export_with_profile', {
-        outputPath,
-        operations: exportOperations,
-        profile: selectedProfile
-      });
+      // Exporting renders the visible composite. The editable document is never
+      // flattened just because a flattened image was written.
+      const composite = layerDocument && layeredDocument ? layerDocument : null;
+      const result = composite
+        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile)
+        : await invoke<ExportResult>('export_with_profile', {
+            outputPath,
+            operations: exportOperations,
+            profile: selectedProfile
+          });
       processingTime = result.processingTimeMs;
       notify(`Exported ${result.width} × ${result.height} image`);
     } catch (error) {
@@ -1757,6 +2612,20 @@
         <option value="high_jpeg">High JPEG</option>
         <option value="maximum_compression">Maximum compression</option>
       </select>
+      <ToolButton
+        label="Open project"
+        icon="▤"
+        disabled={opening || exporting || layerBusy}
+        title="Open a PhotoForge project"
+        onclick={openProject}
+      />
+      <ToolButton
+        label={projectDirty ? 'Save project •' : 'Save project'}
+        icon="⌸"
+        disabled={!layerDocument || opening || exporting || layerBusy}
+        title={projectPath ? `Save ${documentTitle}` : 'Save this document as an editable project'}
+        onclick={() => saveProject(false)}
+      />
     </nav>
 
     <div class="history-actions" aria-label="Edit history">
@@ -1830,6 +2699,28 @@
         inert={!metadata || opening}
         aria-disabled={!metadata || opening}
       >
+        {#if layerDocument}
+          <LayersPanel
+            document={layerDocument}
+            thumbnails={layerThumbnails}
+            {editTarget}
+            {adjustmentTarget}
+            disabled={!metadata || opening || exporting || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
+            busy={layerBusy}
+            hasSelection={hasActiveSelection}
+            onselect={selectLayer}
+            ontoggle={toggleLayerField}
+            onrename={renameLayer}
+            onopacity={setLayerOpacity}
+            onblend={setLayerBlendMode}
+            onreorder={reorderLayer}
+            oncreate={createLayer}
+            onaction={handleLayerAction}
+            ontargetchange={(target) => (editTarget = target)}
+            onadjustmenttargetchange={(target) => (adjustmentTarget = target)}
+          />
+        {/if}
+
         <SelectionWorkspace
           state={selectionState}
           disabled={!metadata || opening || geometryMutationBusy}
@@ -2029,6 +2920,17 @@
     oncancel={cancelRefineSelection}
   />
 {/if}
+
+<AdjustmentLayerDialog
+  operation={adjustmentDraft}
+  mode={adjustmentMode}
+  layerName={adjustmentLayerId
+    ? (layerDocument && findLayer(layerDocument, adjustmentLayerId)?.name) || 'adjustment layer'
+    : ''}
+  onchange={updateAdjustmentDraft}
+  onconfirm={confirmAdjustment}
+  oncancel={closeAdjustmentEditor}
+/>
 
 {#if toast}
   <div class="toast" class:error={toastKind === 'error'} role="status">

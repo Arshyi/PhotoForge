@@ -21,7 +21,10 @@ pub fn apply_pipeline(
     Ok(DynamicImage::ImageRgba8(current))
 }
 
-fn apply_operation(image: &RgbaImage, operation: &EditOperation) -> Result<RgbaImage, AppError> {
+pub(crate) fn apply_operation(
+    image: &RgbaImage,
+    operation: &EditOperation,
+) -> Result<RgbaImage, AppError> {
     let output = match operation {
         EditOperation::Brightness { amount } => map_rgb(image, |red, green, blue| {
             let offset = amount * 255.0;

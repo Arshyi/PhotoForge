@@ -1,0 +1,1382 @@
+use super::blend::{clamp_unit, composite_pixel, BlendMode};
+use super::model::{Layer, LayerContent, LayerDocument, MAX_GROUP_DEPTH};
+use super::transform::LayerTransform;
+use crate::domain::EditOperation;
+use crate::error::AppError;
+use crate::image_processing::apply_operation;
+use crate::mask::MaskBitmap;
+use image::{Rgba, RgbaImage};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// Resolves the immutable pixel buffer behind a pixel layer.
+///
+/// The layer tree never carries pixels; it carries buffer identifiers that the
+/// session pixel store resolves. A preview render resolves smaller buffers than
+/// a full-resolution render, which is why the compositor reads dimensions from
+/// the resolved buffer rather than from the document.
+pub trait PixelSource {
+    fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions<'a> {
+    /// Ratio between the buffers this render will resolve and the document's
+    /// declared full-resolution canvas. Layer translations scale with it so a
+    /// preview is a faithful miniature of the export.
+    pub scale: f64,
+    pub cancel: Option<&'a AtomicBool>,
+}
+
+impl Default for RenderOptions<'_> {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            cancel: None,
+        }
+    }
+}
+
+struct RenderContext<'a> {
+    source: &'a dyn PixelSource,
+    scale: f64,
+    cancel: Option<&'a AtomicBool>,
+    canvas_width: u32,
+    canvas_height: u32,
+}
+
+impl RenderContext<'_> {
+    fn check_cancelled(&self) -> Result<(), AppError> {
+        match self.cancel {
+            Some(flag) if flag.load(Ordering::Acquire) => Err(AppError::RenderCancelled),
+            _ => Ok(()),
+        }
+    }
+
+    fn blank_canvas(&self) -> RgbaImage {
+        RgbaImage::from_pixel(self.canvas_width, self.canvas_height, Rgba([0, 0, 0, 0]))
+    }
+}
+
+/// Renders a document's visible composite, clipped to the document canvas.
+///
+/// The traversal is deterministic: layers composite strictly bottom to top, one
+/// thread, in a fixed order, so two renders of the same document and buffers
+/// produce byte-identical output.
+pub fn render_document(
+    document: &LayerDocument,
+    source: &dyn PixelSource,
+    options: RenderOptions<'_>,
+) -> Result<RgbaImage, AppError> {
+    document.validate()?;
+    render_layers(
+        &document.layers,
+        document.canvas_width,
+        document.canvas_height,
+        source,
+        options,
+    )
+}
+
+/// Renders an arbitrary layer stack against a canvas of the given full
+/// resolution. Merge and flatten reuse this with a subset of the tree.
+pub fn render_layers(
+    layers: &[Layer],
+    canvas_width: u32,
+    canvas_height: u32,
+    source: &dyn PixelSource,
+    options: RenderOptions<'_>,
+) -> Result<RgbaImage, AppError> {
+    if !options.scale.is_finite() || options.scale <= 0.0 || options.scale > 1.0 {
+        return Err(AppError::InvalidLayerDocument(
+            "render scale must be greater than zero and no larger than one".into(),
+        ));
+    }
+    let render_width = scaled_dimension(canvas_width, options.scale);
+    let render_height = scaled_dimension(canvas_height, options.scale);
+    let context = RenderContext {
+        source,
+        scale: options.scale,
+        cancel: options.cancel,
+        canvas_width: render_width,
+        canvas_height: render_height,
+    };
+    composite_stack(layers, &context, 1)
+}
+
+fn scaled_dimension(value: u32, scale: f64) -> u32 {
+    let scaled = (f64::from(value) * scale).round();
+    scaled.clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
+/// Composites one stack of siblings onto a transparent backdrop.
+///
+/// Groups are **isolated**: children composite against a transparent buffer of
+/// their own, and only the finished group result is blended into the parent
+/// with the group's mask, opacity, and blend mode. Pass-through groups are not
+/// implemented; see `docs/compositing.md`.
+///
+/// Recursion is bounded because `LayerDocument::validate` rejects any tree
+/// deeper than `MAX_GROUP_DEPTH` before a render begins, and this function
+/// re-checks the depth so a caller that skipped validation still fails closed.
+fn composite_stack(
+    layers: &[Layer],
+    context: &RenderContext<'_>,
+    depth: usize,
+) -> Result<RgbaImage, AppError> {
+    if depth > MAX_GROUP_DEPTH {
+        return Err(AppError::LayerDepthExceeded {
+            depth,
+            limit: MAX_GROUP_DEPTH,
+        });
+    }
+    let mut backdrop = context.blank_canvas();
+    for layer in layers {
+        context.check_cancelled()?;
+        // A hidden layer and a fully transparent layer contribute nothing in
+        // every blend mode, so both are skipped rather than composited.
+        if !layer.visible || layer.opacity <= 0.0 {
+            continue;
+        }
+        match &layer.content {
+            LayerContent::Pixel { pixel_id, .. } => {
+                let buffer = context.source.resolve(pixel_id)?;
+                draw_source(&mut backdrop, buffer.as_ref(), layer, context)?;
+            }
+            LayerContent::Group { children } => {
+                if children.is_empty() {
+                    continue;
+                }
+                let rendered = composite_stack(children, context, depth + 1)?;
+                draw_source(&mut backdrop, &rendered, layer, context)?;
+            }
+            LayerContent::Adjustment { operation } => {
+                apply_adjustment(&mut backdrop, operation, layer, context)?;
+            }
+        }
+    }
+    Ok(backdrop)
+}
+
+/// Scales a layer transform into render space. Only the translation depends on
+/// the render scale; scale, rotation, and flips are relative to the layer's own
+/// dimensions and therefore already scale-free.
+fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
+    LayerTransform {
+        translate_x: (f64::from(transform.translate_x) * scale) as f32,
+        translate_y: (f64::from(transform.translate_y) * scale) as f32,
+        ..*transform
+    }
+}
+
+fn decoded_mask(layer: &Layer) -> Result<Option<MaskBitmap>, AppError> {
+    match &layer.mask {
+        Some(mask) if mask.enabled => Ok(Some(mask.snapshot.decode()?)),
+        _ => Ok(None),
+    }
+}
+
+fn mask_inverted(layer: &Layer) -> bool {
+    layer.mask.as_ref().is_some_and(|mask| mask.inverted)
+}
+
+/// Draws a source buffer through a layer's transform, mask, opacity, and blend
+/// mode, clipped to the canvas.
+fn draw_source(
+    backdrop: &mut RgbaImage,
+    source: &RgbaImage,
+    layer: &Layer,
+    context: &RenderContext<'_>,
+) -> Result<(), AppError> {
+    let (source_width, source_height) = source.dimensions();
+    if source_width == 0 || source_height == 0 {
+        return Ok(());
+    }
+
+    let transform = render_transform(&layer.transform, context.scale);
+    let bounds = transform.document_bounds(source_width, source_height);
+    let Some((x0, y0, x1, y1)) = bounds.clip_to_canvas(context.canvas_width, context.canvas_height)
+    else {
+        // The layer lies wholly outside the canvas.
+        return Ok(());
+    };
+    let inverse = transform.inverse(source_width, source_height)?;
+    let mask = decoded_mask(layer)?;
+    let inverted = mask_inverted(layer);
+    let opacity = clamp_unit(layer.opacity);
+    let blend = layer.blend_mode;
+
+    // Fast path for the most common placement: a whole-pixel position with no
+    // mask, full opacity, and normal blending. Whole-pixel sampling is already
+    // an exact copy and the general formula reduces to plain source-over, so
+    // this produces byte-identical output without any resampling arithmetic.
+    if blend == BlendMode::Normal && mask.is_none() && layer.opacity >= 1.0 {
+        if let Some((offset_x, offset_y)) = transform.integer_translation() {
+            draw_source_over(backdrop, source, offset_x, offset_y, (x0, y0, x1, y1));
+            return Ok(());
+        }
+    }
+
+    for y in y0..y1 {
+        context.check_cancelled()?;
+        for x in x0..x1 {
+            let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
+            let Some(sample) = sample_rgba(source, local_x, local_y) else {
+                continue;
+            };
+            let coverage = opacity
+                * mask_coverage(
+                    mask.as_ref(),
+                    inverted,
+                    local_x,
+                    local_y,
+                    source_width,
+                    source_height,
+                );
+            if coverage <= 0.0 || sample[3] <= 0.0 {
+                continue;
+            }
+            let source_pixel = [sample[0], sample[1], sample[2], sample[3] * coverage];
+            let existing = backdrop.get_pixel(x, y);
+            let result = composite_pixel(unpack(existing), source_pixel, blend);
+            backdrop.put_pixel(x, y, pack(result));
+        }
+    }
+    Ok(())
+}
+
+/// Plain source-over of a whole-pixel-aligned buffer.
+///
+/// Equivalent to the general loop for this case, but it indexes the raw buffers
+/// directly and skips fully transparent source pixels and the blend arithmetic
+/// for fully opaque ones.
+fn draw_source_over(
+    backdrop: &mut RgbaImage,
+    source: &RgbaImage,
+    offset_x: i64,
+    offset_y: i64,
+    region: (u32, u32, u32, u32),
+) {
+    let (x0, y0, x1, y1) = region;
+    let (source_width, source_height) = source.dimensions();
+    let backdrop_width = backdrop.width();
+    let source_raw = source.as_raw();
+    let backdrop_raw: &mut [u8] = backdrop.as_mut();
+
+    for y in y0..y1 {
+        let source_y = i64::from(y) - offset_y;
+        if source_y < 0 || source_y >= i64::from(source_height) {
+            continue;
+        }
+        let source_row = source_y as usize * source_width as usize;
+        let backdrop_row = y as usize * backdrop_width as usize;
+        for x in x0..x1 {
+            let source_x = i64::from(x) - offset_x;
+            if source_x < 0 || source_x >= i64::from(source_width) {
+                continue;
+            }
+            let source_index = (source_row + source_x as usize) * 4;
+            let alpha = source_raw[source_index + 3];
+            if alpha == 0 {
+                continue;
+            }
+            let backdrop_index = (backdrop_row + x as usize) * 4;
+            if alpha == u8::MAX {
+                backdrop_raw[backdrop_index..backdrop_index + 4]
+                    .copy_from_slice(&source_raw[source_index..source_index + 4]);
+                continue;
+            }
+            let source_pixel = [
+                f32::from(source_raw[source_index]) / 255.0,
+                f32::from(source_raw[source_index + 1]) / 255.0,
+                f32::from(source_raw[source_index + 2]) / 255.0,
+                f32::from(alpha) / 255.0,
+            ];
+            let backdrop_pixel = [
+                f32::from(backdrop_raw[backdrop_index]) / 255.0,
+                f32::from(backdrop_raw[backdrop_index + 1]) / 255.0,
+                f32::from(backdrop_raw[backdrop_index + 2]) / 255.0,
+                f32::from(backdrop_raw[backdrop_index + 3]) / 255.0,
+            ];
+            let result = composite_pixel(backdrop_pixel, source_pixel, BlendMode::Normal);
+            for channel in 0..4 {
+                backdrop_raw[backdrop_index + channel] = to_byte(result[channel]);
+            }
+        }
+    }
+}
+
+/// Re-evaluates an adjustment layer against the backdrop beneath it.
+///
+/// An adjustment layer changes colour without contributing coverage, so the
+/// backdrop's alpha is preserved exactly and only the colour channels move,
+/// weighted by the layer's opacity and mask. This is why stacking adjustment
+/// layers never lightens or darkens a transparent edge.
+fn apply_adjustment(
+    backdrop: &mut RgbaImage,
+    operation: &EditOperation,
+    layer: &Layer,
+    context: &RenderContext<'_>,
+) -> Result<(), AppError> {
+    if !operation.supports_adjustment_layer() {
+        return Err(AppError::UnsupportedAdjustmentLayer(
+            operation.kind().to_string(),
+        ));
+    }
+    context.check_cancelled()?;
+    let adjusted = apply_operation(backdrop, operation)?;
+    if adjusted.dimensions() != backdrop.dimensions() {
+        return Err(AppError::InvalidLayerDocument(
+            "an adjustment layer must preserve the canvas dimensions".into(),
+        ));
+    }
+
+    let transform = render_transform(&layer.transform, context.scale);
+    let inverse = transform.inverse(context.canvas_width, context.canvas_height)?;
+    let mask = decoded_mask(layer)?;
+    let inverted = mask_inverted(layer);
+    let opacity = clamp_unit(layer.opacity);
+    let blend = layer.blend_mode;
+
+    for y in 0..context.canvas_height {
+        context.check_cancelled()?;
+        for x in 0..context.canvas_width {
+            let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
+            let coverage = opacity
+                * mask_coverage(
+                    mask.as_ref(),
+                    inverted,
+                    local_x,
+                    local_y,
+                    context.canvas_width,
+                    context.canvas_height,
+                );
+            if coverage <= 0.0 {
+                continue;
+            }
+            let base = unpack(backdrop.get_pixel(x, y));
+            let changed = unpack(adjusted.get_pixel(x, y));
+            let blended = blend.blend(
+                [base[0], base[1], base[2]],
+                [changed[0], changed[1], changed[2]],
+            );
+            let mixed = [
+                base[0] + coverage * (blended[0] - base[0]),
+                base[1] + coverage * (blended[1] - base[1]),
+                base[2] + coverage * (blended[2] - base[2]),
+                base[3],
+            ];
+            backdrop.put_pixel(x, y, pack(mixed));
+        }
+    }
+    Ok(())
+}
+
+fn unpack(pixel: &Rgba<u8>) -> [f32; 4] {
+    [
+        f32::from(pixel[0]) / 255.0,
+        f32::from(pixel[1]) / 255.0,
+        f32::from(pixel[2]) / 255.0,
+        f32::from(pixel[3]) / 255.0,
+    ]
+}
+
+fn pack(color: [f32; 4]) -> Rgba<u8> {
+    Rgba([
+        to_byte(color[0]),
+        to_byte(color[1]),
+        to_byte(color[2]),
+        to_byte(color[3]),
+    ])
+}
+
+fn to_byte(value: f32) -> u8 {
+    (clamp_unit(value) * 255.0).round() as u8
+}
+
+/// Samples a buffer at a continuous layer-space coordinate.
+///
+/// Pixel centres sit at `index + 0.5`. Whole-pixel coordinates take an exact
+/// copy path so an identity or integer translation is lossless; anything else
+/// interpolates in premultiplied space, which is what prevents dark or light
+/// halos around transparent edges. Coordinates outside the buffer return
+/// `None`, and neighbours outside the buffer count as transparent so edges fade
+/// correctly instead of smearing.
+fn sample_rgba(source: &RgbaImage, x: f32, y: f32) -> Option<[f32; 4]> {
+    let (width, height) = source.dimensions();
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
+        return None;
+    }
+
+    let sample_x = x - 0.5;
+    let sample_y = y - 0.5;
+    let base_x = sample_x.floor();
+    let base_y = sample_y.floor();
+    let fraction_x = sample_x - base_x;
+    let fraction_y = sample_y - base_y;
+
+    if fraction_x == 0.0 && fraction_y == 0.0 {
+        let ix = base_x as i64;
+        let iy = base_y as i64;
+        if ix >= 0 && iy >= 0 && ix < i64::from(width) && iy < i64::from(height) {
+            return Some(unpack(source.get_pixel(ix as u32, iy as u32)));
+        }
+    }
+
+    let mut accumulated = [0.0_f32; 4];
+    for (offset_y, weight_y) in [(0_i64, 1.0 - fraction_y), (1, fraction_y)] {
+        if weight_y <= 0.0 {
+            continue;
+        }
+        for (offset_x, weight_x) in [(0_i64, 1.0 - fraction_x), (1, fraction_x)] {
+            if weight_x <= 0.0 {
+                continue;
+            }
+            let ix = base_x as i64 + offset_x;
+            let iy = base_y as i64 + offset_y;
+            if ix < 0 || iy < 0 || ix >= i64::from(width) || iy >= i64::from(height) {
+                continue;
+            }
+            let weight = weight_x * weight_y;
+            let pixel = unpack(source.get_pixel(ix as u32, iy as u32));
+            let alpha = pixel[3];
+            accumulated[0] += pixel[0] * alpha * weight;
+            accumulated[1] += pixel[1] * alpha * weight;
+            accumulated[2] += pixel[2] * alpha * weight;
+            accumulated[3] += alpha * weight;
+        }
+    }
+
+    if accumulated[3] <= 0.0 {
+        return Some([0.0, 0.0, 0.0, 0.0]);
+    }
+    Some([
+        clamp_unit(accumulated[0] / accumulated[3]),
+        clamp_unit(accumulated[1] / accumulated[3]),
+        clamp_unit(accumulated[2] / accumulated[3]),
+        clamp_unit(accumulated[3]),
+    ])
+}
+
+/// Samples a layer mask at a layer-space coordinate.
+///
+/// The mask is stored at the layer's full-resolution dimensions, so a preview
+/// render samples it normalised against the layer's space rather than
+/// resampling the whole coverage bitmap first.
+fn mask_coverage(
+    mask: Option<&MaskBitmap>,
+    inverted: bool,
+    local_x: f32,
+    local_y: f32,
+    space_width: u32,
+    space_height: u32,
+) -> f32 {
+    let Some(mask) = mask else {
+        return 1.0;
+    };
+    if space_width == 0 || space_height == 0 {
+        return 0.0;
+    }
+    let u = local_x / space_width as f32;
+    let v = local_y / space_height as f32;
+    let x = (u * mask.width() as f32 - 0.5).clamp(0.0, mask.width().saturating_sub(1) as f32);
+    let y = (v * mask.height() as f32 - 0.5).clamp(0.0, mask.height().saturating_sub(1) as f32);
+    if !x.is_finite() || !y.is_finite() {
+        return 0.0;
+    }
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(mask.width() - 1);
+    let y1 = (y0 + 1).min(mask.height() - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let top = f32::from(mask.get(x0, y0)) * (1.0 - fx) + f32::from(mask.get(x1, y0)) * fx;
+    let bottom = f32::from(mask.get(x0, y1)) * (1.0 - fx) + f32::from(mask.get(x1, y1)) * fx;
+    let coverage = (top * (1.0 - fy) + bottom * fy) / 255.0;
+    let coverage = clamp_unit(coverage);
+    if inverted {
+        1.0 - coverage
+    } else {
+        coverage
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    pub struct MapSource {
+        buffers: HashMap<String, Arc<RgbaImage>>,
+    }
+
+    impl MapSource {
+        pub fn insert(&mut self, id: &str, image: RgbaImage) {
+            self.buffers.insert(id.to_string(), Arc::new(image));
+        }
+
+        pub fn with(id: &str, image: RgbaImage) -> Self {
+            let mut source = Self::default();
+            source.insert(id, image);
+            source
+        }
+    }
+
+    impl PixelSource for MapSource {
+        fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError> {
+            self.buffers
+                .get(pixel_id)
+                .cloned()
+                .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))
+        }
+    }
+
+    pub fn solid(width: u32, height: u32, color: [u8; 4]) -> RgbaImage {
+        RgbaImage::from_pixel(width, height, Rgba(color))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+    use super::*;
+    use crate::domain::CropOverlay;
+    use crate::layers::blend::BlendMode;
+    use crate::layers::model::fixtures::*;
+    use crate::layers::model::{LayerMask, LayerMetadata};
+    use crate::mask::MaskSnapshot;
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const CLEAR: [u8; 4] = [0, 0, 0, 0];
+
+    fn document_with(layers: Vec<Layer>, width: u32, height: u32) -> LayerDocument {
+        LayerDocument {
+            schema_version: crate::layers::model::LAYER_SCHEMA_VERSION,
+            canvas_width: width,
+            canvas_height: height,
+            layers,
+            active_layer_id: None,
+        }
+    }
+
+    fn two_layer_source() -> MapSource {
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(4, 4, BLUE));
+        source.insert("pxtop", solid(4, 4, RED));
+        source
+    }
+
+    fn stack(mode: BlendMode, top_opacity: f32) -> (LayerDocument, MapSource) {
+        let mut top = pixel_layer("top", 4, 4);
+        top.blend_mode = mode;
+        top.opacity = top_opacity;
+        (
+            document_with(vec![pixel_layer("bottom", 4, 4), top], 4, 4),
+            two_layer_source(),
+        )
+    }
+
+    fn render(document: &LayerDocument, source: &MapSource) -> RgbaImage {
+        render_document(document, source, RenderOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn an_empty_document_renders_a_transparent_canvas() {
+        let document = document_with(vec![], 3, 2);
+        let rendered = render(&document, &MapSource::default());
+        assert_eq!(rendered.dimensions(), (3, 2));
+        for pixel in rendered.pixels() {
+            assert_eq!(pixel.0, CLEAR);
+        }
+    }
+
+    #[test]
+    fn a_single_opaque_layer_reproduces_its_pixels_exactly() {
+        let document = document_with(vec![pixel_layer("only", 4, 4)], 4, 4);
+        let source = MapSource::with("pxonly", solid(4, 4, RED));
+        let rendered = render(&document, &source);
+        for pixel in rendered.pixels() {
+            assert_eq!(pixel.0, RED);
+        }
+    }
+
+    #[test]
+    fn red_over_blue_in_normal_mode_shows_only_red() {
+        let (document, source) = stack(BlendMode::Normal, 1.0);
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, RED);
+        assert_eq!(rendered.get_pixel(3, 3).0, RED);
+    }
+
+    #[test]
+    fn fifty_percent_red_over_blue_is_the_documented_midpoint() {
+        let (document, source) = stack(BlendMode::Normal, 0.5);
+        let rendered = render(&document, &source);
+        // 255 * 0.5 rounds to 128 on red; blue keeps 255 * 0.5 = 128.
+        assert_eq!(rendered.get_pixel(1, 1).0, [128, 0, 128, 255]);
+    }
+
+    #[test]
+    fn multiply_screen_and_overlay_match_hand_computed_values() {
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(2, 2, [200, 100, 50, 255]));
+        source.insert("pxtop", solid(2, 2, [128, 128, 128, 255]));
+
+        let cases = [
+            // multiply: round(200/255 * 128/255 * 255) = 100
+            (BlendMode::Multiply, [100, 50, 25, 255]),
+            // screen: b + s - b*s
+            (BlendMode::Screen, [228, 178, 153, 255]),
+            // overlay with a 0.5 source is an identity on the backdrop
+            (BlendMode::Overlay, [200, 100, 50, 255]),
+            (BlendMode::Darken, [128, 100, 50, 255]),
+            (BlendMode::Lighten, [200, 128, 128, 255]),
+            // difference: |b - s|
+            (BlendMode::Difference, [72, 28, 78, 255]),
+        ];
+        for (mode, expected) in cases {
+            let mut top = pixel_layer("top", 2, 2);
+            top.blend_mode = mode;
+            let document = document_with(vec![pixel_layer("bottom", 2, 2), top], 2, 2);
+            let rendered = render(&document, &source);
+            let actual = rendered.get_pixel(0, 0).0;
+            for channel in 0..4 {
+                assert!(
+                    actual[channel].abs_diff(expected[channel]) <= 1,
+                    "{}: {actual:?} != {expected:?}",
+                    mode.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rendering_is_deterministic_across_repeated_runs() {
+        let (document, source) = stack(BlendMode::Overlay, 0.63);
+        let first = render(&document, &source);
+        let second = render(&document, &source);
+        let third = render_document(&document, &source, RenderOptions::default()).unwrap();
+        assert_eq!(first.as_raw(), second.as_raw());
+        assert_eq!(first.as_raw(), third.as_raw());
+    }
+
+    #[test]
+    fn hidden_and_fully_transparent_layers_contribute_nothing() {
+        let mut hidden = pixel_layer("top", 4, 4);
+        hidden.visible = false;
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), hidden], 4, 4);
+        let source = two_layer_source();
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, BLUE);
+
+        let mut transparent = pixel_layer("top", 4, 4);
+        transparent.opacity = 0.0;
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), transparent], 4, 4);
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, BLUE);
+    }
+
+    #[test]
+    fn a_locked_layer_still_renders_because_locking_only_blocks_editing() {
+        let mut locked = pixel_layer("only", 4, 4);
+        locked.locked = true;
+        let document = document_with(vec![locked], 4, 4);
+        let source = MapSource::with("pxonly", solid(4, 4, RED));
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, RED);
+    }
+
+    #[test]
+    fn a_missing_pixel_buffer_fails_closed() {
+        let document = document_with(vec![pixel_layer("only", 4, 4)], 4, 4);
+        assert!(matches!(
+            render_document(&document, &MapSource::default(), RenderOptions::default()),
+            Err(AppError::LayerPixelsMissing(_))
+        ));
+    }
+
+    #[test]
+    fn a_layer_mask_produces_partial_coverage() {
+        let mut mask = MaskBitmap::empty(4, 4).unwrap();
+        for y in 0..4 {
+            mask.set(0, y, 255);
+            mask.set(1, y, 128);
+        }
+        let mut top = pixel_layer("top", 4, 4);
+        top.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), top], 4, 4);
+        let source = two_layer_source();
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, RED);
+        let partial = rendered.get_pixel(1, 0).0;
+        assert!(partial[0].abs_diff(128) <= 1 && partial[2].abs_diff(127) <= 1);
+        assert_eq!(rendered.get_pixel(3, 0).0, BLUE);
+    }
+
+    #[test]
+    fn a_disabled_mask_is_ignored_and_an_inverted_mask_swaps_coverage() {
+        let mask = MaskBitmap::empty(4, 4).unwrap();
+        let mut top = pixel_layer("top", 4, 4);
+        top.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: false,
+            inverted: false,
+        });
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), top.clone()], 4, 4);
+        let source = two_layer_source();
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, RED);
+
+        if let Some(mask) = top.mask.as_mut() {
+            mask.enabled = true;
+        }
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), top.clone()], 4, 4);
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, BLUE);
+
+        if let Some(mask) = top.mask.as_mut() {
+            mask.inverted = true;
+        }
+        let document = document_with(vec![pixel_layer("bottom", 4, 4), top], 4, 4);
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, RED);
+    }
+
+    #[test]
+    fn masks_and_opacity_multiply_together() {
+        let mut mask = MaskBitmap::empty(2, 2).unwrap();
+        for y in 0..2 {
+            for x in 0..2 {
+                mask.set(x, y, 128);
+            }
+        }
+        let mut top = pixel_layer("top", 2, 2);
+        top.opacity = 0.5;
+        top.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(2, 2, BLUE));
+        source.insert("pxtop", solid(2, 2, RED));
+        let document = document_with(vec![pixel_layer("bottom", 2, 2), top], 2, 2);
+        let rendered = render(&document, &source);
+        // coverage = 0.5 * (128/255) ~= 0.251
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert!(pixel[0].abs_diff(64) <= 2, "{pixel:?}");
+        assert!(pixel[2].abs_diff(191) <= 2, "{pixel:?}");
+        assert_eq!(pixel[3], 255);
+    }
+
+    #[test]
+    fn transparent_layers_compose_without_halos_at_their_edges() {
+        let mut top_image = solid(4, 4, CLEAR);
+        top_image.put_pixel(1, 1, Rgba([255, 255, 255, 255]));
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(4, 4, [0, 0, 0, 255]));
+        source.insert("pxtop", top_image);
+        let document = document_with(
+            vec![pixel_layer("bottom", 4, 4), pixel_layer("top", 4, 4)],
+            4,
+            4,
+        );
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(1, 1).0, [255, 255, 255, 255]);
+        // Neighbours of the opaque pixel keep the backdrop exactly; a halo would
+        // show up as a non-zero colour channel here.
+        assert_eq!(rendered.get_pixel(0, 1).0, [0, 0, 0, 255]);
+        assert_eq!(rendered.get_pixel(2, 1).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn opaque_over_transparent_keeps_the_source_alpha() {
+        let document = document_with(vec![pixel_layer("only", 2, 2)], 2, 2);
+        let source = MapSource::with("pxonly", solid(2, 2, [10, 20, 30, 255]));
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn translucent_over_transparent_preserves_straight_alpha_colour() {
+        let document = document_with(vec![pixel_layer("only", 2, 2)], 2, 2);
+        let source = MapSource::with("pxonly", solid(2, 2, [200, 100, 50, 128]));
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, [200, 100, 50, 128]);
+    }
+
+    #[test]
+    fn translucent_over_translucent_matches_the_alpha_formula() {
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(2, 2, [255, 0, 0, 128]));
+        source.insert("pxtop", solid(2, 2, [0, 0, 255, 128]));
+        let document = document_with(
+            vec![pixel_layer("bottom", 2, 2), pixel_layer("top", 2, 2)],
+            2,
+            2,
+        );
+        let rendered = render(&document, &source);
+        let pixel = rendered.get_pixel(0, 0).0;
+        // ao = a + a(1-a) with a = 128/255 gives roughly 0.753 -> 192.
+        assert!(pixel[3].abs_diff(192) <= 1, "{pixel:?}");
+        assert!(pixel[2].abs_diff(170) <= 2, "{pixel:?}");
+        assert!(pixel[0].abs_diff(85) <= 2, "{pixel:?}");
+    }
+
+    #[test]
+    fn a_layer_smaller_than_the_canvas_only_covers_its_own_area() {
+        let mut small = pixel_layer("small", 2, 2);
+        small.transform = LayerTransform {
+            translate_x: 1.0,
+            translate_y: 1.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![small], 4, 4);
+        let source = MapSource::with("pxsmall", solid(2, 2, RED));
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(1, 1).0, RED);
+        assert_eq!(rendered.get_pixel(2, 2).0, RED);
+        assert_eq!(rendered.get_pixel(0, 0).0, CLEAR);
+        assert_eq!(rendered.get_pixel(3, 3).0, CLEAR);
+    }
+
+    #[test]
+    fn a_layer_larger_than_the_canvas_is_clipped_without_error() {
+        let document = document_with(vec![pixel_layer("big", 8, 8)], 4, 4);
+        let source = MapSource::with("pxbig", solid(8, 8, RED));
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.dimensions(), (4, 4));
+        for pixel in rendered.pixels() {
+            assert_eq!(pixel.0, RED);
+        }
+    }
+
+    #[test]
+    fn a_layer_entirely_outside_the_canvas_contributes_nothing() {
+        let mut offscreen = pixel_layer("gone", 2, 2);
+        offscreen.transform = LayerTransform {
+            translate_x: 500.0,
+            translate_y: 500.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![offscreen], 4, 4);
+        let source = MapSource::with("pxgone", solid(2, 2, RED));
+        let rendered = render(&document, &source);
+        for pixel in rendered.pixels() {
+            assert_eq!(pixel.0, CLEAR);
+        }
+    }
+
+    #[test]
+    fn a_partially_offscreen_layer_keeps_the_visible_part() {
+        let mut half = pixel_layer("half", 4, 4);
+        half.transform = LayerTransform {
+            translate_x: -2.0,
+            translate_y: 0.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![half], 4, 4);
+        let source = MapSource::with("pxhalf", solid(4, 4, RED));
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, RED);
+        assert_eq!(rendered.get_pixel(1, 0).0, RED);
+        assert_eq!(rendered.get_pixel(2, 0).0, CLEAR);
+    }
+
+    #[test]
+    fn integer_translation_moves_pixels_without_resampling() {
+        let mut image = solid(4, 4, CLEAR);
+        image.put_pixel(0, 0, Rgba([12, 34, 56, 255]));
+        let mut layer = pixel_layer("shift", 4, 4);
+        layer.transform = LayerTransform {
+            translate_x: 2.0,
+            translate_y: 1.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![layer], 4, 4);
+        let source = MapSource::with("pxshift", image);
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(2, 1).0, [12, 34, 56, 255]);
+        assert_eq!(rendered.get_pixel(0, 0).0, CLEAR);
+    }
+
+    #[test]
+    fn flips_mirror_layer_content_in_place() {
+        let mut image = solid(2, 1, CLEAR);
+        image.put_pixel(0, 0, Rgba(RED));
+        let mut layer = pixel_layer("flip", 2, 1);
+        layer.transform = LayerTransform {
+            flip_horizontal: true,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![layer], 2, 1);
+        let source = MapSource::with("pxflip", image);
+        let rendered = render(&document, &source);
+        assert_eq!(rendered.get_pixel(1, 0).0, RED);
+        assert_eq!(rendered.get_pixel(0, 0).0, CLEAR);
+    }
+
+    #[test]
+    fn a_layer_mask_travels_with_its_layer_transform() {
+        let mut mask = MaskBitmap::empty(2, 2).unwrap();
+        mask.set(0, 0, 255);
+        let mut layer = pixel_layer("masked", 2, 2);
+        layer.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+        layer.transform = LayerTransform {
+            translate_x: 2.0,
+            translate_y: 2.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![layer], 4, 4);
+        let source = MapSource::with("pxmasked", solid(2, 2, RED));
+        let rendered = render(&document, &source);
+        // The mask hole started at layer pixel (0,0) and moved with the layer.
+        assert_eq!(rendered.get_pixel(2, 2).0, RED);
+        assert_eq!(rendered.get_pixel(3, 3).0, CLEAR);
+    }
+
+    #[test]
+    fn an_adjustment_layer_recomputes_from_parameters_and_keeps_alpha() {
+        let adjustment = adjustment_layer("adj", EditOperation::Brightness { amount: 0.2 });
+        let document = document_with(vec![pixel_layer("base", 2, 2), adjustment], 2, 2);
+        let source = MapSource::with("pxbase", solid(2, 2, [100, 100, 100, 255]));
+        let rendered = render(&document, &source);
+        // 0.2 * 255 = 51 added to each channel.
+        assert_eq!(rendered.get_pixel(0, 0).0, [151, 151, 151, 255]);
+    }
+
+    #[test]
+    fn an_adjustment_layer_never_adds_coverage_to_transparent_pixels() {
+        let adjustment = adjustment_layer("adj", EditOperation::Brightness { amount: 0.5 });
+        let document = document_with(vec![pixel_layer("base", 2, 2), adjustment], 2, 2);
+        let source = MapSource::with("pxbase", solid(2, 2, CLEAR));
+        let rendered = render(&document, &source);
+        for pixel in rendered.pixels() {
+            assert_eq!(pixel.0[3], 0, "adjustment layers must not create coverage");
+        }
+    }
+
+    #[test]
+    fn adjustment_opacity_and_masks_scale_the_effect() {
+        let mut adjustment = adjustment_layer("adj", EditOperation::Brightness { amount: 0.4 });
+        adjustment.opacity = 0.5;
+        let document = document_with(vec![pixel_layer("base", 2, 2), adjustment], 2, 2);
+        let source = MapSource::with("pxbase", solid(2, 2, [100, 100, 100, 255]));
+        let rendered = render(&document, &source);
+        // Full strength adds 102; half opacity adds 51.
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert!(pixel[0].abs_diff(151) <= 1, "{pixel:?}");
+    }
+
+    #[test]
+    fn an_adjustment_layer_only_affects_layers_below_it_in_its_own_group() {
+        let adjustment = adjustment_layer("adj", EditOperation::Grayscale);
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(2, 2, RED));
+        source.insert("pxtop", solid(2, 2, [0, 0, 255, 255]));
+        let document = document_with(
+            vec![
+                pixel_layer("bottom", 2, 2),
+                adjustment,
+                pixel_layer("top", 2, 2),
+            ],
+            2,
+            2,
+        );
+        let rendered = render(&document, &source);
+        // The top layer sits above the adjustment and keeps its colour.
+        assert_eq!(rendered.get_pixel(0, 0).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn adjustment_layers_reject_geometry_operations_at_render_time() {
+        let mut layer = pixel_layer("adj", 2, 2);
+        layer.content = LayerContent::Adjustment {
+            operation: Box::new(EditOperation::Crop {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+                aspect_ratio: None,
+                overlay: CropOverlay::None,
+            }),
+        };
+        let document = document_with(vec![layer], 2, 2);
+        assert!(matches!(
+            render_document(&document, &MapSource::default(), RenderOptions::default()),
+            Err(AppError::UnsupportedAdjustmentLayer(_))
+        ));
+    }
+
+    #[test]
+    fn groups_composite_their_children_in_order() {
+        let group = group_layer(
+            "g",
+            vec![pixel_layer("bottom", 4, 4), pixel_layer("top", 4, 4)],
+        );
+        let document = document_with(vec![group], 4, 4);
+        let source = two_layer_source();
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, RED);
+    }
+
+    #[test]
+    fn group_opacity_applies_to_the_finished_group_not_each_child() {
+        // Two stacked opaque children inside a 50% group must read as a single
+        // 50% result, which is what isolated group compositing guarantees.
+        let mut group = group_layer(
+            "g",
+            vec![pixel_layer("bottom", 2, 2), pixel_layer("top", 2, 2)],
+        );
+        group.opacity = 0.5;
+        let mut source = two_layer_source();
+        source.insert("pxback", solid(2, 2, [0, 0, 0, 255]));
+        let document = document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        let rendered = render(&document, &source);
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert!(pixel[0].abs_diff(128) <= 1, "{pixel:?}");
+        assert_eq!(pixel[2], 0);
+    }
+
+    #[test]
+    fn nested_group_transparency_accumulates_correctly() {
+        let inner = group_layer("inner", vec![pixel_layer("top", 2, 2)]);
+        let mut inner_with_opacity = inner;
+        inner_with_opacity.opacity = 0.5;
+        let mut outer = group_layer("outer", vec![inner_with_opacity]);
+        outer.opacity = 0.5;
+        let mut source = two_layer_source();
+        source.insert("pxback", solid(2, 2, [0, 0, 0, 255]));
+        let document = document_with(vec![pixel_layer("back", 2, 2), outer], 2, 2);
+        let rendered = render(&document, &source);
+        // 0.5 * 0.5 = 0.25 of red over black.
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert!(pixel[0].abs_diff(64) <= 2, "{pixel:?}");
+        assert_eq!(pixel[3], 255);
+    }
+
+    #[test]
+    fn an_empty_group_is_a_no_op() {
+        let document = document_with(
+            vec![pixel_layer("base", 2, 2), group_layer("g", vec![])],
+            2,
+            2,
+        );
+        let source = MapSource::with("pxbase", solid(2, 2, RED));
+        assert_eq!(render(&document, &source).get_pixel(0, 0).0, RED);
+    }
+
+    #[test]
+    fn a_group_mask_and_blend_mode_apply_to_the_whole_group() {
+        let mut group = group_layer("g", vec![pixel_layer("top", 2, 2)]);
+        group.blend_mode = BlendMode::Multiply;
+        let mut source = two_layer_source();
+        source.insert("pxback", solid(2, 2, [128, 128, 128, 255]));
+        let document = document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        let rendered = render(&document, &source);
+        // multiply(128, red) keeps the red channel and zeroes the others.
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert_eq!(pixel[0], 128);
+        assert_eq!(pixel[1], 0);
+        assert_eq!(pixel[2], 0);
+    }
+
+    #[test]
+    fn an_adjustment_inside_a_group_does_not_reach_outside_it() {
+        let group = group_layer(
+            "g",
+            vec![
+                pixel_layer("top", 2, 2),
+                adjustment_layer("adj", EditOperation::Grayscale),
+            ],
+        );
+        let mut source = two_layer_source();
+        source.insert("pxback", solid(2, 2, BLUE));
+        let document = document_with(vec![pixel_layer("back", 2, 2), group], 2, 2);
+        let rendered = render(&document, &source);
+        // Red inside the group became grey; the blue backdrop outside is intact
+        // beneath an opaque grey, so the result is the grey value.
+        let pixel = rendered.get_pixel(0, 0).0;
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+        assert_ne!(pixel[0], 0);
+    }
+
+    #[test]
+    fn group_recursion_is_rejected_beyond_the_depth_limit() {
+        let mut layer = pixel_layer("leaf", 2, 2);
+        for index in 0..MAX_GROUP_DEPTH {
+            layer = group_layer(&format!("g{index}"), vec![layer]);
+        }
+        let document = document_with(vec![layer], 2, 2);
+        assert!(matches!(
+            render_document(&document, &MapSource::default(), RenderOptions::default()),
+            Err(AppError::LayerDepthExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn a_preview_scale_produces_a_proportional_canvas() {
+        let document = document_with(vec![pixel_layer("only", 8, 8)], 8, 8);
+        let mut source = MapSource::default();
+        source.insert("pxonly", solid(4, 4, RED));
+        let rendered = render_document(
+            &document,
+            &source,
+            RenderOptions {
+                scale: 0.5,
+                cancel: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rendered.dimensions(), (4, 4));
+        assert_eq!(rendered.get_pixel(0, 0).0, RED);
+    }
+
+    #[test]
+    fn preview_scale_moves_translations_proportionally() {
+        let mut layer = pixel_layer("only", 8, 8);
+        layer.transform = LayerTransform {
+            translate_x: 4.0,
+            translate_y: 0.0,
+            ..LayerTransform::default()
+        };
+        let document = document_with(vec![layer], 8, 8);
+        let mut source = MapSource::default();
+        source.insert("pxonly", solid(4, 4, RED));
+        let rendered = render_document(
+            &document,
+            &source,
+            RenderOptions {
+                scale: 0.5,
+                cancel: None,
+            },
+        )
+        .unwrap();
+        // A 4px translation at half scale lands at 2px in the preview.
+        assert_eq!(rendered.get_pixel(2, 0).0, RED);
+        assert_eq!(rendered.get_pixel(1, 0).0, CLEAR);
+    }
+
+    #[test]
+    fn invalid_render_scales_are_rejected() {
+        let document = document_with(vec![], 4, 4);
+        for scale in [0.0, -1.0, 2.0, f64::NAN] {
+            assert!(render_document(
+                &document,
+                &MapSource::default(),
+                RenderOptions {
+                    scale,
+                    cancel: None
+                }
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn a_render_can_be_cancelled() {
+        let cancel = AtomicBool::new(true);
+        let document = document_with(vec![pixel_layer("only", 4, 4)], 4, 4);
+        let source = MapSource::with("pxonly", solid(4, 4, RED));
+        assert!(matches!(
+            render_document(
+                &document,
+                &source,
+                RenderOptions {
+                    scale: 1.0,
+                    cancel: Some(&cancel)
+                }
+            ),
+            Err(AppError::RenderCancelled)
+        ));
+    }
+
+    #[test]
+    fn an_invalid_document_is_rejected_before_any_pixel_work() {
+        let mut layer = pixel_layer("a", 4, 4);
+        layer.opacity = 5.0;
+        let document = document_with(vec![layer], 4, 4);
+        assert!(
+            render_document(&document, &MapSource::default(), RenderOptions::default()).is_err()
+        );
+    }
+
+    #[test]
+    fn sampling_outside_a_buffer_returns_nothing_rather_than_wrapping() {
+        let image = solid(4, 4, RED);
+        assert!(sample_rgba(&image, -0.1, 1.0).is_none());
+        assert!(sample_rgba(&image, 4.0, 1.0).is_none());
+        assert!(sample_rgba(&image, f32::NAN, 1.0).is_none());
+        assert!(sample_rgba(&image, 3.9, 3.9).is_some());
+    }
+
+    #[test]
+    fn whole_pixel_sampling_is_an_exact_copy() {
+        let mut image = solid(2, 2, CLEAR);
+        image.put_pixel(1, 1, Rgba([3, 5, 7, 199]));
+        let sample = sample_rgba(&image, 1.5, 1.5).unwrap();
+        assert_eq!(pack(sample).0, [3, 5, 7, 199]);
+    }
+
+    #[test]
+    fn mask_coverage_is_neutral_without_a_mask_and_clamped_with_one() {
+        assert_eq!(mask_coverage(None, false, 0.0, 0.0, 4, 4), 1.0);
+        let mut mask = MaskBitmap::empty(4, 4).unwrap();
+        mask.set(0, 0, 255);
+        let coverage = mask_coverage(Some(&mask), false, 0.5, 0.5, 4, 4);
+        assert!((coverage - 1.0).abs() < 1e-5);
+        let inverted = mask_coverage(Some(&mask), true, 0.5, 0.5, 4, 4);
+        assert!(inverted.abs() < 1e-5);
+    }
+
+    #[test]
+    fn fifty_layers_composite_without_error_and_stay_deterministic() {
+        let mut source = MapSource::default();
+        let mut layers = Vec::new();
+        for index in 0..50 {
+            let id = format!("l{index}");
+            source.insert(&format!("px{id}"), solid(8, 8, [index as u8, 10, 20, 128]));
+            let mut layer = pixel_layer(&id, 8, 8);
+            layer.opacity = 0.5;
+            layers.push(layer);
+        }
+        let document = document_with(layers, 8, 8);
+        let first = render(&document, &source);
+        let second = render(&document, &source);
+        assert_eq!(first.as_raw(), second.as_raw());
+        // Alpha accumulates towards opaque. It settles one step short of 255
+        // because each layer's result is quantized back to 8 bits, which is an
+        // inherent property of an 8-bit compositor rather than a lost layer.
+        assert!(
+            first.get_pixel(0, 0).0[3] >= 254,
+            "{:?}",
+            first.get_pixel(0, 0).0
+        );
+    }
+
+    /// The behaviour every existing PhotoForge workflow depends on: a document
+    /// that is one ordinary opaque layer must composite to exactly the pixels
+    /// that were opened, so the document pipeline on top of it produces the
+    /// same result the destructive Phase 7.1 path produced.
+    #[test]
+    fn a_single_layer_document_matches_the_destructive_pipeline_byte_for_byte() {
+        let mut buffer = RgbaImage::new(6, 5);
+        for (index, pixel) in buffer.pixels_mut().enumerate() {
+            let value = (index * 7 % 256) as u8;
+            *pixel = Rgba([value, 255 - value, value / 2, 255]);
+        }
+
+        let document = document_with(vec![pixel_layer("background", 6, 5)], 6, 5);
+        let source = MapSource::with("pxbackground", buffer.clone());
+        let composited = render(&document, &source);
+        assert_eq!(composited.as_raw(), buffer.as_raw());
+
+        let operations = vec![
+            EditOperation::Brightness { amount: 0.1 },
+            EditOperation::Contrast { amount: 0.2 },
+            EditOperation::Grayscale,
+        ];
+        let through_layers = crate::image_processing::apply_pipeline(
+            &image::DynamicImage::ImageRgba8(composited),
+            &operations,
+        )
+        .unwrap();
+        let directly = crate::image_processing::apply_pipeline(
+            &image::DynamicImage::ImageRgba8(buffer),
+            &operations,
+        )
+        .unwrap();
+        assert_eq!(
+            through_layers.to_rgba8().as_raw(),
+            directly.to_rgba8().as_raw()
+        );
+    }
+
+    /// The opaque whole-pixel fast path must be indistinguishable from the
+    /// general sampling path. A fully revealing mask forces the general path
+    /// while leaving coverage at 1.0, so the two results have to match exactly.
+    #[test]
+    fn the_opaque_fast_path_matches_the_general_path_byte_for_byte() {
+        let mut top = RgbaImage::new(6, 5);
+        for (index, pixel) in top.pixels_mut().enumerate() {
+            let value = (index * 11 % 256) as u8;
+            *pixel = Rgba([
+                value,
+                255 - value,
+                value / 3,
+                if index % 5 == 0 { 0 } else { 255 },
+            ]);
+        }
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(6, 5, [30, 60, 90, 255]));
+        source.insert("pxtop", top);
+
+        for translation in [(0.0, 0.0), (2.0, 1.0), (-1.0, 3.0)] {
+            let mut fast = pixel_layer("top", 6, 5);
+            fast.transform = LayerTransform {
+                translate_x: translation.0,
+                translate_y: translation.1,
+                ..LayerTransform::default()
+            };
+            let mut general = fast.clone();
+            general.mask = Some(LayerMask {
+                snapshot: MaskSnapshot::encode(&MaskBitmap::full(6, 5).unwrap()),
+                enabled: true,
+                inverted: false,
+            });
+
+            let fast_result = render(
+                &document_with(vec![pixel_layer("bottom", 6, 5), fast], 6, 5),
+                &source,
+            );
+            let general_result = render(
+                &document_with(vec![pixel_layer("bottom", 6, 5), general], 6, 5),
+                &source,
+            );
+            assert_eq!(
+                fast_result.as_raw(),
+                general_result.as_raw(),
+                "paths disagreed at translation {translation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fast_path_still_honours_partially_transparent_source_pixels() {
+        let mut source = MapSource::default();
+        source.insert("pxbottom", solid(2, 2, [0, 0, 0, 255]));
+        source.insert("pxtop", solid(2, 2, [255, 255, 255, 128]));
+        let document = document_with(
+            vec![pixel_layer("bottom", 2, 2), pixel_layer("top", 2, 2)],
+            2,
+            2,
+        );
+        let pixel = render(&document, &source).get_pixel(0, 0).0;
+        assert!(pixel[0].abs_diff(128) <= 1, "{pixel:?}");
+        assert_eq!(pixel[3], 255);
+    }
+
+    #[test]
+    fn metadata_does_not_influence_the_rendered_result() {
+        let mut layer = pixel_layer("only", 2, 2);
+        layer.metadata = LayerMetadata {
+            created_at: "2026-08-24T00:00:00Z".into(),
+            modified_at: "2026-08-24T00:00:00Z".into(),
+            custom: Default::default(),
+        };
+        let plain = document_with(vec![pixel_layer("only", 2, 2)], 2, 2);
+        let annotated = document_with(vec![layer], 2, 2);
+        let source = MapSource::with("pxonly", solid(2, 2, RED));
+        assert_eq!(
+            render(&plain, &source).as_raw(),
+            render(&annotated, &source).as_raw()
+        );
+    }
+}

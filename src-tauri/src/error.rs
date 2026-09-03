@@ -110,6 +110,40 @@ pub enum AppError {
     MaskCancelled,
     #[error("Mask file access failed: {0}")]
     MaskIo(String),
+    #[error("Invalid layer document: {0}")]
+    InvalidLayerDocument(String),
+    #[error("Invalid layer transform: {0}")]
+    InvalidLayerTransform(String),
+    #[error("Layer document schema version {0} is not supported.")]
+    UnsupportedLayerSchema(u32),
+    #[error("Two layers share the identifier {0}.")]
+    DuplicateLayerId(String),
+    #[error("No layer named {0} exists in this document.")]
+    LayerNotFound(String),
+    #[error(
+        "{layer} cannot be moved into {parent} because that would nest a group inside itself."
+    )]
+    LayerCycle { layer: String, parent: String },
+    #[error("This document nests groups {depth} deep; the limit is {limit}.")]
+    LayerDepthExceeded { depth: usize, limit: usize },
+    #[error("This document contains {count} layers; the limit is {limit}.")]
+    TooManyLayers { count: usize, limit: usize },
+    #[error("{0} cannot be used as an adjustment layer.")]
+    UnsupportedAdjustmentLayer(String),
+    #[error("The pixel data for layer buffer {0} is no longer available. Reopen the project.")]
+    LayerPixelsMissing(String),
+    #[error("This layer is locked. Unlock it before editing.")]
+    LayerLocked(String),
+    #[error("This is not a valid PhotoForge project file: {0}")]
+    ProjectFormat(String),
+    #[error("Project format version {0} is newer than this build of PhotoForge supports.")]
+    UnsupportedProjectVersion(u32),
+    #[error("Project file access failed: {0}")]
+    ProjectIo(String),
+    #[error("This project declares {bytes} bytes, which exceeds the {limit} byte safety limit.")]
+    ProjectTooLarge { bytes: u64, limit: u64 },
+    #[error("The render was cancelled.")]
+    RenderCancelled,
 }
 
 impl AppError {
@@ -165,6 +199,22 @@ impl AppError {
             Self::MaskDimensionMismatch { .. } => "mask_dimension_mismatch",
             Self::MaskCancelled => "mask_cancelled",
             Self::MaskIo(_) => "mask_io",
+            Self::InvalidLayerDocument(_) => "invalid_layer_document",
+            Self::InvalidLayerTransform(_) => "invalid_layer_transform",
+            Self::UnsupportedLayerSchema(_) => "unsupported_layer_schema",
+            Self::DuplicateLayerId(_) => "duplicate_layer_id",
+            Self::LayerNotFound(_) => "layer_not_found",
+            Self::LayerCycle { .. } => "layer_cycle",
+            Self::LayerDepthExceeded { .. } => "layer_depth_exceeded",
+            Self::TooManyLayers { .. } => "too_many_layers",
+            Self::UnsupportedAdjustmentLayer(_) => "unsupported_adjustment_layer",
+            Self::LayerPixelsMissing(_) => "layer_pixels_missing",
+            Self::LayerLocked(_) => "layer_locked",
+            Self::ProjectFormat(_) => "project_format",
+            Self::UnsupportedProjectVersion(_) => "unsupported_project_version",
+            Self::ProjectIo(_) => "project_io",
+            Self::ProjectTooLarge { .. } => "project_too_large",
+            Self::RenderCancelled => "render_cancelled",
         }
     }
 }

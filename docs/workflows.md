@@ -2,6 +2,29 @@
 
 Workflows are reusable, local, typed edit pipelines introduced in PhotoForge 0.6.0 and extended with immutable mask snapshots in 0.7.0. Recording a workflow copies the current operation list; it never stores source image pixels or source paths.
 
+## Workflows and layers in 0.8.0
+
+Workflows remain document-pipeline recordings and are **unchanged** by Phase 8.
+The workflow schema version stays at 1, existing Phase 6 and 7 workflow files
+load and replay exactly as before, and no migration is performed on them.
+
+A workflow's operations apply to the document pipeline, which in a layered
+document runs on the finished composite. Replaying a workflow therefore produces
+the same visible result it always did, and it cannot silently target the wrong
+layer because it does not reference layers at all.
+
+Layer-aware workflow steps — select layer, apply to layer, create adjustment
+layer, create mask from selection, set opacity, set blend mode, merge, export
+composite — are **not** implemented in 0.8.0. The design constraint for a future
+phase is recorded here so it is not lost: such a step must reference a stable
+layer identifier or a deterministic selector, must fail closed when the
+referenced layer is missing rather than falling back to another layer, and must
+carry its own schema version bump. The layer model already provides the stable
+identifiers this requires.
+
+Batch processing is likewise unchanged. Ordinary image batches behave exactly as
+in 0.7.1. Batch processing of `.photoforge` project files is not implemented.
+
 ## Library and editor
 
 The workflow library supports save, rename, duplicate, delete, favorite, search, folders, JSON import/export, and deterministic replay. The editor can reorder, delete, duplicate, insert through JSON, and adjust any typed operation parameter. Applying or previewing a workflow commits an ordinary undoable pipeline.

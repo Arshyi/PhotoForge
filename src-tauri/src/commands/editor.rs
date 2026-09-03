@@ -62,6 +62,19 @@ pub async fn open_image(
         return Ok(stale_open_result(loaded.metadata, request_id, started));
     }
 
+    // Rebind the layer store to the new canvas and register the opened image as
+    // the document's background pixel buffer. Every previous document's buffers
+    // are released here, so opening images in sequence cannot accumulate memory.
+    let background_pixel_id = {
+        let mut store = state
+            .layers
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
+        let (width, height) = loaded.original.dimensions();
+        store.reset(width, height)?;
+        store.register(loaded.original.to_rgba8())?
+    };
+
     let result = OpenImageResult {
         metadata: loaded.metadata.clone(),
         original_preview_data_url: preview_data_url.clone(),
@@ -69,6 +82,7 @@ pub async fn open_image(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
         document_id: request_id,
         is_current: true,
+        background_pixel_id,
     };
 
     let mut session = state
@@ -174,6 +188,7 @@ fn stale_open_result(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
         document_id: request_id,
         is_current: false,
+        background_pixel_id: String::new(),
     }
 }
 

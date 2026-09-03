@@ -93,6 +93,19 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Local AI Privacy page plus connection, timing, validation, rejection, success, cancellation, and memory diagnostics
 - Deterministic mock Ollama server and expanded 277-Rust/146-frontend automated coverage without a real Ollama installation
 
+## Phase 8 — Layers and non-destructive editing (complete)
+
+- Real layer tree with pixel layers, nestable groups, and parametric adjustment layers
+- Deterministic compositor with sixteen blend modes and correct straight-alpha compositing
+- Layer masks reusing the Phase 7 mask engine unchanged, with no second mask representation
+- Non-destructive per-layer transforms kept separate from document geometry
+- `.photoforge` project format storing the tree rather than a flattened image
+- Full undo and redo for every layer operation, with gesture coalescing and no pixel snapshots
+- Copy-on-write pixel buffers shared between layers, bounded and released with history
+- Explicit editing target so painting into a mask cannot be mistaken for painting into pixels
+- Existing Phase 1–7.1 behavior preserved: a plain single-layer document keeps the original render and export path
+- Not implemented: pass-through groups, autosave/recovery, layer-aware workflow steps, batch project processing, GPU acceleration, colour management, PSD support, text/vector/smart-object/procedural/neural layers
+
 ## Later, optional AI work
 
 - Lazy-loaded quality assessment, blur/noise estimation, OCR cleanup, super-resolution, and old-photo restoration

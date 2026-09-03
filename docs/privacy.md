@@ -1,5 +1,38 @@
 # Privacy
 
+## Phase 8 layers, projects, and compositing
+
+Layers change nothing about PhotoForge's privacy posture. The layer tree,
+compositing, layer masks, adjustment parameters, thumbnails, merge, flatten, and
+project save and load are entirely local and deterministic. Phase 8 adds no
+network request, telemetry, account, cloud autosave, model download, neural
+inference, or generative feature.
+
+`.photoforge` project files contain the canvas, the layer tree, layer pixel data
+as embedded PNGs, mask coverage as embedded PNGs, adjustment parameters, layer
+names and timestamps, and the document operation pipeline. They contain no
+source file path, no credentials, no code, no command, and no URL. Reading one
+performs no network access, executable loading, script execution, plugin
+loading, or shell command; every payload is a bounded PNG decoded through the
+same limits as an ordinary image import.
+
+Projects are written only to a location the user picks through the native save
+dialog, and only with the `.photoforge` extension. Saving is atomic — a
+temporary sibling file is flushed and renamed — so a failed save never damages
+an existing project. Nothing is written in the background: 0.8.0 has no
+autosave. Unsaved layer changes are tracked and the user is prompted before an
+action would discard them.
+
+Layer pixel buffers live in process memory for the open document only. Opening
+another image or project releases every previous buffer, and buffers unreachable
+from the document or its undo history are released as editing proceeds. Layer
+thumbnails are generated in memory from local pixel data and held in a bounded
+96-entry cache that performs no disk writes and no network requests.
+
+The optional Ollama planner still receives no image, mask, layer, or pixel data.
+It remains a text-to-validated-plan adapter; the deterministic PhotoForge engine
+remains the only thing that changes image state.
+
 ## Phase 7 and 7.1 selections and masks
 
 Selection geometry, mask coverage, named-mask state, refinement, previews, import/export, and masked edits remain on this device. Phase 7 adds no network request, telemetry, scraping, OCR, browser automation, account, marketplace integration, payment flow, model download, neural inference, or cloud service. Magic Wand and Color Range are deterministic pixel comparisons; Refine's selection step uses classical smoothing, morphology, and local gradients and changes only mask coverage.

@@ -414,6 +414,20 @@ impl EditOperation {
         )
     }
 
+    /// Whether this operation can be stored as the parameters of a
+    /// non-destructive adjustment layer.
+    ///
+    /// An adjustment layer re-evaluates its operation against whatever is
+    /// beneath it on every render, so the operation has to preserve the
+    /// backdrop's dimensions and carry no baked pixel payload of its own.
+    /// Geometry changes belong to document geometry, `Masked` already carries a
+    /// mask that a layer mask would duplicate, and `DecontaminateColors`
+    /// requires an explicit selection.
+    pub fn supports_adjustment_layer(&self) -> bool {
+        self.supports_masking()
+            && !matches!(self, Self::DecontaminateColors { .. } | Self::Masked { .. })
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Brightness { .. } => "brightness",
@@ -543,6 +557,9 @@ pub struct OpenImageResult {
     pub processing_time_ms: f64,
     pub document_id: u64,
     pub is_current: bool,
+    /// Identifier of the pixel buffer the opened image was registered under.
+    /// The frontend builds the initial single-layer document around it.
+    pub background_pixel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

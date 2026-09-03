@@ -2,27 +2,33 @@ mod application;
 mod commands;
 pub mod components;
 pub mod domain;
-mod error;
+pub mod error;
 mod image_processing;
 pub mod infrastructure;
+pub mod layers;
 pub mod mask;
 mod network_policy;
 
 use application::AppState;
 use commands::{
-    analyze_image, cancel_batch, cancel_mask_operation, cancel_ollama_plan, color_range_selection,
-    compare_planners, compose_selection_masks, create_point_operation, discover_models,
-    export_image, export_mask_file, export_mask_png, export_with_profile, export_workflow,
-    generate_edit_plan, generate_histogram, generate_ollama_plan, get_batch_status,
-    get_component_diagnostics, get_component_snapshot, get_mask_progress, get_ollama_diagnostics,
-    import_mask_file, import_mask_png, import_workflow, inspect_image_pixel,
-    inspect_selection_mask, magic_wand_selection, measure_component_performance, open_image,
-    preview_batch_workflow, rasterize_selection, refine_selection_mask, refresh_ollama_models,
-    remap_selection_masks, render_preview, scan_plugins, select_planner_provider,
-    select_restoration_engine, start_batch_workflow, test_ollama_connection,
-    transform_selection_mask, update_component_configuration, validate_guided_plan,
-    validate_mask_snapshot, validate_ollama_json, validate_plugin_manifest,
-    validate_shortcut_bindings, validate_workflow_json, validate_workspace_layout,
+    analyze_image, apply_operations_to_layer, cancel_batch, cancel_mask_operation,
+    cancel_ollama_plan, color_range_selection, compare_planners, compose_selection_masks,
+    create_layer_mask, create_layer_pixels, create_point_operation, discover_models, export_image,
+    export_layer_composite, export_mask_file, export_mask_png, export_with_profile,
+    export_workflow, flatten_layer_document, generate_edit_plan, generate_histogram,
+    generate_ollama_plan, get_batch_status, get_component_diagnostics, get_component_snapshot,
+    get_mask_progress, get_ollama_diagnostics, import_layer_image, import_mask_file,
+    import_mask_png, import_workflow, inspect_image_pixel, inspect_selection_mask,
+    layer_mask_from_selection, layer_store_report, load_layer_project, magic_wand_selection,
+    measure_component_performance, merge_layer_pixels, open_image, preview_batch_workflow,
+    rasterize_layer_transform, rasterize_selection, refine_selection_mask, refresh_ollama_models,
+    remap_selection_masks, render_layer_composite, render_layer_thumbnail, render_preview,
+    retain_layer_pixels, save_layer_project, scan_plugins, select_planner_provider,
+    select_restoration_engine, selection_from_layer_mask, start_batch_workflow,
+    test_ollama_connection, transform_selection_mask, update_component_configuration,
+    validate_guided_plan, validate_layer_document, validate_mask_snapshot, validate_ollama_json,
+    validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
+    validate_workspace_layout,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -84,7 +90,24 @@ pub fn run() {
             import_mask_file,
             export_mask_file,
             import_mask_png,
-            export_mask_png
+            export_mask_png,
+            render_layer_composite,
+            export_layer_composite,
+            import_layer_image,
+            create_layer_pixels,
+            merge_layer_pixels,
+            flatten_layer_document,
+            rasterize_layer_transform,
+            apply_operations_to_layer,
+            render_layer_thumbnail,
+            layer_mask_from_selection,
+            selection_from_layer_mask,
+            create_layer_mask,
+            validate_layer_document,
+            retain_layer_pixels,
+            layer_store_report,
+            save_layer_project,
+            load_layer_project
         ])
         .run(tauri::generate_context!())
         .expect("PhotoForge failed to start");

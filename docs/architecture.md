@@ -1,5 +1,43 @@
 # Architecture
 
+## Phase 8 layers and compositing boundary
+
+PhotoForge 0.8.0 adds `src-tauri/src/layers`: an independent domain holding the
+layer tree, blend mathematics, per-layer transforms, the deterministic
+compositor, the session pixel store, the selection/layer-mask bridge, and the
+project container. It depends on `domain` for `EditOperation`, on `mask` for
+coverage bitmaps, and on `image_processing` to evaluate an adjustment layer. It
+does not depend on Tauri, the filesystem beyond the project container, or the
+frontend.
+
+Responsibilities are split so that neither side can drift:
+
+- **The frontend owns document state.** `LayerDocument` is pure data — stable
+  identifiers, geometry, parameters, and mask coverage — with no pixels. That is
+  what makes cloning, undo, and serialization cheap, and it is why layer history
+  can store whole trees instead of diffs while sharing untouched subtrees by
+  reference.
+- **Rust owns pixels.** `LayerPixelStore` holds immutable, reference-counted
+  buffers keyed by identifier. Several layers may share one buffer, so
+  duplicating a layer costs a reference rather than a copy, and any edit that
+  changes pixels registers a new buffer — copy-on-write. Buffers stay alive
+  while any document in the undo or redo stacks still references them.
+- **Rust re-validates everything.** Every layer command revalidates the tree at
+  the trust boundary, iteratively, before any pixel work. Validation bounds
+  layer count, nesting depth, identifiers, names, opacity, transforms, mask
+  dimensions, and adjustment operations, and rejects cycles and duplicate
+  identifiers.
+
+Rendering keeps the existing stale-result protocol: a layer render records its
+own request generation, takes a bounded gate, rechecks document and request
+identifiers before encoding, and clones only `Arc` handles before moving CPU
+work to a blocking worker — the session lock is never held during pixel work.
+
+A document that is still one plain full-canvas pixel layer keeps using the
+original Phase 7.1 preview and export path entirely, so ordinary photo editing
+is byte-for-byte unchanged. See [layers.md](layers.md),
+[compositing.md](compositing.md), and [project-format.md](project-format.md).
+
 ## Phase 7 and 7.1 selections and masks boundary
 
 PhotoForge 0.7.0 added selections as a separate, deterministic domain under `src-tauri/src/mask`; 0.7.1 completes its geometry, progress, preview, persistence, and session boundaries. A mask is an 8-bit coverage bitmap with checked dimensions, bounded geometry, and explicit composition semantics. Rectangle, ellipse, polygon, freehand, brush, magic-wand, and color-range tools all produce the same representation. Feathering, morphology, cleanup, border creation, and classical edge refinement transform only coverage values; none reconstruct image content or invoke a model. Opt-in color decontamination is deliberately separate: it is a deterministic, masked-only image operation that changes RGB on partial-coverage edge pixels while preserving alpha.
@@ -38,10 +76,11 @@ PhotoForge is local-first, non-destructive, modular, and conservative with memor
 
 ```text
 Svelte presentation
-  └─ typed Tauri commands: editor, rule/Ollama planning, component registry, diagnostics
+  └─ typed Tauri commands: editor, layers, rule/Ollama planning, component registry, diagnostics
        └─ application state and use-case orchestration
             ├─ components: registries, factories, planners, Ollama HTTP/validation, restoration engines, timeout
             ├─ domain: operations, plans, component capabilities, manifests, validation
+            ├─ layers: layer tree, blend modes, transforms, compositor, pixel store, project container
             ├─ mask: coverage bitmaps, rasterization, transforms, persistence, diagnostics
             ├─ image_processing: deterministic pixel algorithms and mask-aware composition
             └─ infrastructure: decoding, export safety, manifest/model metadata discovery

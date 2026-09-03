@@ -1,5 +1,6 @@
 mod components;
 mod editor;
+mod layers;
 mod mask;
 mod ollama;
 mod planner;
@@ -11,6 +12,13 @@ pub use components::{
     select_restoration_engine, update_component_configuration, validate_plugin_manifest,
 };
 pub use editor::{analyze_image, export_image, open_image, render_preview};
+pub use layers::{
+    apply_operations_to_layer, create_layer_mask, create_layer_pixels, export_layer_composite,
+    flatten_layer_document, import_layer_image, layer_mask_from_selection, layer_store_report,
+    load_layer_project, merge_layer_pixels, rasterize_layer_transform, render_layer_composite,
+    render_layer_thumbnail, retain_layer_pixels, save_layer_project, selection_from_layer_mask,
+    validate_layer_document,
+};
 pub use mask::{
     cancel_mask_operation, color_range_selection, compose_selection_masks, export_mask_file,
     export_mask_png, get_mask_progress, import_mask_file, import_mask_png, inspect_selection_mask,

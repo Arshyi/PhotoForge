@@ -12,7 +12,8 @@ describe('history timeline retention', () => {
     expect(retainedHistorySuffix(events, 2, 2)).toEqual({
       events: ['edit', 'geometry', 'selection'],
       editDepth: 2,
-      selectionDepth: 2
+      selectionDepth: 2,
+      layerDepth: 0
     });
   });
 
@@ -20,7 +21,43 @@ describe('history timeline retention', () => {
     const events: HistoryEvent[] = ['edit', 'edit', 'geometry', 'selection', 'selection'];
     const retained = retainedHistorySuffix(events, 3, 2);
     expect(retained.events).toEqual(['selection', 'selection']);
-    expect(eventDepths(retained.events)).toEqual({ editDepth: 0, selectionDepth: 2 });
+    expect(eventDepths(retained.events)).toEqual({
+      editDepth: 0,
+      selectionDepth: 2,
+      layerDepth: 0
+    });
+  });
+
+  it('counts layer events on their own stack', () => {
+    const events: HistoryEvent[] = ['layer', 'edit', 'layer', 'selection'];
+    expect(eventDepths(events)).toEqual({ editDepth: 1, selectionDepth: 1, layerDepth: 2 });
+  });
+
+  it('evicts the oldest events when layer snapshots run short', () => {
+    const events: HistoryEvent[] = ['layer', 'layer', 'edit', 'layer'];
+    const retained = retainedHistorySuffix(events, 5, 5, 2);
+    expect(retained.events).toEqual(['layer', 'edit', 'layer']);
+    expect(retained.layerDepth).toBe(2);
+    expect(retained.editDepth).toBe(1);
+  });
+
+  it('keeps a layer event that does not consume edit or selection snapshots', () => {
+    const events: HistoryEvent[] = ['edit', 'layer'];
+    const retained = retainedHistorySuffix(events, 1, 0, 1);
+    expect(retained.events).toEqual(['edit', 'layer']);
+    expect(retained).toEqual({
+      events: ['edit', 'layer'],
+      editDepth: 1,
+      selectionDepth: 0,
+      layerDepth: 1
+    });
+  });
+
+  it('never offers selection-panel history for a layer event', () => {
+    expect(selectionPanelHistoryAvailability(['layer'], ['layer'])).toEqual({
+      canUndo: false,
+      canRedo: false
+    });
   });
 
   it('allows selection-panel history only for a top selection event', () => {
@@ -44,11 +81,12 @@ describe('history timeline retention', () => {
 
   it('retains compound edit-and-selection events as paired history entries', () => {
     const events: HistoryEvent[] = ['edit', 'selection', 'compound', 'selection'];
-    expect(eventDepths(events)).toEqual({ editDepth: 2, selectionDepth: 3 });
+    expect(eventDepths(events)).toEqual({ editDepth: 2, selectionDepth: 3, layerDepth: 0 });
     expect(retainedHistorySuffix(events, 1, 2)).toEqual({
       events: ['compound', 'selection'],
       editDepth: 1,
-      selectionDepth: 2
+      selectionDepth: 2,
+      layerDepth: 0
     });
   });
 });

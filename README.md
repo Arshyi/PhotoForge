@@ -2,7 +2,38 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the completed and hardened Phase 7 professional selections and masking system. The current version is **0.7.1**.
+This repository contains the Phase 0 foundation through the Phase 8 layer and non-destructive editing system. The current version is **0.8.0**.
+
+## Layers and non-destructive editing (0.8.0)
+
+PhotoForge is now a layer-based editor. Documents hold a real layer tree — pixel
+layers, nestable groups, and parametric adjustment layers — composited by a
+deterministic renderer with sixteen blend modes, correct straight-alpha
+compositing, per-layer non-destructive transforms, and layer masks that reuse
+the existing Phase 7 mask engine unchanged.
+
+- **Pixel, group, and adjustment layers** with stable identifiers, visibility,
+  lock, opacity, blend mode, transform, mask, and metadata
+- **Non-destructive adjustment layers** that store parameters, never baked
+  pixels, and recompute whenever they change
+- **Layer masks** built from selections, invertible, disableable, applicable,
+  and loadable back as selections
+- **An editable project format**, `.photoforge`, that stores the tree rather
+  than a flattened image
+- **Full undo and redo** for every layer operation, with slider drags and
+  drag-and-drop reorders each collapsing into one logical step
+- **An explicit editing target** so painting into a mask can never be mistaken
+  for painting into pixels
+
+Opening an ordinary photo still produces a single background layer and behaves
+exactly as it did in 0.7.1; the layer machinery only engages once the document
+actually has layers. See [docs/layers.md](docs/layers.md),
+[docs/compositing.md](docs/compositing.md), and
+[docs/project-format.md](docs/project-format.md).
+
+PhotoForge does not support PSD files, GPU acceleration, colour management, or
+generative image editing. Those limits are stated plainly in
+[docs/phase-8-results.md](docs/phase-8-results.md).
 
 ## What works
 

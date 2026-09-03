@@ -91,6 +91,11 @@ export interface OpenImageResult {
   processingTimeMs: number;
   documentId: number;
   isCurrent: boolean;
+  /**
+   * Identifier of the pixel buffer the opened image was registered under. The
+   * frontend builds the initial single-layer document around it.
+   */
+  backgroundPixelId: string;
 }
 
 export interface PreviewResult {
