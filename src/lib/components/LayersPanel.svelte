@@ -1,6 +1,6 @@
 <script lang="ts">
   import MaskThumbnail from './MaskThumbnail.svelte';
-  import { activeLayer, childrenOf, displayRows, isPassThrough } from '../layers/tree';
+  import { activeLayer, childrenOf, countLayers, displayRows, isPassThrough } from '../layers/tree';
   import {
     blendModes,
     layerKindIcons,
@@ -46,7 +46,7 @@
   $: selectedIsPassThrough = Boolean(selected && isPassThrough(selected));
   $: selectedIsAdjustment = selected?.content.type === 'adjustment';
   $: selectedHasMask = Boolean(selected?.mask);
-  $: totalLayers = rows.length;
+  $: totalLayers = countLayers(document);
   $: locked = Boolean(selected?.locked);
   $: multiSelection = selectedIds.length > 1;
 
@@ -58,6 +58,22 @@
     if (disabled) return;
     renamingId = layer.id;
     renameValue = layer.name;
+  }
+
+  /**
+   * Focuses the rename field as soon as it appears and selects its text.
+   *
+   * Without this the field renders unfocused, so typing straight after pressing
+   * Rename goes nowhere and Enter and Escape never reach its key handler.
+   */
+  function autoFocus(node: HTMLInputElement) {
+    node.focus();
+    // Selecting on the next frame, once the click that opened the field has
+    // finished, so the existing name is replaced by what the user types rather
+    // than appended to.
+    const select = () => node.select();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(select);
+    else select();
   }
 
   function commitRename() {
@@ -379,6 +395,7 @@
               {#if renamingId === row.layer.id}
                 <input
                   class="rename-input"
+                  use:autoFocus
                   aria-label={`Rename ${row.layer.name}`}
                   bind:value={renameValue}
                   on:click|stopPropagation

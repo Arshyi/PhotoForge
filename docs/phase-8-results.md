@@ -9,6 +9,12 @@ runtime, or executable plugin.
 Baseline for this phase was commit `16e6afa` (0.7.1), verified clean before any
 change.
 
+**0.8.1** is a bug-fix release on top of the 0.8.0 implementation. A real-browser
+interaction pass found three user-visible defects in the layer UI; because the
+0.8.0 artifacts had already been built and hashed, the version was raised and the
+binaries rebuilt so the shipped packages actually contain the fixes. No feature
+or architecture changed in 0.8.1.
+
 ---
 
 # Completed
@@ -379,10 +385,10 @@ Ctrl+Shift+I, and the single-letter tool keys are untouched.
 | Suite | Before (0.7.1) | After (0.8.0) | Added |
 | --- | --- | --- | --- |
 | Rust | 481 | **700** | 219 |
-| Frontend | 415 | **596** | 181 |
-| **Total** | 896 | **1,296** | 400 |
+| Frontend | 415 | **607** | 192 |
+| **Total** | 896 | **1,307** | 411 |
 
-Of these, 211 Rust tests and 177 frontend tests are layer-specific. All previous
+Of these, 211 Rust tests and 188 frontend tests are layer-specific. All previous
 tests still pass unchanged; no test, lint rule, or type check was weakened.
 
 Backend coverage includes layer creation and deletion, stable identifiers,
@@ -416,8 +422,8 @@ the visible drop hint as well as the resulting call.
 | `cargo fmt --check` | Clean |
 | `cargo clippy --all-targets --all-features -- -D warnings` | Clean |
 | `cargo test --all-targets --all-features` | 700 passed, 0 failed |
-| `npm test` | 596 passed, 0 failed |
-| `npm run check` (svelte-check) | 406 files, 0 errors, 0 warnings |
+| `npm test` | 607 passed, 0 failed |
+| `npm run check` (svelte-check) | 410 files, 0 errors, 0 warnings |
 | `npm run build` | Succeeded |
 | `cargo tauri build` | Succeeded, both bundles produced |
 | `cargo audit` | 0 vulnerabilities; 17 pre-existing unmaintained-dependency warnings, unchanged from 0.7.1 |
@@ -518,21 +524,137 @@ nested JSON is rejected by the parser before validation is reached.
 No project file can trigger network access, executable loading, script
 execution, plugin loading, or a shell command.
 
+## Real-browser interaction validation
+
+Performed after the 0.8.0 implementation as a validation and hardening pass. It
+is a distinct level of evidence from the jsdom suite and from packaged desktop
+testing, and the three must not be conflated.
+
+**Real-browser testing is not equivalent to packaged PhotoForge testing at
+Windows 100%, 125%, 150%, and 200% display scaling.**
+
+### How it was done
+
+| | |
+| --- | --- |
+| Browser | Chromium 148.0.7778.280, `devicePixelRatio` 1 |
+| Served by | The project's own Vite dev server |
+| Under test | The real `LayersPanel`, `AdjustmentLayerDialog`, `CurveEditor`, `MaskThumbnail`, and `SliderControl` components, driving the real `layers/tree`, `layers/history`, and `layers/adjustments` modules |
+| Harness | `harness.html` + `src/harness/`, not a Vite build input, so it never reaches `dist/` (verified) |
+| Input | Genuine pointer clicks, click-drags, hovers, modifier-clicks, typing, and key presses dispatched to the page |
+
+The whole layer UI stack has no Tauri import, so it mounts and runs unmodified.
+Backend-only operations — merge, flatten, rasterize, apply mask,
+mask-from-selection, project save and load, export, place-image — were **not
+simulated**; the harness records them as unavailable. Mask fixtures are real
+`MaskSnapshot` values built and checksummed in TypeScript by the application's
+own `decodedCoverageChecksum`, so mask rendering exercised the ordinary path.
+
+### Exercised
+
+Selection, additive multi-selection via Ctrl/Cmd/Shift-click, visibility, lock,
+group expand and collapse, nested groups to depth 6 and an attempted depth 20,
+indentation and `aria-level`, layer creation (pixel, group, adjustment),
+duplicate, delete, rename (open, type, Enter, Escape), opacity by pointer drag,
+blend-mode selection, pass-through and isolated group switching, reorder by the
+move controls, undo and redo, adjustment dialog open and close, adjustment type
+switching, curve editor point add/drag/endpoint/clamping, 53-row panel
+scrolling, and thumbnail rendering.
+
+Drag and drop: Chromium produced genuine `dragstart`/`dragover`/`drop` events
+from synthesized mouse drags for **some** gestures and not others, so native
+HTML5 drag is only intermittently drivable under automation. Where it fired it
+was correct: dropping a layer into a group moved it there, and dragging a group
+onto its own descendant was rejected with the cycle notice, left the tree
+byte-identical, and created no history entry. The move controls exercise the
+same `onreorder` path deterministically and were used to confirm reorder,
+undo, and redo.
+
+### Viewport sizes
+
+1920×1080, 1536×864, 1366×768, 1280×720, 1024×768, 800×600, and a narrow
+420×900. At every size: no horizontal page overflow, the panel stayed inside the
+viewport, no control fell past an edge, no control collapsed below 8 px, no
+layer name truncated, and the layer list scrolled correctly.
+
+### Browser zoom
+
+Browser zoom changes the CSS-pixel viewport, so the zoom levels were covered by
+their equivalent viewports on a 1920×1080 window: 100% → 1920×1080, 125% →
+1536×864, 150% → 1280×720, 200% → 960×540. All were clean. **This is browser
+zoom coverage, not Windows display scaling**, and it does not reproduce
+fractional device-pixel rasterisation.
+
+### Bugs found and fixed
+
+1. **The panel reported the wrong layer count.** The header counted the rows
+   currently on screen, so collapsing a group changed "6 layers" to "3 layers"
+   even though no layer had been removed. Now counts the document.
+2. **The rename field was never focused.** It rendered unfocused, so typing
+   straight after pressing Rename went nowhere and neither Enter nor Escape
+   reached its key handler — rename was effectively unusable without an extra
+   click. Now focuses on open.
+3. **Curve points at the grid edges could not be grabbed.** With an unpadded
+   `0 0 100 100` viewBox the point circles sat half outside the SVG and
+   `overflow: hidden` clipped them; `elementFromPoint` at an endpoint's centre
+   returned the container instead of the circle. Both endpoints were therefore
+   permanently ungrabbable, and any point dragged to full black or full white
+   became stuck there. The viewBox now carries a margin wider than the point
+   radius. Verified afterwards by dragging an endpoint to 50% output with a real
+   pointer while its input stayed anchored at 0.
+
+Each fix has a jsdom regression test. The clipping test asserts the viewBox
+margin rather than the clipping itself, because jsdom has no layout and cannot
+reproduce it — the defect was only observable in a real browser.
+
+### Confirmed correct, not changed
+
+Pointer coordinates mapped exactly: a click at 40% input / 70% output produced
+0.404 / 0.699, and an opacity drag to 25% and 75% produced 23% and 77%. No drag
+offset error at any viewport. Curve point ordering stayed strictly increasing
+when a point was dragged past its neighbours. No stuck drag state after
+releasing outside the control. Selection changes correctly stayed out of undo
+history while edits entered it. Slider drags coalesced into one undo step.
+Collapsing a group while its child was selected kept the selection valid. The
+console stayed clean throughout: no errors, warnings, or rejected promises.
+
+### Not a Phase 8 defect
+
+Below 700 px the application's own stylesheet hides the entire inspector
+`aside`, including the Layers panel. That is a pre-existing Phase 1–7 responsive
+rule, not a layers bug; the harness reproduces the panel at narrow widths by not
+using an `aside`.
+
+### Limitations of this pass
+
+- Global keyboard shortcuts (Ctrl+Shift+N, Ctrl+J, Ctrl+G, Ctrl+Shift+G, Delete)
+  and their suppression while typing live in `App.svelte`'s window handler,
+  which requires Tauri. They were **not** exercised in the browser.
+- Layer masks were exercised with TypeScript-built fixtures; the backend mask
+  commands were not.
+- There is no interactive translate/scale/rotate UI in 0.8.0 — the panel offers
+  only Reset transform and Rasterize — so per-layer transform gestures could not
+  be tested.
+- Native HTML5 drag fired only intermittently under automation.
+- Select-all-on-rename could not be confirmed, because the automation's typing
+  re-collapses the selection; only the focus fix is verified.
+
 ## Release artifacts
 
-Built from this tree at version 0.8.0 and stored in the ignored `release/`
+Built from this tree at version **0.8.1** and stored in the ignored `release/`
 directory, matching existing repository policy. Hashes were written to the
 manifest and then independently recomputed and compared.
 
 | Artifact | Size | SHA-256 |
 | --- | --- | --- |
-| `PhotoForge-portable.exe` | 16,520,704 bytes | `3c18260b1b1490756ce332c7ef936cc395776c89707e6d43df50d103d46d6af4` |
-| `PhotoForge_0.8.0_x64-setup.exe` | 3,695,839 bytes | `0ee4aa9a9c7b2369256b425b353a9bf4039796b85980327f0722c2d561303f12` |
-| `PhotoForge_0.8.0_x64_en-US.msi` | 5,451,776 bytes | `0a14ef7ddc8363e4a6024a2644dbba3b7be8f569dd77e3c220d5267305874234` |
+| `PhotoForge-portable.exe` | 16,552,448 bytes | `45c09ddef7166d9232ee6cf19c3a7c6523957aff2a32ea7c46e138b584ca94a9` |
+| `PhotoForge_0.8.1_x64-setup.exe` | 3,706,580 bytes | `ad037cd540f8695e182dfe3ec410f2d410c5fa0ab02c1afb47b1988d79263769` |
+| `PhotoForge_0.8.1_x64_en-US.msi` | 5,476,352 bytes | `0487ea2a9c5b6a0dbef95f3ba712a284b1116282278176a82b35f7ad7cc6c58a` |
 
 `SHA256SUMS.txt` contains exactly these three entries and all three re-verified
 as MATCH. The portable executable and NSIS installer report `ProductVersion`
-0.8.0; no stale 0.7.1 metadata remains. `Get-AuthenticodeSignature` reports
+0.8.1; the superseded 0.8.0 bundles were removed from `release/` so the manifest
+describes exactly what ships. `Get-AuthenticodeSignature` reports
 **NotSigned** for all three: no legitimate signing identity exists, and no
 self-signed substitute was used.
 
@@ -550,10 +672,10 @@ boundary, because the installer supports a current-user install:
 | Step | Result |
 | --- | --- |
 | Silent install (`/S /CURRENTUSER`) | Exit code 0 |
-| Installed files | `photoforge.exe` (16,520,704 bytes) and `uninstall.exe` (79,104 bytes) in `%LOCALAPPDATA%\PhotoForge` |
-| Registration | `HKCU` uninstall entry: name `PhotoForge`, version `0.8.0`, correct install location and uninstall string |
+| Installed files | `photoforge.exe` (16,552,448 bytes) and `uninstall.exe` in `%LOCALAPPDATA%\PhotoForge` |
+| Registration | `HKCU` uninstall entry: name `PhotoForge`, version `0.8.1`, correct install location and uninstall string |
 | Start Menu | `PhotoForge.lnk` created, resolving to the installed executable |
-| Installed version metadata | `ProductName` PhotoForge, `ProductVersion` 0.8.0 |
+| Installed version metadata | `ProductName` PhotoForge, `ProductVersion` 0.8.1 |
 | Launch | Started, `Responding: True`, window titled `PhotoForge`, ~30 MB working set, terminated cleanly |
 | Silent uninstall (`/S /CURRENTUSER`) | Exit code 0 |
 | Residue | Install directory removed, Start Menu shortcut removed, `HKCU` uninstall key removed, no stray process, no configuration or recovery files left |
@@ -587,17 +709,21 @@ Stated plainly, without hedging.
 
 ## Not verified
 
-5. **The manual GUI matrix was not performed.** No interactive desktop
-    automation was available in this environment. Creating, deleting,
+5. **The packaged desktop GUI matrix was not performed.** A real-browser
+    interaction pass was completed and is recorded above, but it is a different
+    level of evidence: it drives the components in Chromium, not the packaged
+    application in its WebView2 window, and viewport size is not Windows display
+    scaling. No interactive desktop automation was available. Creating,
+    deleting,
     duplicating, reordering, dragging into and out of groups, collapsing,
     renaming, toggling visibility, changing opacity and blend mode, masks,
     adjustment layers, the curve editor, transforms, merge, flatten, undo/redo,
     save, reload, recovery, and export were **not** exercised by hand through
     the running GUI, and were **not** tested at 100%, 125%, 150%, or 200%
-    display scaling. What was verified is process-level: the portable binary
-    starts, responds, and shows its main window. Everything else rests on the
-    automated suite, which covers the panel's rendering and callbacks in jsdom
-    but not real pointer input, real rendering, or DPI behaviour.
+    display scaling. What was verified of the packaged build is process-level:
+    it starts, responds, shows its main window, and installs and uninstalls
+    cleanly. Real pointer, drag, focus, and layout behaviour is covered by the
+    browser pass; **Windows DPI behaviour is covered by neither.**
 6. **The MSI lifecycle was not exercised.** The MSI builds and hashes
     correctly, but it is an all-users package whose installation requires
     elevation, and UAC was not bypassed or automated. The NSIS installer's full

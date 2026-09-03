@@ -1,4 +1,4 @@
-import { createEvent, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import LayersPanel from './LayersPanel.svelte';
 import {
@@ -92,6 +92,35 @@ describe('LayersPanel', () => {
     expect(within(items[0]).getByText('Sky')).toBeTruthy();
     expect(within(items[1]).getByText('Background')).toBeTruthy();
     expect(screen.getByText('2 layers')).toBeTruthy();
+  });
+
+  it('counts every layer in the document, not the rows on screen', () => {
+    // Found in real-browser testing: collapsing a group hid its children and the
+    // header dropped from "6 layers" to "3 layers", because the count came from
+    // the visible rows rather than from the document.
+    const group = createGroupLayer('Group', [pixel('Child'), pixel('Other')]);
+    const expanded = createDocument(16, 16, [pixel('Base'), group]);
+    render(LayersPanel, { props: props(expanded) });
+    expect(screen.getByText('4 layers')).toBeTruthy();
+    expect(screen.getAllByRole('treeitem')).toHaveLength(4);
+    cleanup();
+
+    const collapsed = createDocument(16, 16, [pixel('Base'), { ...group, collapsed: true }]);
+    render(LayersPanel, { props: props(collapsed) });
+    // Two rows are visible, but the document still holds four layers.
+    expect(screen.getAllByRole('treeitem')).toHaveLength(2);
+    expect(screen.getByText('4 layers')).toBeTruthy();
+  });
+
+  it('focuses the rename field as soon as it opens', async () => {
+    // Found in real-browser testing: the field rendered unfocused, so typing
+    // straight after pressing Rename went nowhere and Enter never reached it.
+    const { document, top } = selectedDocument();
+    const value = props(document);
+    render(LayersPanel, { props: value });
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename layer' }));
+    const field = screen.getByLabelText(`Rename ${top.name}`) as HTMLInputElement;
+    expect(window.document.activeElement).toBe(field);
   });
 
   it('shows an empty state when there are no layers', () => {

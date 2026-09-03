@@ -17,6 +17,17 @@
 
   /** Editing area in SVG user units; the viewBox keeps it resolution free. */
   const SIZE = 100;
+  /**
+   * Margin around the editing area, in the same units.
+   *
+   * Points sit at the extreme corners of the grid — the two endpoints always do,
+   * and any point dragged to full black or full white does too. Without this
+   * margin their circles are half outside the SVG and `overflow: hidden` clips
+   * them, which makes them impossible to grab with a pointer. The padding keeps
+   * every point fully inside the drawing surface.
+   */
+  const PAD = 6;
+  const SPAN = SIZE + PAD * 2;
 
   let channel: keyof CurveSet = 'rgb';
   let draggingIndex: number | null = null;
@@ -58,9 +69,13 @@
     output: number;
   } {
     const bounds = surface.getBoundingClientRect();
+    const fractionX = (event.clientX - bounds.left) / (bounds.width || 1);
+    const fractionY = (event.clientY - bounds.top) / (bounds.height || 1);
+    // The surface spans the padded viewBox, so undo the padding before mapping
+    // into curve space.
     return {
-      input: (event.clientX - bounds.left) / (bounds.width || 1),
-      output: 1 - (event.clientY - bounds.top) / (bounds.height || 1)
+      input: (fractionX * SPAN - PAD) / SIZE,
+      output: (SIZE + PAD - fractionY * SPAN) / SIZE
     };
   }
 
@@ -183,7 +198,7 @@
     role="group"
     aria-label={`${channelLabels[channel]} curve with ${points.length} points`}
   >
-    <svg viewBox={`0 0 ${SIZE} ${SIZE}`} preserveAspectRatio="none">
+    <svg viewBox={`${-PAD} ${-PAD} ${SPAN} ${SPAN}`} preserveAspectRatio="none">
       <!-- The grid itself is the add-a-point control. -->
       <rect
         x="0"

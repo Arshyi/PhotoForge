@@ -2,7 +2,7 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 8 layer and non-destructive editing system. The current version is **0.8.0**.
+This repository contains the Phase 0 foundation through the Phase 8 layer and non-destructive editing system. The current version is **0.8.1**, a bug-fix release on the 0.8.0 layers implementation.
 
 ## Layers and non-destructive editing (0.8.0)
 
