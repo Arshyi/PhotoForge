@@ -224,7 +224,9 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Phase 8 results](docs/phase-8-results.md)
 - [Colour pipeline](docs/color-pipeline.md)
 - [RAW development](docs/raw-development.md)
-- [Phase 9 results](docs/phase-9-results.md)
+- [Phase 9 results (historical)](docs/phase-9-results.md)
+- [High-precision architecture](docs/high-precision-rendering.md)
+- [Phase 10 results](docs/phase-10-results.md)
 
 ## Honest scope
 
@@ -236,13 +238,12 @@ path. The Deterministic Engine remains the only component that changes pixels.
 PhotoForge does not install or download models, execute model-supplied code, call
 cloud providers, execute plugins, generate missing content, or reconstruct
 factual detail that was never captured. RAW decoding, demosaicing, and
-source-backed RAW projects are implemented for DNG only. Arbitrary ICC
-management, Display P3, Adobe RGB, float compositing, batch RAW development,
-PSD compatibility, GPU compositing, semantic selection, OCR, neural
-restoration, super-resolution, inpainting, and generative editing remain
-outside this release. The Phase 9
-float/development and inspection primitives are intentionally documented as an
-incomplete foundation rather than a packaged 0.9.0 feature.
+source-backed RAW projects are implemented for the documented DNG subset.
+Phase 10 adds float compositing, RGB ICC input, sRGB/P3/Adobe RGB output and
+batch RAW. Arbitrary output ICC, printer proofing, PSD, GPU compositing,
+semantic selection, OCR, neural restoration, super-resolution, inpainting
+and generative editing remain outside this release. Native/package validation
+limits are listed separately in the Phase 10 report.
 
 ## License
 

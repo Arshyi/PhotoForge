@@ -73,7 +73,9 @@ pixels **and embed the corresponding RGB ICC profile** in PNG/JPEG/WebP. PNG
 supports 8/16 bits; JPEG/WebP are 8-bit. JPEG flattens transparency against white
 in linear light. Export strips source EXIF/GPS and embeds only the chosen ICC.
 Ordered 4x4 Bayer dither affects RGB in 8-bit output only, not alpha, endpoints
-or 16-bit output. Same build/settings/input produce deterministic bytes.
+or 16-bit output. Generated profile header timestamps are fixed to the profile
+definition date (2026-09-04), not the export time. Same build/settings/input
+produce deterministic bytes; input profiles are never rewritten in place.
 
 ## Explicit limits
 

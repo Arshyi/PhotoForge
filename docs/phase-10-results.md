@@ -26,7 +26,7 @@ monitor-profile chain. See [color-pipeline.md](color-pipeline.md).
 
 | Suite | Frozen baseline | Phase 10 |
 | --- | ---: | ---: |
-| Rust unit | 830 | 860 |
+| Rust unit | 830 | 861 |
 | Layer command integration | 39 | 42 (one optional real-file case) |
 | RAW command integration | 21 | 21 |
 | Precision integration | 0 | 8 |
@@ -34,7 +34,7 @@ monitor-profile chain. See [color-pipeline.md](color-pipeline.md).
 | Frontend | 851 / 52 files | 854 / 53 files |
 
 The supplied baseline called 830+39+21+6 "893"; it actually sums to 896.
-Phase 10 enumerates **937** Rust tests. Without downloaded fixtures, seven
+Phase 10 enumerates **938** Rust tests. Without downloaded fixtures, seven
 optional test bodies return early (six real-file plus one layer test). All
 seven also ran separately with actual fixtures, successfully, in release mode.
 The isolated recovery child is the same test, not an extra counted test.
@@ -68,3 +68,69 @@ See [high-precision-rendering.md](high-precision-rendering.md) for exact boundar
 Packaging, final artifact hashes, native GUI/DPI and installer lifecycle checks
 are pending in this source commit. No production signing or zero-process-tree
 networking claim is made. Previous phases are historical evidence only.
+
+## Measured CPU performance and memory
+
+Windows x64, Intel Core i7-12850HX (16 cores / 24 logical), about 128 GiB RAM.
+Release benchmark built from source `5fa058f`, before the subsequent ICC-header
+timestamp-only fix. One run per scenario, a fresh process for each; these are
+measurements, not statistical confidence intervals. CPU load, storage and
+compressibility affect results. The 60.217 MP dimensions represent the common
+61 MP camera class, not exactly 61 million pixels.
+
+The synthetic CFA fixture uses deterministic generated samples. The three-layer
+case **shares one immutable source**; it is not three independent 61 MP sources.
+Peak working set is the actual Windows process high-water mark including fixture
+generation/decode/development, not just renderer allocations and not WebView2.
+`render` excludes decode/development; `export` is file writing after render.
+RAW means decode/develop/store only. Adjustment is +0.25 EV over the RAW layer.
+The legacy render-only comparison quantizes the same developed source first;
+its total setup/peak therefore includes float RAW development too.
+
+| MP / dimensions | Scenario | Decode ms | Develop ms | Render ms | Export ms | Total ms | Peak MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 12.008 / 4240×2832 | raw (1 layer) | 8.6 | 264.8 | 0.0 | 0.0 | 356.1 | 394.1 |
+| 12.008 / 4240×2832 | single (1 layer) | 8.5 | 264.5 | 234.5 | 0.0 | 596.9 | 397.4 |
+| 12.008 / 4240×2832 | adjustment (2 layers) | 8.4 | 273.0 | 383.8 | 0.0 | 753.2 | 580.7 |
+| 12.008 / 4240×2832 | mask (1 layer) | 8.5 | 274.7 | 412.6 | 0.0 | 806.7 | 409.0 |
+| 12.008 / 4240×2832 | multi (3 shared) | 8.6 | 268.6 | 578.3 | 0.0 | 943.1 | 397.4 |
+| 12.008 / 4240×2832 | transform (1 layer) | 9.4 | 266.0 | 310.7 | 0.0 | 676.2 | 397.4 |
+| 12.008 / 4240×2832 | preview (1 layer) | 8.4 | 268.0 | 32.7 | 0.0 | 392.9 | 394.1 |
+| 12.008 / 4240×2832 | export (1 layer) | 9.5 | 266.1 | 233.6 | 4113.2 | 4715.2 | 398.2 |
+| 12.008 / 4240×2832 | legacy (1 layer) | 9.3 | 269.8 | 11.3 | 0.0 | 813.1 | 394.1 |
+| 24.000 / 6000×4000 | raw (1 layer) | 17.0 | 532.5 | 0.0 | 0.0 | 688.9 | 783.0 |
+| 24.000 / 6000×4000 | single (1 layer) | 16.9 | 530.6 | 474.2 | 0.0 | 1173.0 | 783.0 |
+| 24.000 / 6000×4000 | adjustment (2 layers) | 16.8 | 529.1 | 771.8 | 0.0 | 1465.1 | 1129.6 |
+| 24.000 / 6000×4000 | mask (1 layer) | 17.5 | 540.0 | 844.9 | 0.0 | 1596.0 | 786.4 |
+| 24.000 / 6000×4000 | multi (3 shared) | 16.8 | 533.8 | 1146.1 | 0.0 | 1846.4 | 783.0 |
+| 24.000 / 6000×4000 | transform (1 layer) | 17.1 | 530.5 | 625.6 | 0.0 | 1320.3 | 783.0 |
+| 24.000 / 6000×4000 | preview (1 layer) | 18.2 | 528.5 | 32.6 | 0.0 | 716.7 | 783.0 |
+| 24.000 / 6000×4000 | export (1 layer) | 17.1 | 535.7 | 472.2 | 2071.3 | 3247.1 | 783.0 |
+| 24.000 / 6000×4000 | legacy (1 layer) | 16.9 | 535.3 | 22.8 | 0.0 | 1604.2 | 783.0 |
+| 45.441 / 8256×5504 | raw (1 layer) | 34.1 | 1011.8 | 0.0 | 0.0 | 1343.6 | 1478.2 |
+| 45.441 / 8256×5504 | single (1 layer) | 33.3 | 1002.9 | 899.7 | 0.0 | 2193.5 | 1478.2 |
+| 45.441 / 8256×5504 | adjustment (2 layers) | 32.8 | 1012.9 | 1470.9 | 0.0 | 2770.5 | 2111.1 |
+| 45.441 / 8256×5504 | mask (1 layer) | 32.2 | 1012.9 | 1600.1 | 0.0 | 2996.7 | 1478.2 |
+| 45.441 / 8256×5504 | multi (3 shared) | 34.2 | 1050.5 | 2213.0 | 0.0 | 3563.6 | 1478.2 |
+| 45.441 / 8256×5504 | transform (1 layer) | 33.1 | 1021.9 | 1187.4 | 0.0 | 2498.6 | 1478.2 |
+| 45.441 / 8256×5504 | preview (1 layer) | 33.7 | 1005.8 | 33.2 | 0.0 | 1309.7 | 1478.2 |
+| 45.441 / 8256×5504 | export (1 layer) | 33.7 | 1012.1 | 896.3 | 8510.0 | 10713.8 | 1478.2 |
+| 45.441 / 8256×5504 | legacy (1 layer) | 32.1 | 1017.4 | 44.7 | 0.0 | 3050.9 | 1478.2 |
+| 60.217 / 9504×6336 | raw (1 layer) | 47.4 | 1416.6 | 0.0 | 0.0 | 1806.6 | 1957.3 |
+| 60.217 / 9504×6336 | single (1 layer) | 45.5 | 1397.9 | 1239.5 | 0.0 | 3021.2 | 1957.3 |
+| 60.217 / 9504×6336 | adjustment (2 layers) | 45.6 | 1368.5 | 2007.5 | 0.0 | 3757.6 | 2787.5 |
+| 60.217 / 9504×6336 | mask (1 layer) | 45.1 | 1360.2 | 2129.0 | 0.0 | 3989.9 | 1957.3 |
+| 60.217 / 9504×6336 | multi (3 shared) | 46.0 | 1369.1 | 2946.4 | 0.0 | 4693.3 | 1957.3 |
+| 60.217 / 9504×6336 | transform (1 layer) | 45.1 | 1357.2 | 1613.0 | 0.0 | 3349.6 | 1957.3 |
+| 60.217 / 9504×6336 | preview (1 layer) | 45.7 | 1372.7 | 33.3 | 0.0 | 1763.0 | 1957.3 |
+| 60.217 / 9504×6336 | export (1 layer) | 45.2 | 1371.9 | 1197.8 | 13703.3 | 16669.3 | 1957.3 |
+| 60.217 / 9504×6336 | legacy (1 layer) | 47.0 | 1485.5 | 63.7 | 0.0 | 4239.3 | 1957.3 |
+
+The float reference renderer is substantially slower than legacy RGBA8: at
+60.217 MP the measured single-layer render was 1239 ms versus 64 ms legacy.
+Preview rendering remained about 33 ms after source/cache preparation; a cold
+RAW open includes the separately measured development time. PNG16 export at
+that size took 13.7 seconds in this run. The adjustment case peaked near 2.72 GiB.
+These numbers motivate future tiled/filter optimization; no GPU-speed claim is
+made. Reproduce with `cargo build --release --example precision_benchmark` and
+`scripts/benchmark-precision.ps1`.

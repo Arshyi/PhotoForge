@@ -171,7 +171,19 @@ impl RgbColorSpace {
         p
     }
     pub fn icc_bytes(self) -> Result<Vec<u8>, AppError> {
-        self.profile().encode().map_err(cms_error)
+        let mut bytes = self.profile().encode().map_err(cms_error)?;
+        // moxcms 0.8.1's encoder writes the current time, even when the profile
+        // creation_date_time is set. Our built-in definitions are constant:
+        // normalize only their ICC header timestamp to the definition date.
+        // The encoder writes a zero (not calculated) profile ID, so no digest
+        // becomes stale. This never rewrites imported third-party profiles.
+        let date = bytes
+            .get_mut(24..36)
+            .ok_or_else(|| AppError::ColorPipeline("generated ICC header is truncated".into()))?;
+        for (field, value) in date.chunks_exact_mut(2).zip([2026_u16, 9, 4, 0, 0, 0]) {
+            field.copy_from_slice(&value.to_be_bytes());
+        }
+        Ok(bytes)
     }
 }
 
@@ -368,6 +380,21 @@ mod tests {
                 parse_rgb_profile(&bytes).unwrap().color_space,
                 DataColorSpace::Rgb
             );
+        }
+    }
+    #[test]
+    fn generated_profiles_use_a_fixed_definition_date_not_export_time() {
+        for space in [
+            RgbColorSpace::Srgb,
+            RgbColorSpace::DisplayP3,
+            RgbColorSpace::AdobeRgb,
+        ] {
+            let bytes = space.icc_bytes().unwrap();
+            assert_eq!(&bytes[24..36], &[7, 234, 0, 9, 0, 4, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(&bytes[84..100], &[0; 16]);
+            let profile = parse_rgb_profile(&bytes).unwrap();
+            assert_eq!(profile.creation_date_time.year, 2026);
+            assert_eq!(profile.creation_date_time.hours, 0);
         }
     }
     #[test]
