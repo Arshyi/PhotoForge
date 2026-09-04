@@ -13,7 +13,10 @@ pub use components::{
     measure_component_performance, scan_plugins, select_planner_provider,
     select_restoration_engine, update_component_configuration, validate_plugin_manifest,
 };
-pub use editor::{analyze_image, export_developed_png16, export_image, open_image, render_preview};
+pub use editor::{
+    analyze_image, export_developed_png16, export_image, open_image, open_raw_image,
+    render_preview, OpenRawImageResult,
+};
 pub use layers::register_layer_commands;
 pub use layers::{
     apply_operations_to_layer, create_layer_mask, create_layer_pixels, discard_recovery_snapshot,

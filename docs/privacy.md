@@ -1,21 +1,36 @@
 # Privacy
 
-## Phase 9 RAW and precision foundation
+## Phase 9 RAW development
 
-RAW inspection is local and metadata-only in the current checkpoint. The
-inspect_raw command reads a bounded header, computes a local SHA-256 source
-hash in memory, and returns format/capability status; it does not decode,
-modify, upload, or launch anything. Camera metadata fields are optional and
-remain on the device. No GPS or EXIF value is sent to the optional Ollama
-planner. A future linked RAW project must verify the stored hash before
-development and must fail closed when the source is missing or changed.
+RAW decoding and development are entirely local. Opening a camera file reads it,
+decodes it in process, and develops it in memory. Nothing is uploaded, no
+decoder or camera profile is downloaded — not even the first time a format is
+seen — and no process, shell, or library is launched to read a photograph.
+
+The original file is only ever read. Development writes nothing back to it, and
+a test asserts the source bytes are unchanged after decoding.
+
+A project records where its RAW source lives, so a `.photoforge` file contains a
+local path from the machine that made it. That is inherent to a linked source
+and is worth knowing before sharing a project file. The stored SHA-256 is
+verified before development, and a missing or changed source fails closed rather
+than binding to a different photograph.
+
+Camera metadata — make, model, lens, ISO, shutter, aperture, focal length, and
+capture time — is read from the file and stays on the device. It is never sent
+to the optional Ollama planner, which continues to receive text only and no
+image, mask, layer tree, path, or EXIF value.
+
+RAW files are treated as hostile input: sizes and offsets are bounded before
+allocation, and no RAW file can cause a network request. The only thing in the
+repository that touches the network is `scripts/fetch-raw-fixtures.ps1`, which a
+developer runs by hand to download public-domain sample photographs for optional
+tests. It is never invoked by a test or by the application, and normal test runs
+are entirely offline.
 
 The float colour module performs sRGB conversion, development, histogramming,
-and 16-bit PNG encoding locally. The explicit `raw_development` operation may
-use that path for raster previews and the 16-bit export command; the 0.8.2
-project still stores RGBA8 layer buffers and no implicit conversion or network
-service is introduced. Arbitrary ICC profiles and camera RAW decoding are not
-yet enabled.
+and 16-bit PNG encoding locally. Arbitrary ICC profiles are still not read, and
+no colour-management service is contacted.
 
 ## Phase 8 layers, projects, and compositing
 

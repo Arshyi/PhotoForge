@@ -121,7 +121,87 @@ export type RawFormat =
   | 'DNG' | 'CR2' | 'CR3' | 'NEF' | 'ARW' | 'RAF' | 'ORF' | 'RW2'
   | 'PEF' | 'SRW' | 'MRW' | 'ERF' | 'MEF' | 'IIQ' | '3FR' | 'MOS' | 'ARI';
 
-export type RawSupport = 'recognizedDecoderUnavailable' | 'unsupported';
+export type RawSupport = 'decodable' | 'recognizedDecoderUnavailable' | 'unsupported';
+
+/** Mirrors `raw::demosaic::Quality`. */
+export type DemosaicAlgorithm = 'bilinear' | 'malvar-he-cutler';
+
+/** Mirrors `raw::RawSourceMode`; the tag is explicit, never inferred. */
+export type RawSourceMode = { mode: 'linked'; path: string } | { mode: 'embedded' };
+
+/** Mirrors `raw::RawSourceStatus`. */
+export type RawSourceStatus =
+  | 'available'
+  | 'missing'
+  | { changed: { foundSha256: string } };
+
+/** Mirrors `raw::RawSourceReference`. */
+export interface RawSourceReference {
+  filename: string;
+  format: RawFormat;
+  fileSize: number;
+  sha256: string;
+  width: number;
+  height: number;
+}
+
+/** Mirrors `color::WhiteBalance`. */
+export type RawWhiteBalance =
+  | { mode: 'asShot'; multipliers: [number, number, number] }
+  | { mode: 'auto' }
+  | { mode: 'temperatureTint'; temperature: number; tint: number }
+  | { mode: 'custom'; multipliers: [number, number, number] };
+
+/** Mirrors `color::DevelopmentParameters`. */
+export interface RawDevelopmentParameters {
+  whiteBalance: RawWhiteBalance;
+  exposureEv: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+}
+
+/**
+ * Mirrors `raw::RawLayerSource`.
+ *
+ * This, not the developed raster, is what defines a RAW layer: the raster is a
+ * cache of one development and can be produced again from these fields.
+ */
+export interface RawLayerSource {
+  reference: RawSourceReference;
+  mode: RawSourceMode;
+  parameters: RawDevelopmentParameters;
+  decoder: string;
+  decoderVersion: string;
+  capture: RawCaptureMetadata;
+}
+
+/** Mirrors `commands::raw::RawDevelopResult`. */
+export interface RawDevelopResult {
+  pixelId: string;
+  width: number;
+  height: number;
+  /** The sensor's own size, which a preview does not match. */
+  sourceWidth: number;
+  sourceHeight: number;
+  source: RawLayerSource;
+  metadata: RawCaptureMetadata;
+  multipliers: [number, number, number];
+  colorManaged: boolean;
+  demosaic: DemosaicAlgorithm;
+  cfaPattern: string;
+  bitsPerSample: number;
+  blackLevel: [number, number, number, number];
+  whiteLevel: number;
+  processingTimeMs: number;
+}
+
+export interface RawSourceStatusResult {
+  status: RawSourceStatus;
+  expectedSha256: string;
+}
 
 export interface RawInspection {
   filename: string;
@@ -146,6 +226,28 @@ export interface RawDecoderCapabilities {
 export interface RawInspectionResult {
   inspection: RawInspection;
   capabilities: RawDecoderCapabilities;
+}
+
+/**
+ * Mirrors `commands::editor::OpenRawImageResult`.
+ *
+ * The first seven fields match `OpenImageResult` exactly, so a developed RAW
+ * flows through the same document pipeline as any other photograph.
+ */
+export interface OpenRawImageResult {
+  metadata: ImageMetadata;
+  originalPreviewDataUrl: string;
+  previewDataUrl: string;
+  processingTimeMs: number;
+  documentId: number;
+  isCurrent: boolean;
+  backgroundPixelId: string;
+  /** Absent on a stale open. */
+  source: RawLayerSource | null;
+  multipliers: [number, number, number];
+  colorManaged: boolean;
+  cfaPattern: string;
+  whiteLevel: number;
 }
 
 export interface OpenImageResult {

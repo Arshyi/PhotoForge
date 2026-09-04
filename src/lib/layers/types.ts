@@ -1,4 +1,4 @@
-import type { BaseEditOperation, EditOperation, ImageMetadata } from '../types/editor';
+import type { BaseEditOperation, EditOperation, ImageMetadata, RawLayerSource } from '../types/editor';
 import type { MaskSnapshot } from '../selections/types';
 
 /// Mirrors `layers::LAYER_SCHEMA_VERSION`.
@@ -107,6 +107,11 @@ export interface Layer {
   mask: LayerMask | null;
   collapsed: boolean;
   metadata: LayerMetadata;
+  /**
+   * The camera file this layer was developed from, when it came from one.
+   * Absent on every other layer and in projects written before 0.9.0.
+   */
+  raw?: RawLayerSource | null;
   content: LayerContent;
 }
 

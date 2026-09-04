@@ -1,18 +1,25 @@
 # Workflows
 
-## Phase 9 RAW development boundary
+## Phase 9 RAW development
 
-RAW development parameters are not ordinary encoded-space edits. The Phase 9
-checkpoint exposes both a validated, serialisable `raw_development` operation
-for deterministic raster previews and a `RawDevelopmentDocument` contract for
-the future source-backed RAW project. Workflow replay may apply the operation
-to an existing raster source; it must still fail closed rather than silently
-pretend to decode a camera RAW until a vetted decoder and source-backed project
-extension land. See
-[raw-development.md](raw-development.md) and
-[phase-9-results.md](phase-9-results.md).
+RAW development parameters are not ordinary encoded-space edits, and they are
+kept separate from them. A `raw_development` operation is a validated,
+serialisable step that a workflow can replay, and it operates on the linear
+working image rather than on 8-bit pixels.
 
-Workflows are reusable, local, typed edit pipelines introduced in PhotoForge 0.6.0 and extended with immutable mask snapshots in 0.7.0. Recording a workflow copies the current operation list; it never stores source image pixels or source paths.
+A RAW-backed layer carries its own `RawLayerSource`, which holds the file, its
+hash, and the development parameters. Replaying a workflow over a RAW document
+therefore re-develops from the original photograph rather than re-editing a
+raster somebody already baked.
+
+Workflow replay keeps the existing fail-closed semantics: a step that cannot be
+applied — because a linked source is missing, or has been replaced by a
+different photograph — fails the replay rather than silently developing
+something else.
+
+Batch RAW development, where one preset is applied across many camera files, is
+**not implemented**. The single-document path is complete; the batch path is
+deferred.
 
 ## 2026-09-04 continuation — 0.8.2 working source
 

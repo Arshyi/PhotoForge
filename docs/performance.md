@@ -1,5 +1,33 @@
 # Performance
 
+## Phase 9 RAW development (0.9.0)
+
+Measured on this machine with `cargo run --release --example raw_benchmark`.
+Every figure is wall-clock; none is estimated. The example is committed, so the
+numbers can be reproduced or contradicted.
+
+| Sensor | Decode | Initial preview | Slider edit | Full render | 16-bit PNG |
+| --- | --- | --- | --- | --- | --- |
+| 6 MP | 3.9 ms | 35.7 ms | 36.2 ms | 141 ms | 335 ms |
+| 12 MP | 8.0 ms | 41.5 ms | 40.1 ms | 282 ms | 671 ms |
+| 24 MP | 15.6 ms | 61.7 ms | 62.1 ms | 586 ms | 1327 ms |
+
+Real Canon EOS 5D Mark III (23.4 MP, lossless JPEG): decode 515 ms, preview
+60 ms, slider edit 62 ms, full render 554 ms, 16-bit PNG 1571 ms.
+
+Two things those numbers show. Interactive editing costs about 60 ms whatever
+the sensor size, because previews decimate before demosaicing. And entropy
+decoding dominates opening a compressed file — 515 ms against 15 ms for the
+same photograph stored uncompressed — but it happens once per open, not per
+edit.
+
+Peak memory for one full 24 MP render is 911 MB across the sensor, normalised,
+demosaiced, working, and encoded buffers. It scales linearly with sensor area:
+232 MB at 6 MP, 462 MB at 12 MP.
+
+Sensors above 40 megapixels are refused by the application-wide pixel ceiling
+rather than developed, so no figure is reported for them.
+
 ## Phase 7 mask measurements
 
 The reproducible release-mode benchmark is `cargo run --manifest-path src-tauri/Cargo.toml --release --example mask_benchmark`. On the Phase 7 Windows validation machine (Intel Core i7-12850HX), representative results were 46.234 ms for a 6000×4000 rectangle, 3.405 ms for a 500-point polygon at 1920×1080, 50.095 ms for a 500-point brush stroke at 4000×3000, 68.496–69.875 ms for feather radii 4–64 at 4000×3000, and 115.462/116.348 ms for expand/contract radius 24 at 4000×3000. A worst-case contiguous Magic Wand pass over a 6000×4000 single-color fixture took 1,633.557 ms. Mask save/load at that size took 26.917/51.647 ms, and a masked 4000×3000 brightness operation took 167.739 ms.

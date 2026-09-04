@@ -162,6 +162,13 @@ aside {
   text-align: center;
 }
 
+.raw-card { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.015); }
+.raw-heading h3 { margin: 0; font-size: 0.72rem; }
+.raw-heading small { display: block; color: var(--ink-faint); font-size: 0.58rem; line-height: 1.4; }
+.raw-card dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+.raw-card dt { color: var(--ink-soft); font-size: 0.6rem; }
+.raw-card dd { margin: 0; color: var(--ink); font-size: 0.6rem; overflow-wrap: anywhere; }
+
 .metadata-card {
   display: grid;
   grid-template-columns: 37px minmax(0, 1fr);

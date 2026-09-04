@@ -112,6 +112,28 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Deterministic row-band compositor parallelism across at most eight CPU threads
 - Not implemented: pass-through groups, GPU acceleration, colour management, PSD support, text/vector/smart-object/procedural/neural layers
 
+## Phase 9 — RAW development and high-precision colour (0.9.0, delivered)
+
+- Camera DNG decoding written against the published specification, with no
+  third-party decoder linked and no native library packaged
+- Bounded TIFF reader, lossless-JPEG (SOF3) decoder, and DNG sensor semantics
+- Black-level normalisation per CFA position, and white balance applied on the
+  CFA before interpolation
+- Bilinear and Malvar-He-Cutler demosaicing, the latter measured against ground
+  truth rather than asserted
+- Camera colour matrix to linear sRGB, with an absent matrix reported as such
+- Scene-linear development with no clipping before the display transform, so
+  highlight recovery is real
+- Source-backed RAW projects: the file, its hash, and its development
+  parameters, with missing and changed sources detected and relink verified
+- Preview decimation that preserves CFA phase, so editing stays interactive on
+  a 24-megapixel file
+- True 16-bit PNG export at full sensor resolution, proven to carry precision
+  8 bits cannot represent
+- Not implemented: formats other than DNG (a licensing constraint), sensors
+  above 40 megapixels, float compositing, ICC profiles, Display P3, Adobe RGB,
+  and batch RAW development
+
 ## Later, optional AI work
 
 - Lazy-loaded quality assessment, blur/noise estimation, OCR cleanup, super-resolution, and old-photo restoration

@@ -136,6 +136,8 @@
     type WorkspaceMutationGuard
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
+  import { isRawPath, metadataRows } from './lib/utils/raw';
+  import type { OpenRawImageResult, RawLayerSource } from './lib/types/editor';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import TransformOverlay from './lib/components/TransformOverlay.svelte';
   import TransformPanel from './lib/components/TransformPanel.svelte';
@@ -283,6 +285,10 @@
   let geometryCommitTimer: ReturnType<typeof setTimeout> | undefined;
 
   let layerDocument: LayerDocument | null = null;
+  /** The RAW file behind the open document, when it came from one. */
+  let rawSource: RawLayerSource | null = null;
+  /** What developing it produced, for the metadata panel. */
+  let rawDevelopment: OpenRawImageResult | null = null;
   let layerThumbnails: Record<string, string> = {};
   let editTarget: EditTarget = 'layer';
   let adjustmentTarget: AdjustmentTarget = 'document';
@@ -526,7 +532,10 @@
         multiple: false,
         directory: false,
         title: 'Open a photo',
-        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+        filters: [
+          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
+          { name: 'Camera RAW (DNG)', extensions: ['dng'] }
+        ]
       });
       if (typeof path === 'string') chosen = path;
     } catch (error) {
@@ -556,11 +565,21 @@
     previewQueued = false;
     if (renderTimer) clearTimeout(renderTimer);
     try {
-      const result = await invoke<OpenImageResult>('open_image', {
-        path,
-        requestId: ownOpenRequest
-      });
+      // A camera RAW is decoded and developed by a different command, but the
+      // result has the same shape, so nothing below this line has to know.
+      const isRaw = isRawPath(path);
+      const result = isRaw
+        ? await invoke<OpenRawImageResult>('open_raw_image', {
+            path,
+            requestId: ownOpenRequest
+          })
+        : await invoke<OpenImageResult>('open_image', {
+            path,
+            requestId: ownOpenRequest
+          });
       if (!result.isCurrent || activeOpenRequest !== ownOpenRequest) return;
+      rawSource = isRaw ? ((result as OpenRawImageResult).source ?? null) : null;
+      rawDevelopment = isRaw ? (result as OpenRawImageResult) : null;
       history.clear();
       operations = [];
       metadata = result.metadata;
@@ -595,14 +614,17 @@
       selectionState = selectionHistory.replace(restoredSelection);
       // An opened image becomes a document with a single background pixel layer.
       // The rendered result is identical to Phase 7.1 until the user adds to it.
+      const background = createPixelLayer(
+        'Background',
+        result.backgroundPixelId,
+        result.metadata.width,
+        result.metadata.height
+      );
+      // A RAW layer carries the file it came from, so the development stays
+      // re-doable instead of being baked into the raster.
       startLayerDocument(
         createDocument(result.metadata.width, result.metadata.height, [
-          createPixelLayer(
-            'Background',
-            result.backgroundPixelId,
-            result.metadata.width,
-            result.metadata.height
-          )
+          rawSource ? { ...background, name: 'RAW', raw: rawSource } : background
         ]),
         null
       );
@@ -3231,6 +3253,29 @@
             <span>{metadata.width} × {metadata.height} · {formatBytes(metadata.fileSize)}</span>
           </div>
         </div>
+      {/if}
+
+      {#if rawDevelopment && metadata?.raw}
+        <section class="raw-card" aria-labelledby="raw-heading">
+          <div class="raw-heading">
+            <h3 id="raw-heading">Camera RAW</h3>
+            <small>Developed from the original, which is never written to</small>
+          </div>
+          <dl>
+            {#each metadataRows(metadata.raw, {
+              sensorWidth: rawSource?.reference.width,
+              sensorHeight: rawSource?.reference.height,
+              bitsPerSample: metadata.bitDepth,
+              cfaPattern: rawDevelopment.cfaPattern,
+              sha256: rawSource?.reference.sha256,
+              multipliers: rawDevelopment.multipliers,
+              colorManaged: rawDevelopment.colorManaged
+            }) as row (row.label)}
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            {/each}
+          </dl>
+        </section>
       {/if}
 
       <div

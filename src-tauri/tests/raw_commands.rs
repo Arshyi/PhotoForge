@@ -635,3 +635,298 @@ fn changing_white_balance_changes_the_developed_result() {
     assert_eq!(warm["multipliers"], json!([2.0, 1.0, 0.5]));
     assert_ne!(warm["multipliers"], opened["multipliers"]);
 }
+
+// ---------------------------------------------------------------------------
+// Project round-trip with a RAW layer (section 14)
+// ---------------------------------------------------------------------------
+
+/// Builds the complex document the brief asks for: a RAW layer with its
+/// development settings, a transform and a mask, alongside an adjustment layer,
+/// a pass-through group, and an ordinary pixel layer.
+fn complex_raw_document(
+    harness: &Harness,
+    raw_path: &std::path::Path,
+) -> (
+    photoforge_lib::layers::LayerDocument,
+    Value,
+    std::collections::HashMap<String, image::RgbaImage>,
+) {
+    use photoforge_lib::layers::{
+        BlendMode, Layer, LayerContent, LayerDocument, LayerMask, LayerMetadata, LayerTransform,
+    };
+    use photoforge_lib::mask::{MaskBitmap, MaskSnapshot};
+
+    let opened = harness.ok(
+        "open_raw_layer",
+        json!({ "path": raw_path.to_string_lossy(), "fullResolution": true }),
+    );
+    let raw_source: photoforge_lib::raw::RawLayerSource =
+        serde_json::from_value(opened["source"].clone()).expect("source");
+    let pixel_id = as_string(&opened["pixelId"]);
+    let width = opened["width"].as_u64().unwrap() as u32;
+    let height = opened["height"].as_u64().unwrap() as u32;
+
+    // The developed raster, so the project has real pixels to store.
+    let developed = image::RgbaImage::from_fn(width, height, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+    });
+    let ordinary = image::RgbaImage::from_pixel(width, height, image::Rgba([40, 90, 140, 255]));
+
+    let mut buffers = std::collections::HashMap::new();
+    buffers.insert(pixel_id.clone(), developed);
+    buffers.insert("pxplain".to_string(), ordinary);
+
+    let base = |id: &str| Layer {
+        id: id.into(),
+        name: id.into(),
+        visible: true,
+        locked: false,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: LayerTransform::default(),
+        mask: None,
+        collapsed: false,
+        metadata: LayerMetadata::default(),
+        raw: None,
+        content: LayerContent::Pixel {
+            pixel_id: "pxplain".into(),
+            width,
+            height,
+        },
+    };
+
+    let mut mask_bitmap = MaskBitmap::empty(width, height).expect("mask");
+    for y in 0..height {
+        for x in 0..width / 2 {
+            mask_bitmap.set(x, y, 255);
+        }
+    }
+
+    // The RAW layer, carrying its source, a transform, and a mask.
+    let mut raw_layer = base("rawlayer");
+    raw_layer.name = "Developed RAW".into();
+    raw_layer.opacity = 0.82;
+    raw_layer.blend_mode = BlendMode::Multiply;
+    raw_layer.transform = LayerTransform {
+        translate_x: 3.0,
+        translate_y: -2.0,
+        scale_x: 1.25,
+        rotation_degrees: 8.0,
+        ..LayerTransform::default()
+    };
+    raw_layer.mask = Some(LayerMask {
+        snapshot: MaskSnapshot::encode(&mask_bitmap),
+        enabled: true,
+        inverted: false,
+    });
+    raw_layer.raw = Some(raw_source);
+    raw_layer.content = LayerContent::Pixel {
+        pixel_id: pixel_id.clone(),
+        width,
+        height,
+    };
+
+    let adjustment = Layer {
+        name: "Warmth".into(),
+        opacity: 0.7,
+        content: LayerContent::Adjustment {
+            operation: Box::new(photoforge_lib::domain::EditOperation::Contrast { amount: 0.2 }),
+        },
+        ..base("adjust")
+    };
+
+    let mut group = Layer {
+        content: LayerContent::Group {
+            children: vec![adjustment, raw_layer],
+            isolated: false,
+        },
+        ..base("passgroup")
+    };
+    group.name = "Pass-through".into();
+
+    let document = LayerDocument {
+        schema_version: photoforge_lib::layers::LAYER_SCHEMA_VERSION,
+        canvas_width: width,
+        canvas_height: height,
+        layers: vec![base("plain"), group],
+        active_layer_id: Some("rawlayer".into()),
+    };
+    (document, opened, buffers)
+}
+
+/// The heart of the phase: a RAW-backed project must survive a save and a
+/// reload with its source identity and development state intact, so reopening
+/// develops the photograph again rather than inheriting a baked raster.
+#[test]
+fn a_raw_backed_project_survives_a_save_and_reload_with_its_development_state() {
+    use photoforge_lib::layers::{decode_project, encode_project, LayerContent};
+
+    let directory = temp();
+    let harness = Harness::new();
+    let raw_path = write(directory.path(), "shot.dng", &camera_like_dng(32, 24));
+    let (document, opened, buffers) = complex_raw_document(&harness, &raw_path);
+
+    let borrowed: Vec<(String, &image::RgbaImage)> = buffers
+        .iter()
+        .map(|(id, image)| (id.clone(), image))
+        .collect();
+    let encoded = encode_project(
+        &document,
+        &[],
+        &borrowed,
+        "0.9.0",
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    .expect("project encodes");
+
+    // A fresh decode stands in for closing and reopening the application.
+    let loaded = decode_project(&encoded).expect("project decodes");
+    let restored = &loaded.document;
+
+    // Tree identity and stable identifiers.
+    let names: Vec<String> = restored.iter().map(|layer| layer.name.clone()).collect();
+    assert!(names.contains(&"Developed RAW".to_string()));
+    assert!(names.contains(&"Pass-through".to_string()));
+    assert_eq!(restored.active_layer_id.as_deref(), Some("rawlayer"));
+
+    let raw_layer = restored.find("rawlayer").expect("the RAW layer came back");
+    let source = raw_layer.raw.as_ref().expect("the RAW source came back");
+
+    // Source identity: the same file, verified by hash rather than by name.
+    let original = opened["source"]["reference"].clone();
+    assert_eq!(source.reference.sha256, as_string(&original["sha256"]));
+    assert_eq!(source.reference.filename, "shot.dng");
+    assert_eq!(source.reference.format, photoforge_lib::raw::RawFormat::Dng);
+    assert_eq!(source.reference.width, 32);
+    assert_eq!(source.reference.height, 24);
+    assert!(source.mode.is_linked());
+    assert_eq!(source.decoder, "photoforge-dng");
+
+    // Development state, which is what makes the edit non-destructive.
+    let stored: photoforge_lib::color::DevelopmentParameters =
+        serde_json::from_value(opened["source"]["parameters"].clone()).unwrap();
+    assert_eq!(source.parameters, stored);
+
+    // Camera metadata survived, so the panel can describe the shot even with
+    // the source unavailable.
+    assert_eq!(source.capture.iso, Some(400));
+    assert_eq!(source.capture.manufacturer.as_deref(), Some("PhotoForge"));
+
+    // Layer state around it.
+    assert_eq!(raw_layer.opacity, 0.82);
+    assert_eq!(
+        raw_layer.blend_mode,
+        photoforge_lib::layers::BlendMode::Multiply
+    );
+    assert_eq!(raw_layer.transform.rotation_degrees, 8.0);
+    assert_eq!(raw_layer.transform.scale_x, 1.25);
+    assert!(raw_layer.mask.is_some(), "the layer mask was lost");
+    let group = restored.find("passgroup").expect("group");
+    assert!(matches!(
+        group.content,
+        LayerContent::Group {
+            isolated: false,
+            ..
+        }
+    ));
+    assert!(restored.find("adjust").is_some());
+    assert!(restored.find("plain").is_some());
+
+    // And the source is still exactly where and what it was.
+    let status = harness.ok(
+        "verify_raw_source",
+        json!({
+            "reference": serde_json::to_value(&source.reference).unwrap(),
+            "path": raw_path.to_string_lossy()
+        }),
+    );
+    assert_eq!(status["status"], "available");
+
+    // The reopened layer can be developed again from its original file, which
+    // is the whole point of storing the source rather than only the raster.
+    let redeveloped = harness.ok(
+        "develop_raw_layer",
+        json!({
+            "request": {
+                "source": serde_json::to_value(source).unwrap(),
+                "fullResolution": true,
+                "documentId": 1,
+                "requestId": 9
+            }
+        }),
+    );
+    assert_eq!(redeveloped["sourceWidth"], 32);
+    assert_eq!(redeveloped["multipliers"], opened["multipliers"]);
+}
+
+/// A project written before RAW existed must still load, and must not acquire a
+/// RAW source it never had.
+#[test]
+fn a_project_without_any_raw_layer_still_loads_and_gains_no_raw_source() {
+    use photoforge_lib::layers::{decode_project, encode_project};
+
+    let directory = temp();
+    let harness = Harness::new();
+    let raw_path = write(directory.path(), "shot.dng", &camera_like_dng(16, 16));
+    let (mut document, _, buffers) = complex_raw_document(&harness, &raw_path);
+    // Strip the RAW record, as a pre-0.9.0 project would have.
+    fn clear(layers: &mut [photoforge_lib::layers::Layer]) {
+        for layer in layers.iter_mut() {
+            layer.raw = None;
+            if let photoforge_lib::layers::LayerContent::Group { children, .. } = &mut layer.content
+            {
+                clear(children);
+            }
+        }
+    }
+    clear(&mut document.layers);
+    let borrowed: Vec<(String, &image::RgbaImage)> = buffers
+        .iter()
+        .map(|(id, image)| (id.clone(), image))
+        .collect();
+    let encoded = encode_project(&document, &[], &borrowed, "0.8.2", "", "").expect("encodes");
+    let loaded = decode_project(&encoded).expect("decodes");
+    assert!(
+        loaded.document.iter().all(|layer| layer.raw.is_none()),
+        "a layer acquired a RAW source it never had"
+    );
+}
+
+/// A project whose linked photograph has gone missing must still open, with the
+/// layer reporting the problem rather than the whole project failing.
+#[test]
+fn a_project_opens_when_its_linked_raw_source_is_missing() {
+    use photoforge_lib::layers::{decode_project, encode_project};
+
+    let directory = temp();
+    let harness = Harness::new();
+    let raw_path = write(directory.path(), "shot.dng", &camera_like_dng(16, 16));
+    let (document, _, buffers) = complex_raw_document(&harness, &raw_path);
+    let borrowed: Vec<(String, &image::RgbaImage)> = buffers
+        .iter()
+        .map(|(id, image)| (id.clone(), image))
+        .collect();
+    let encoded = encode_project(&document, &[], &borrowed, "0.9.0", "", "").expect("encodes");
+
+    // The photograph is deleted after the project was saved.
+    std::fs::remove_file(&raw_path).unwrap();
+
+    let loaded = decode_project(&encoded).expect("the project itself still opens");
+    let raw_layer = loaded.document.find("rawlayer").expect("layer");
+    let source = raw_layer.raw.as_ref().expect("source record");
+    let status = harness.ok(
+        "verify_raw_source",
+        json!({
+            "reference": serde_json::to_value(&source.reference).unwrap(),
+            "path": raw_path.to_string_lossy()
+        }),
+    );
+    assert_eq!(status["status"], "missing");
+    // The developed raster is still in the project, so the layer can be shown
+    // while the source is unavailable.
+    assert!(matches!(
+        raw_layer.content,
+        photoforge_lib::layers::LayerContent::Pixel { .. }
+    ));
+}

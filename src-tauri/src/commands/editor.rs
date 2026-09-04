@@ -232,6 +232,48 @@ pub async fn analyze_image(
     })
 }
 
+/// What opening a camera RAW produced.
+///
+/// The first seven fields are exactly `OpenImageResult`, so the frontend can
+/// treat a developed RAW as any other opened photograph; the rest describe the
+/// development so the interface can show it without inventing anything.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRawImageResult {
+    pub metadata: crate::domain::ImageMetadata,
+    pub original_preview_data_url: String,
+    pub preview_data_url: String,
+    pub processing_time_ms: f64,
+    pub document_id: u64,
+    pub is_current: bool,
+    pub background_pixel_id: String,
+    /// The record that keeps the development re-doable. Absent on a stale open.
+    pub source: Option<crate::raw::RawLayerSource>,
+    pub multipliers: [f32; 3],
+    pub color_managed: bool,
+    pub cfa_pattern: String,
+    pub white_level: f32,
+}
+
+impl OpenRawImageResult {
+    fn stale(metadata: crate::domain::ImageMetadata, request_id: u64, started: Instant) -> Self {
+        Self {
+            metadata,
+            original_preview_data_url: String::new(),
+            preview_data_url: String::new(),
+            processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+            document_id: request_id,
+            is_current: false,
+            background_pixel_id: String::new(),
+            source: None,
+            multipliers: [1.0, 1.0, 1.0],
+            color_managed: false,
+            cfa_pattern: String::new(),
+            white_level: 0.0,
+        }
+    }
+}
+
 fn stale_open_result(
     metadata: crate::domain::ImageMetadata,
     request_id: u64,
@@ -435,4 +477,169 @@ pub async fn export_developed_png16(
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
     })
+}
+
+/// Opens a camera RAW file as the current document.
+///
+/// This deliberately produces exactly what `open_image` produces, so a
+/// developed RAW flows through the same document, preview, layer, selection,
+/// and export pipeline as any other photograph. Nothing downstream needs to
+/// know where the pixels came from.
+///
+/// The layer it becomes carries its RAW source record, so the development stays
+/// re-doable rather than baked, and the original file is only ever read.
+#[tauri::command]
+pub async fn open_raw_image(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<OpenRawImageResult, AppError> {
+    let started = Instant::now();
+    let request = OpenRequest::begin(&state, request_id)?;
+
+    let source_path = PathBuf::from(&path);
+    let bytes = match crate::raw::read_source_bytes(&source_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            clear_pending_open(&state, request_id);
+            return Err(AppError::RawInspection(error.to_string()));
+        }
+    };
+
+    // Decoding and demosaicing a full sensor is CPU-bound and must not run on
+    // the interface thread.
+    let developed = match tauri::async_runtime::spawn_blocking(move || {
+        let sensor = crate::raw::dng::decode(&bytes)?;
+        let developed = crate::raw::develop::develop_sensor(
+            &sensor,
+            &crate::color::DevelopmentParameters::default(),
+            crate::raw::develop::RenderScale::Full,
+        )?;
+        Ok::<_, crate::raw::RawError>((sensor, developed))
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            clear_pending_open(&state, request_id);
+            return Err(AppError::RawInspection(error.to_string()));
+        }
+        Err(_) => {
+            clear_pending_open(&state, request_id);
+            return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
+        }
+    };
+    let (sensor, developed) = developed;
+
+    let reference =
+        match crate::raw::source_reference_for(&source_path, sensor.width, sensor.height) {
+            Ok(reference) => reference,
+            Err(error) => {
+                clear_pending_open(&state, request_id);
+                return Err(AppError::RawInspection(error.to_string()));
+            }
+        };
+
+    let rendered = developed.image.to_rgba8();
+    let (width, height) = (rendered.width(), rendered.height());
+    let file_size = std::fs::metadata(&source_path)
+        .map(|data| data.len())
+        .unwrap_or(0);
+    let metadata = crate::domain::ImageMetadata {
+        filename: reference.filename.clone(),
+        width,
+        height,
+        format: reference.format.extension().to_ascii_uppercase(),
+        file_size,
+        // The working space after development, stated rather than assumed.
+        color_space: "linear sRGB developed to sRGB".into(),
+        // The camera's own depth, not the depth of the raster shown on screen.
+        bit_depth: sensor.bits_per_sample,
+        has_alpha: false,
+        created_at: sensor.metadata.capture_time.clone(),
+        modified_at: None,
+        camera_model: sensor.metadata.model.clone(),
+        exif_available: sensor.metadata.manufacturer.is_some(),
+        raw: Some(sensor.metadata.clone()),
+    };
+
+    if !request.is_current() {
+        return Ok(OpenRawImageResult::stale(metadata, request_id, started));
+    }
+
+    let dynamic = image::DynamicImage::ImageRgba8(rendered.clone());
+    let preview_data_url = match encode_preview(&dynamic) {
+        Ok(preview) => preview,
+        Err(error) => {
+            clear_pending_open(&state, request_id);
+            return Err(error);
+        }
+    };
+
+    let mut store = LayerPixelStore::default();
+    if let Err(error) = store.reset(width, height) {
+        clear_pending_open(&state, request_id);
+        return Err(error);
+    }
+    let background_pixel_id = match store.register(rendered) {
+        Ok(id) => id,
+        Err(error) => {
+            clear_pending_open(&state, request_id);
+            return Err(error);
+        }
+    };
+
+    let source = crate::raw::RawLayerSource {
+        reference,
+        mode: crate::raw::RawSourceMode::Linked {
+            path: crate::raw::presentable_path(
+                &crate::raw::canonical_source_path(&source_path)
+                    .map_err(|error| AppError::RawInspection(error.to_string()))?,
+            ),
+        },
+        parameters: crate::color::DevelopmentParameters {
+            white_balance: crate::color::WhiteBalance::Custom {
+                multipliers: developed.multipliers,
+            },
+            ..crate::color::DevelopmentParameters::default()
+        },
+        decoder: crate::raw::DECODER_ID.to_string(),
+        decoder_version: crate::raw::DECODER_VERSION.to_string(),
+        capture: sensor.metadata.clone(),
+    };
+    if let Err(error) = source.validate() {
+        clear_pending_open(&state, request_id);
+        return Err(AppError::RawInspection(error.to_string()));
+    }
+
+    let loaded = crate::infrastructure::LoadedImage {
+        path: source_path,
+        original: std::sync::Arc::new(dynamic.clone()),
+        preview: std::sync::Arc::new(dynamic),
+        metadata: metadata.clone(),
+    };
+
+    let result = OpenRawImageResult {
+        metadata,
+        original_preview_data_url: preview_data_url.clone(),
+        preview_data_url,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        document_id: request_id,
+        is_current: true,
+        background_pixel_id,
+        source: Some(source),
+        multipliers: developed.multipliers,
+        color_managed: developed.color_managed,
+        cfa_pattern: sensor.cfa.name().to_string(),
+        white_level: sensor.white_level,
+    };
+
+    if !request.commit(loaded, store)? {
+        return Ok(OpenRawImageResult::stale(
+            result.metadata,
+            request_id,
+            started,
+        ));
+    }
+    Ok(result)
 }

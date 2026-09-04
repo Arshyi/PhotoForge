@@ -2,11 +2,42 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 8 layer and
-non-destructive editing system. The working tree is **0.8.2**, a continuation
-of the 0.8.1 implementation. It has a Rust release build, but it is not yet a
-packaged 0.8.2 desktop release; native GUI/DPI, elevated MSI, and production
-signing acceptance remain outstanding.
+This repository contains the Phase 0 foundation through the Phase 9 RAW
+development system. The current version is **0.9.0**. Native GUI/DPI
+verification, the elevated MSI lifecycle, and production signing acceptance
+remain outstanding.
+
+## Camera RAW development (0.9.0)
+
+PhotoForge decodes camera RAW files locally and develops them without ever
+writing to the original.
+
+- **DNG decoding written against the published specification** — uncompressed
+  and lossless-JPEG, at 8, 10, 12, 14, and 16 bits, with no third-party decoder
+  linked and no native library to package
+- **Real sensor handling** — CFA pattern, per-position black levels, white
+  level, active area, default crop, orientation, as-shot neutral, and the
+  camera colour matrix, all read from the file rather than assumed
+- **Two demosaic algorithms** — bilinear for previews, Malvar-He-Cutler for
+  final renders, the latter measured against ground truth rather than merely
+  labelled higher quality
+- **Highlight headroom** — nothing clips before the display transform, so
+  reducing exposure genuinely recovers detail an 8-bit path would have lost
+- **Source-backed projects** — a RAW layer stores the file it came from, its
+  SHA-256, and its development parameters, so reopening develops the photograph
+  again instead of inheriting a baked raster
+- **Missing and changed sources** — detected and reported; a relink verifies the
+  hash and refuses a different photograph
+- **True 16-bit PNG export** at full sensor resolution, quantised only at the
+  file boundary
+
+**Only DNG is decoded.** CR2, CR3, NEF, ARW, RAF, ORF, and RW2 are recognised
+so the interface can explain itself, but no decoder is bundled: every mature
+Rust RAW decoder is LGPL or AGPL, and this repository reserves all rights.
+Convert with Adobe DNG Converter to open them today. Sensors above 40
+megapixels are refused by the application-wide pixel ceiling. See
+[docs/raw-development.md](docs/raw-development.md) and
+[docs/color-pipeline.md](docs/color-pipeline.md).
 
 ## Layers and non-destructive editing (0.8.0 baseline, 0.8.2 continuation)
 
@@ -194,10 +225,12 @@ a text-only local planning adapter and receives no image, mask, layer tree, or
 path. The Deterministic Engine remains the only component that changes pixels.
 PhotoForge does not install or download models, execute model-supplied code, call
 cloud providers, execute plugins, generate missing content, or reconstruct
-factual detail that was never captured. Pass-through groups, arbitrary ICC
-management, RAW decoding/demosaic, source-backed RAW projects, PSD compatibility,
-GPU compositing, semantic selection, OCR, neural restoration, super-resolution,
-inpainting, and generative editing remain outside this release. The Phase 9
+factual detail that was never captured. RAW decoding, demosaicing, and
+source-backed RAW projects are implemented for DNG only. Arbitrary ICC
+management, Display P3, Adobe RGB, float compositing, batch RAW development,
+PSD compatibility, GPU compositing, semantic selection, OCR, neural
+restoration, super-resolution, inpainting, and generative editing remain
+outside this release. The Phase 9
 float/development and inspection primitives are intentionally documented as an
 incomplete foundation rather than a packaged 0.9.0 feature.
 
