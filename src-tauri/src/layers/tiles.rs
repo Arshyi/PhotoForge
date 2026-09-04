@@ -286,6 +286,14 @@ pub fn behavior(operation: &EditOperation, _scale: f64) -> TileBehavior {
                 crate::image_processing::high_precision::denoise_chroma_radius(*strength, *color),
             ),
         ),
+        // Each Richardson-Lucy iteration convolves forward and back, so a
+        // pixel's dependency grows by twice the kernel reach every time. This
+        // reaches MAX_HALO quickly and is then declared global rather than
+        // clamped, which is the only honest option: a clamped halo here would
+        // seam in proportion to how much sharpening the user asked for.
+        EditOperation::Deconvolve {
+            kernel, iterations, ..
+        } => u64::from(kernel.reach()) * 2 * u64::from(*iterations),
         // `remove_defects` reads the eight surrounding pixels and nothing else.
         EditOperation::RemoveDefects { .. } => 1,
         // `local_luma` is a box filter of exactly this radius.

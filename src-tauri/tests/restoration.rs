@@ -8,6 +8,7 @@ use photoforge_lib::{
     color::{FloatImage, FloatRgba},
     domain::EditOperation,
     fixtures, high_precision,
+    image_processing_kernels::BlurKernel,
     layers::{
         render_document_tiled, BlendMode, Layer, LayerContent, LayerDocument, LayerMetadata,
         LayerPixelStore, LayerTransform, RenderOptions,
@@ -348,4 +349,221 @@ fn degenerate_image_sizes_are_handled() {
             assert!(result.validate().is_ok());
         }
     }
+}
+
+/// Deconvolution has to beat the unsharp mask it sits beside, or there is no
+/// reason for it to exist. Measured against the exact kernel that blurred the
+/// fixture, which is the only fair test of a non-blind method.
+#[test]
+fn deconvolution_beats_an_unsharp_mask_on_a_known_kernel() {
+    let clean = fixtures::scene(192, 192);
+    for (name, blurred, kernel) in [
+        (
+            "defocus",
+            fixtures::defocus_blur(&clean, 1.5),
+            BlurKernel::Defocus { radius: 1.5 },
+        ),
+        (
+            "motion",
+            fixtures::motion_blur(&clean, 20.0, 7.0),
+            BlurKernel::Motion {
+                angle_degrees: 20.0,
+                distance: 7.0,
+            },
+        ),
+    ] {
+        let sharpened = apply(
+            &blurred,
+            &EditOperation::MildDeblur {
+                strength: 0.7,
+                radius: 1.5,
+            },
+        );
+        let deconvolved = apply(
+            &blurred,
+            &EditOperation::Deconvolve {
+                kernel,
+                iterations: 20,
+                damping: 0.1,
+            },
+        );
+        let by_sharpen = metrics::psnr(&clean, &sharpened);
+        let by_deconvolve = metrics::psnr(&clean, &deconvolved);
+        assert!(
+            by_deconvolve > by_sharpen + 1.0,
+            "{name}: deconvolution scored {by_deconvolve:.2} dB against sharpening's {by_sharpen:.2}"
+        );
+        assert!(
+            by_deconvolve > metrics::psnr(&clean, &blurred) + 1.0,
+            "{name}: deconvolution did not improve on the blurred input"
+        );
+        // Recovering structure, not just adding acutance.
+        assert!(
+            metrics::edge_retention(&clean, &deconvolved)
+                > metrics::edge_retention(&clean, &blurred) + 0.1,
+            "{name}: no edge energy was recovered"
+        );
+    }
+}
+
+/// Damping exists to control ringing, so it has to measurably do that. A hard
+/// black-to-white edge is where Richardson-Lucy overshoots worst.
+#[test]
+fn damping_reduces_ringing_at_a_hard_edge() {
+    let mut clean = FloatImage::blank(96, 96, FloatRgba::new(0.05, 0.05, 0.05, 1.0)).unwrap();
+    for y in 0..96u32 {
+        for x in 48..96u32 {
+            clean.pixels_mut()[(y * 96 + x) as usize] = FloatRgba::new(0.95, 0.95, 0.95, 1.0);
+        }
+    }
+    let kernel = BlurKernel::Defocus { radius: 2.0 };
+    let blurred = fixtures::defocus_blur(&clean, 2.0);
+
+    // Ringing is oscillation in the *flat* areas beside an edge, so it is
+    // measured there. The transition band itself is excluded: a pixel halfway
+    // up the edge has a genuinely wide range of correct values, and counting it
+    // would score honest sharpening as ringing.
+    let overshoot = |image: &FloatImage| {
+        let mut worst = 0.0f32;
+        for y in 0..96u32 {
+            for x in (36..45u32).chain(52..61u32) {
+                let value = image.get(x, y).unwrap().red;
+                worst = worst.max((value - 0.95).max(0.05 - value).max(0.0));
+            }
+        }
+        worst
+    };
+
+    let undamped = apply(
+        &blurred,
+        &EditOperation::Deconvolve {
+            kernel,
+            iterations: 30,
+            damping: 0.0,
+        },
+    );
+    let damped = apply(
+        &blurred,
+        &EditOperation::Deconvolve {
+            kernel,
+            iterations: 30,
+            damping: 0.8,
+        },
+    );
+    assert!(
+        overshoot(&damped) < overshoot(&undamped) * 0.5,
+        "damping 0.8 rang by {} against undamped {}",
+        overshoot(&damped),
+        overshoot(&undamped)
+    );
+    // And the constraint must not have simply undone the deconvolution.
+    let sharpness = |image: &FloatImage| {
+        (image.get(50, 48).unwrap().red - image.get(46, 48).unwrap().red).abs()
+    };
+    // Measured at 1.17x on this fixture; the bound sits just below so the test
+    // fails if the constraint ever starts eating the sharpening it protects.
+    assert!(
+        sharpness(&damped) > sharpness(&blurred) * 1.15,
+        "damping suppressed the deconvolution as well as the ringing: {} against {}",
+        sharpness(&damped),
+        sharpness(&blurred)
+    );
+}
+
+/// An iterative operation must be interruptible and bounded, or a bad parameter
+/// is minutes of work the user cannot stop.
+#[test]
+fn deconvolution_is_bounded_and_cancellable() {
+    use std::sync::atomic::AtomicBool;
+
+    let image = fixtures::scene(96, 96);
+    // Above the cap: validation must refuse rather than run it.
+    let excessive = EditOperation::Deconvolve {
+        kernel: BlurKernel::Defocus { radius: 2.0 },
+        iterations: 100_000,
+        damping: 0.1,
+    };
+    assert!(
+        !excessive.validate().is_ok(),
+        "an unbounded iteration count was accepted"
+    );
+
+    let cancel = AtomicBool::new(true);
+    let result = high_precision::apply(
+        &image,
+        &EditOperation::Deconvolve {
+            kernel: BlurKernel::Defocus { radius: 2.0 },
+            iterations: 40,
+            damping: 0.1,
+        },
+        Some(&cancel),
+    );
+    assert!(
+        result.is_err(),
+        "a cancelled deconvolution returned a result anyway"
+    );
+}
+
+/// A deconvolution's dependency grows with every iteration, so most useful
+/// settings cannot be tiled. The renderer must say so rather than seam.
+#[test]
+fn a_wide_deconvolution_is_declared_global_rather_than_seaming() {
+    let clean = fixtures::scene(192, 192);
+    let blurred = fixtures::defocus_blur(&clean, 2.0);
+    let operation = EditOperation::Deconvolve {
+        kernel: BlurKernel::Defocus { radius: 2.0 },
+        iterations: 20,
+        damping: 0.1,
+    };
+    let (document, store) = document_with(blurred, operation);
+    let resolved = store
+        .resolve(&document.referenced_pixel_ids(), false)
+        .unwrap();
+    let options = RenderOptions {
+        scale: 1.0,
+        cancel: None,
+    };
+    let reference =
+        photoforge_lib::layers::render_document_float(&document, &resolved, options).unwrap();
+    let (tiled, stats) = render_document_tiled(&document, &resolved, options, 64).unwrap();
+    assert!(
+        stats.fell_back_to_full_frame,
+        "a 20-iteration deconvolution claimed to be tileable"
+    );
+    // Falling back means the oracle produced it, so it must match exactly.
+    assert_eq!(reference.pixels(), tiled.pixels());
+}
+
+/// A short deconvolution does fit in a halo, and then it must tile seamlessly.
+#[test]
+fn a_short_deconvolution_tiles_seamlessly() {
+    let clean = fixtures::scene(192, 192);
+    let blurred = fixtures::defocus_blur(&clean, 1.0);
+    let operation = EditOperation::Deconvolve {
+        kernel: BlurKernel::Defocus { radius: 1.0 },
+        iterations: 8,
+        damping: 0.2,
+    };
+    let (document, store) = document_with(blurred, operation);
+    let resolved = store
+        .resolve(&document.referenced_pixel_ids(), false)
+        .unwrap();
+    let options = RenderOptions {
+        scale: 1.0,
+        cancel: None,
+    };
+    let reference =
+        photoforge_lib::layers::render_document_float(&document, &resolved, options).unwrap();
+    let (tiled, stats) = render_document_tiled(&document, &resolved, options, 96).unwrap();
+    assert!(
+        !stats.fell_back_to_full_frame,
+        "an 8-iteration radius-1 deconvolution should fit in a halo"
+    );
+    let worst = reference
+        .pixels()
+        .iter()
+        .zip(tiled.pixels())
+        .map(|(a, b)| (a.red - b.red).abs().max((a.green - b.green).abs()))
+        .fold(0.0f32, f32::max);
+    assert!(worst < 1e-5, "the tiled deconvolution seamed by {worst}");
 }

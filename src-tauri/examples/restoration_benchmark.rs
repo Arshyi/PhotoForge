@@ -7,7 +7,10 @@
 //! not improved anything.
 //!
 //! Usage: restoration_benchmark [SIZE]
-use photoforge_lib::{color::FloatImage, domain::EditOperation, fixtures, high_precision, metrics};
+use photoforge_lib::{
+    color::FloatImage, domain::EditOperation, fixtures, high_precision,
+    image_processing_kernels::BlurKernel, metrics,
+};
 use std::time::Instant;
 
 struct Case {
@@ -105,18 +108,25 @@ fn main() {
             name: "defocus-blur",
             clean: clean.clone(),
             degraded: fixtures::defocus_blur(&clean, 1.5),
-            operation: EditOperation::MildDeblur {
-                strength: 0.7,
-                radius: 1.5,
+            // The kernel the fixture actually applied, so this measures a
+            // deconvolution against a known blur rather than a guessed one.
+            operation: EditOperation::Deconvolve {
+                kernel: BlurKernel::Defocus { radius: 1.5 },
+                iterations: 20,
+                damping: 0.1,
             },
         },
         Case {
             name: "motion-blur",
             clean: clean.clone(),
             degraded: fixtures::motion_blur(&clean, 20.0, 7.0),
-            operation: EditOperation::MildDeblur {
-                strength: 0.7,
-                radius: 2.0,
+            operation: EditOperation::Deconvolve {
+                kernel: BlurKernel::Motion {
+                    angle_degrees: 20.0,
+                    distance: 7.0,
+                },
+                iterations: 20,
+                damping: 0.1,
             },
         },
         Case {

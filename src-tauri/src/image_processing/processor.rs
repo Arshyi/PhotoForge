@@ -212,6 +212,15 @@ pub(crate) fn apply_operation(
                 "decontaminate_colors requires a selection mask".into(),
             ));
         }
+        EditOperation::Deconvolve { .. } => {
+            // Deconvolution multiplies an estimate by a ratio, repeatedly. At
+            // 8 bits the quantisation error compounds through every iteration,
+            // so the legacy renderer refuses rather than returning a worse
+            // picture that looks like the same feature.
+            return Err(AppError::InvalidOperation(
+                "deconvolve requires a high-precision document".into(),
+            ));
+        }
         EditOperation::RemoveDefects { .. } => {
             // The legacy encoded-8-bit renderer is kept working for pre-0.10
             // documents rather than extended. Defect removal compares a pixel

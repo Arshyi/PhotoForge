@@ -166,6 +166,20 @@ pub enum EditOperation {
         strength: f32,
         radius: f32,
     },
+    /// Richardson-Lucy deconvolution against a named point-spread function.
+    ///
+    /// Distinct from `MildDeblur`, which is an unsharp mask: this one models
+    /// the blur and inverts it. It needs to be told which blur, because
+    /// PhotoForge does not estimate an unknown kernel.
+    Deconvolve {
+        kernel: crate::image_processing::kernels::BlurKernel,
+        /// Bounded: each iteration is two convolutions, so an unbounded count
+        /// is unbounded work the user cannot interrupt.
+        iterations: u32,
+        /// Pulls each multiplicative update toward one, which is what limits
+        /// ringing at strong edges.
+        damping: f32,
+    },
     DocumentEnhance {
         strength: f32,
         grayscale: bool,
@@ -309,6 +323,17 @@ impl EditOperation {
                 strength,
                 threshold,
             } => (0.0..=1.0).contains(strength) && (0.5..=10.0).contains(threshold),
+            Self::Deconvolve {
+                kernel,
+                iterations,
+                damping,
+            } => {
+                kernel.validate()
+                    && (1..=crate::image_processing::high_precision::MAX_DECONVOLUTION_ITERATIONS)
+                        .contains(iterations)
+                    && damping.is_finite()
+                    && (0.0..=1.0).contains(damping)
+            }
             Self::LocalContrast {
                 strength,
                 tile_size,
@@ -477,6 +502,7 @@ impl EditOperation {
             Self::Denoise { .. } => "denoise",
             Self::Deblock { .. } => "deblock",
             Self::RemoveDefects { .. } => "remove_defects",
+            Self::Deconvolve { .. } => "deconvolve",
             Self::EdgeAwareSharpen { .. } => "edge_aware_sharpen",
             Self::MildDeblur { .. } => "mild_deblur",
             Self::DocumentEnhance { .. } => "document_enhance",
@@ -706,6 +732,11 @@ mod tests {
             EditOperation::RemoveDefects {
                 strength: 0.9,
                 threshold: 3.0,
+            },
+            EditOperation::Deconvolve {
+                kernel: crate::image_processing::kernels::BlurKernel::Defocus { radius: 1.5 },
+                iterations: 12,
+                damping: 0.2,
             },
             EditOperation::EdgeAwareSharpen {
                 strength: 0.7,

@@ -14,7 +14,7 @@ mod image_processing;
 pub use image_processing::high_precision;
 /// Fixtures and metrics are public so benchmarks and integration tests can
 /// score restoration against known-clean images rather than against opinion.
-pub use image_processing::{fixtures, metrics};
+pub use image_processing::{fixtures, kernels as image_processing_kernels, metrics};
 pub mod infrastructure;
 pub mod layers;
 pub mod mask;

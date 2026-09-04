@@ -3,6 +3,7 @@ mod decontaminate;
 pub mod fixtures;
 pub mod high_precision;
 mod inspection;
+pub mod kernels;
 pub mod metrics;
 mod preview_masks;
 mod processor;

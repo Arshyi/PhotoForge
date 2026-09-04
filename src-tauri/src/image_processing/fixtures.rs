@@ -10,6 +10,7 @@
 //! claims on the degradation it was handed, and that is what they are used for.
 use crate::color::{FloatImage, FloatRgba};
 
+use super::kernels::BlurKernel;
 use super::metrics::Noise;
 
 /// A clean test scene with the features restoration has to respect.
@@ -140,83 +141,32 @@ pub fn sensor_defects(
     (out, placed)
 }
 
-/// Convolves with a normalised kernel, clamping at the border.
-fn convolve(image: &FloatImage, kernel: &[(i32, i32, f32)]) -> FloatImage {
-    let (width, height) = image.dimensions();
-    let mut out = image.clone();
-    let total: f32 = kernel.iter().map(|(_, _, w)| *w).sum();
-    let total = if total.abs() < 1e-9 { 1.0 } else { total };
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = [0.0f32; 3];
-            for (dx, dy, weight) in kernel {
-                let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as u32;
-                let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as u32;
-                let p = image.get(sx, sy).unwrap();
-                sum[0] += p.red * weight;
-                sum[1] += p.green * weight;
-                sum[2] += p.blue * weight;
-            }
-            let alpha = image.get(x, y).unwrap().alpha;
-            out.pixels_mut()[(y * width + x) as usize] =
-                FloatRgba::new(sum[0] / total, sum[1] / total, sum[2] / total, alpha);
-        }
-    }
-    out
-}
-
-/// The exact kernel `defocus_blur` applies, so a deconvolution can be tested
-/// against the blur it is supposed to invert rather than against a guess.
-pub fn defocus_kernel(radius: f32) -> Vec<(i32, i32, f32)> {
-    let reach = radius.ceil().max(1.0) as i32;
-    let mut kernel = Vec::new();
-    for dy in -reach..=reach {
-        for dx in -reach..=reach {
-            let distance = ((dx * dx + dy * dy) as f32).sqrt();
-            // A disc with a soft edge, which is what an out-of-focus point
-            // spreads into, rather than a Gaussian.
-            let weight = if distance <= radius {
-                1.0
-            } else if distance <= radius + 1.0 {
-                radius + 1.0 - distance
-            } else {
-                0.0
-            };
-            if weight > 0.0 {
-                kernel.push((dx, dy, weight));
-            }
-        }
-    }
-    kernel
+/// Applies a production blur kernel.
+///
+/// These delegate to `image_processing::kernels` rather than defining their own
+/// shapes. A deconvolution can only be judged against the kernel that actually
+/// blurred the image, so the fixture and the operation must share one
+/// definition; two copies that drifted would leave every deconvolution test
+/// measuring the wrong thing and still passing.
+fn convolve(image: &FloatImage, taps: &[(i32, i32, f32)]) -> FloatImage {
+    super::kernels::convolve(image, taps).expect("fixture convolution")
 }
 
 /// Out-of-focus blur with a disc kernel.
 pub fn defocus_blur(image: &FloatImage, radius: f32) -> FloatImage {
-    convolve(image, &defocus_kernel(radius))
-}
-
-/// The exact kernel `motion_blur` applies.
-pub fn motion_kernel(angle_degrees: f32, distance: f32) -> Vec<(i32, i32, f32)> {
-    let steps = distance.round().max(1.0) as i32;
-    let radians = angle_degrees.to_radians();
-    let (dx, dy) = (radians.cos(), radians.sin());
-    let mut kernel = Vec::new();
-    // Sampled along the line and accumulated per integer offset, so the kernel
-    // is exactly what the blur applies.
-    for step in -(steps / 2)..=(steps / 2) {
-        let x = (dx * step as f32).round() as i32;
-        let y = (dy * step as f32).round() as i32;
-        match kernel.iter_mut().find(|(kx, ky, _)| *kx == x && *ky == y) {
-            Some((_, _, weight)) => *weight += 1.0,
-            None => kernel.push((x, y, 1.0f32)),
-        }
-    }
-    kernel
+    convolve(image, &BlurKernel::Defocus { radius }.taps())
 }
 
 /// Linear motion blur at an angle.
 pub fn motion_blur(image: &FloatImage, angle_degrees: f32, distance: f32) -> FloatImage {
-    convolve(image, &motion_kernel(angle_degrees, distance))
+    convolve(
+        image,
+        &BlurKernel::Motion {
+            angle_degrees,
+            distance,
+        }
+        .taps(),
+    )
 }
 
 /// Block-quantised degradation standing in for JPEG artifacts.
@@ -465,11 +415,19 @@ mod tests {
     fn published_kernels_match_the_blur_they_describe() {
         let clean = scene(48, 48);
         for (name, blurred, kernel) in [
-            ("defocus", defocus_blur(&clean, 2.0), defocus_kernel(2.0)),
+            (
+                "defocus",
+                defocus_blur(&clean, 2.0),
+                BlurKernel::Defocus { radius: 2.0 }.taps(),
+            ),
             (
                 "motion",
                 motion_blur(&clean, 45.0, 7.0),
-                motion_kernel(45.0, 7.0),
+                BlurKernel::Motion {
+                    angle_degrees: 45.0,
+                    distance: 7.0,
+                }
+                .taps(),
             ),
         ] {
             let manual = convolve(&clean, &kernel);
