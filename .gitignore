@@ -8,3 +8,4 @@ src-tauri/gen/schemas/
 .vscode/
 coverage/
 release/
+raw-fixtures/

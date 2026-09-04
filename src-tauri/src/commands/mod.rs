@@ -40,4 +40,8 @@ pub use professional::{
     start_batch_workflow, validate_shortcut_bindings, validate_workflow_json,
     validate_workspace_layout,
 };
-pub use raw::{inspect_raw, RawInspectionResult};
+pub use raw::register_raw_commands;
+pub use raw::{
+    develop_raw_layer, export_raw_layer_png16, inspect_raw, open_raw_layer, relink_raw_source,
+    verify_raw_source, RawDevelopResult, RawInspectionResult,
+};

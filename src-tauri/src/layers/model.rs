@@ -176,6 +176,15 @@ pub struct Layer {
     pub collapsed: bool,
     #[serde(default)]
     pub metadata: LayerMetadata,
+    /// The camera file this layer was developed from, when it came from one.
+    ///
+    /// The pixel buffer a RAW layer points at is a cache of one development;
+    /// this record and its parameters are what actually define the layer, so a
+    /// project reopened later can develop it again rather than inheriting a
+    /// baked raster. Absent on every layer that did not come from a RAW file,
+    /// and absent in projects written before 0.9.0.
+    #[serde(default)]
+    pub raw: Option<crate::raw::RawLayerSource>,
     pub content: LayerContent,
 }
 
@@ -614,6 +623,7 @@ pub(crate) mod fixtures {
             mask: None,
             collapsed: false,
             metadata: LayerMetadata::default(),
+            raw: None,
             content: LayerContent::Pixel {
                 pixel_id: format!("px{id}"),
                 width,
@@ -643,6 +653,7 @@ pub(crate) mod fixtures {
             mask: None,
             collapsed: false,
             metadata: LayerMetadata::default(),
+            raw: None,
             content: LayerContent::Group {
                 children,
                 isolated: true,
@@ -662,6 +673,7 @@ pub(crate) mod fixtures {
             mask: None,
             collapsed: false,
             metadata: LayerMetadata::default(),
+            raw: None,
             content: LayerContent::Adjustment {
                 operation: Box::new(operation),
             },

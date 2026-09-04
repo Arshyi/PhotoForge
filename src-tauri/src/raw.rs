@@ -1,11 +1,15 @@
-//! Safe RAW-source discovery and non-destructive development contracts.
+//! RAW source discovery, decoding, and non-destructive development.
 //!
-//! This module intentionally stops at a trustable source boundary.  The
-//! existing application does not yet bundle a RAW decoder, so recognised
-//! camera extensions are reported as `RecognizedDecoderUnavailable` rather
-//! than being routed through the 8-bit image loader or a shell command.  A
-//! future decoder can implement the same bounded metadata contract without
-//! changing the project/layer model.
+//! DNG is decoded here from the published specification: see `raw::dng` for
+//! the sensor reader, `raw::demosaic` for normalisation and interpolation, and
+//! `raw::develop` for the ordered development graph. Every other camera
+//! extension is recognised but reported as `RecognizedDecoderUnavailable`,
+//! because recognising a file name is not the same as being able to read the
+//! file, and it is never routed through the 8-bit image loader instead.
+//!
+//! A RAW file is hostile input. Sizes, offsets, and counts inside one are
+//! attacker-controlled and are bounded before anything is allocated. Nothing
+//! here opens a socket, starts a process, or loads a library.
 
 pub mod demosaic;
 pub mod develop;
@@ -119,6 +123,9 @@ impl RawFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RawSupport {
+    /// This build can decode the file.
+    Decodable,
+    /// The extension is a camera RAW format, but no decoder here reads it.
     RecognizedDecoderUnavailable,
     Unsupported,
 }
@@ -261,14 +268,25 @@ pub struct RawDecoderCapabilities {
     pub demosaic_algorithms: Vec<String>,
 }
 
+/// Identifier recorded in projects, so a file developed by a later decoder can
+/// be recognised as such rather than assumed identical.
+pub const DECODER_ID: &str = "photoforge-dng";
+pub const DECODER_VERSION: &str = "1";
+
 pub fn decoder_capabilities() -> RawDecoderCapabilities {
     RawDecoderCapabilities {
-        backend: "none (rawloader evaluation pending)".into(),
-        backend_available: false,
+        backend: DECODER_ID.into(),
+        backend_available: true,
+        // The decoder is written in Rust against the published DNG
+        // specification, so no native library is packaged and no DLL has to be
+        // shipped, found, or licensed.
         native_dependencies: false,
-        license: "not applicable; no decoder bundled".into(),
-        formats: Vec::new(),
-        demosaic_algorithms: Vec::new(),
+        license: "PhotoForge's own code; no third-party decoder is linked".into(),
+        // Only formats this build actually decodes are listed. Recognising an
+        // extension is not support, and the inspection result says which is
+        // which.
+        formats: vec![RawFormat::Dng],
+        demosaic_algorithms: vec!["bilinear".into(), "malvar-he-cutler".into()],
     }
 }
 
@@ -337,17 +355,20 @@ pub fn inspect_raw_path(path: &Path) -> Result<RawInspection, RawError> {
         .to_string();
     Ok(RawInspection {
         filename,
-        support: if format.is_some() {
-            RawSupport::RecognizedDecoderUnavailable
-        } else {
-            RawSupport::Unsupported
+        support: match format {
+            Some(RawFormat::Dng) if tiff_header => RawSupport::Decodable,
+            Some(_) => RawSupport::RecognizedDecoderUnavailable,
+            None => RawSupport::Unsupported,
         },
         format,
         file_size: metadata.len(),
         sha256,
         tiff_header,
         dimensions: None,
-        decoder: None,
+        decoder: match format {
+            Some(RawFormat::Dng) if tiff_header => Some(DECODER_ID.to_string()),
+            _ => None,
+        },
     })
 }
 
@@ -416,6 +437,183 @@ impl RawDevelopmentDocument {
             .validate()
             .map_err(|error| RawError::InvalidMetadata(error.to_string()))
     }
+}
+
+/// How a project holds on to the RAW file behind a layer.
+///
+/// The two modes are deliberately distinct values rather than an inferred
+/// state: a project says which one it uses, and PhotoForge never silently
+/// changes from one to the other behind the user's back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum RawSourceMode {
+    /// The project records where the file lives and verifies it on reopen.
+    /// The original is never written to.
+    Linked { path: String },
+    /// The project carries the original bytes, so it is self-contained.
+    ///
+    /// The schema accepts this so a project written by a later release still
+    /// loads here, and so the container format never has to change again to
+    /// gain it. This build does not produce embedded sources; `encode` refuses
+    /// rather than writing a project that claims to embed bytes it does not.
+    Embedded,
+}
+
+impl RawSourceMode {
+    pub const fn is_linked(&self) -> bool {
+        matches!(self, Self::Linked { .. })
+    }
+}
+
+/// Whether a linked RAW source is still where and what the project expects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RawSourceStatus {
+    /// The file is present and its hash matches the one recorded.
+    Available,
+    /// Nothing readable is at the recorded path.
+    Missing,
+    /// A file is there, but it is not the photograph the project was built
+    /// from. Binding to it silently would put someone else's picture under
+    /// this project's edits.
+    #[serde(rename_all = "camelCase")]
+    Changed { found_sha256: String },
+}
+
+/// Everything a project needs to reproduce a RAW layer from its original file.
+///
+/// The developed raster is a cache, not the document: this record and the
+/// development parameters are what actually define the layer, which is what
+/// makes RAW editing non-destructive across sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RawLayerSource {
+    pub reference: RawSourceReference,
+    pub mode: RawSourceMode,
+    pub parameters: DevelopmentParameters,
+    pub decoder: String,
+    pub decoder_version: String,
+    /// What the camera recorded, kept so the interface can describe the
+    /// photograph even when the source file is not reachable.
+    #[serde(default)]
+    pub capture: RawCaptureMetadata,
+}
+
+impl RawLayerSource {
+    pub fn validate(&self) -> Result<(), RawError> {
+        self.reference.validate()?;
+        self.capture.validate()?;
+        if self.decoder.trim().is_empty() || self.decoder.len() > 128 {
+            return Err(RawError::InvalidMetadata("decoder id is invalid".into()));
+        }
+        if self.decoder_version.trim().is_empty() || self.decoder_version.len() > 64 {
+            return Err(RawError::InvalidMetadata(
+                "decoder version is invalid".into(),
+            ));
+        }
+        if let RawSourceMode::Linked { path } = &self.mode {
+            if path.trim().is_empty() || path.len() > 4096 {
+                return Err(RawError::InvalidMetadata(
+                    "the linked source path is empty or unreasonably long".into(),
+                ));
+            }
+        }
+        self.parameters
+            .validate()
+            .map_err(|error| RawError::InvalidMetadata(error.to_string()))
+    }
+
+    /// The path this layer is linked to, if it is linked at all.
+    pub fn linked_path(&self) -> Option<&str> {
+        match &self.mode {
+            RawSourceMode::Linked { path } => Some(path.as_str()),
+            RawSourceMode::Embedded => None,
+        }
+    }
+}
+
+/// Checks whether a linked source is present and unchanged.
+///
+/// The hash is what decides, not the filename: two photographs can share a
+/// name, and one of them is not the one this project was built from.
+pub fn verify_source(reference: &RawSourceReference, path: &Path) -> RawSourceStatus {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return RawSourceStatus::Missing;
+    };
+    match fs::metadata(&canonical) {
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return RawSourceStatus::Missing,
+    }
+    match sha256_file(&canonical) {
+        Ok(found) if found == reference.sha256 => RawSourceStatus::Available,
+        Ok(found) => RawSourceStatus::Changed {
+            found_sha256: found,
+        },
+        Err(_) => RawSourceStatus::Missing,
+    }
+}
+
+/// Reads a RAW file into memory, bounded by the documented ceiling.
+pub fn read_source_bytes(path: &Path) -> Result<Vec<u8>, RawError> {
+    let canonical = canonical_source_path(path)?;
+    let metadata = fs::metadata(&canonical).map_err(RawError::from)?;
+    if metadata.len() == 0 {
+        return Err(RawError::Malformed("the RAW file is empty".into()));
+    }
+    if metadata.len() > RAW_MAX_FILE_BYTES {
+        return Err(RawError::FileTooLarge);
+    }
+    fs::read(&canonical).map_err(RawError::from)
+}
+
+/// Builds the source record for a file that has just been decoded.
+pub fn source_reference_for(
+    path: &Path,
+    sensor_width: u32,
+    sensor_height: u32,
+) -> Result<RawSourceReference, RawError> {
+    let canonical = canonical_source_path(path)?;
+    let metadata = fs::metadata(&canonical).map_err(RawError::from)?;
+    let format = canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .and_then(RawFormat::from_extension)
+        .ok_or_else(|| {
+            RawError::Unsupported("the file does not use a recognised RAW extension".into())
+        })?;
+    let filename = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("raw image")
+        .to_string();
+    let reference = RawSourceReference {
+        filename,
+        format,
+        file_size: metadata.len(),
+        sha256: sha256_file(&canonical)?,
+        width: sensor_width,
+        height: sensor_height,
+    };
+    reference.validate()?;
+    Ok(reference)
+}
+
+/// Renders a canonical path in the form the path guard accepts.
+///
+/// Windows canonicalisation returns an extended-length path (`\?\C:\...`).
+/// That form is correct, but it begins with the same two backslashes a UNC
+/// network path does, and the guard refuses those on purpose. Stripping the
+/// prefix keeps a stored project path usable while leaving the refusal of real
+/// network locations exactly as it was: a verbatim UNC path keeps its prefix
+/// and is still rejected.
+pub fn presentable_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if !rest.starts_with(r"UNC\") {
+            return rest.to_string();
+        }
+    }
+    text.into_owned()
 }
 
 /// Returns an absolute path only for internal workers; this helper avoids
@@ -529,11 +727,34 @@ mod tests {
     }
 
     #[test]
-    fn decoder_capabilities_are_explicitly_unavailable() {
+    /// Capabilities describe what this build actually does. A format is listed
+    /// only when it can be decoded, never because its extension is recognised.
+    fn decoder_capabilities_report_only_what_is_implemented() {
         let capabilities = decoder_capabilities();
-        assert!(!capabilities.backend_available);
-        assert!(capabilities.formats.is_empty());
-        assert!(capabilities.demosaic_algorithms.is_empty());
+        assert!(capabilities.backend_available);
+        assert_eq!(capabilities.backend, DECODER_ID);
+        // The decoder is Rust written against the published specification, so
+        // packaging ships no native library.
+        assert!(!capabilities.native_dependencies);
+        assert_eq!(capabilities.formats, vec![RawFormat::Dng]);
+        for absent in [
+            RawFormat::Cr2,
+            RawFormat::Cr3,
+            RawFormat::Nef,
+            RawFormat::Arw,
+            RawFormat::Raf,
+            RawFormat::Orf,
+            RawFormat::Rw2,
+        ] {
+            assert!(
+                !capabilities.formats.contains(&absent),
+                "{absent:?} is listed as supported but no decoder reads it"
+            );
+        }
+        assert_eq!(
+            capabilities.demosaic_algorithms,
+            vec!["bilinear".to_string(), "malvar-he-cutler".to_string()]
+        );
     }
 
     #[test]
