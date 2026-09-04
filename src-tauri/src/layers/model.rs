@@ -23,7 +23,7 @@ pub const MAX_TIMESTAMP_CHARS: usize = 64;
 /// Largest canvas the layer document model accepts, matching the existing
 /// decode ceiling in `infrastructure::image_io`.
 pub const MAX_CANVAS_DIMENSION: u32 = 20_000;
-pub const MAX_CANVAS_PIXELS: u64 = 40_000_000;
+pub const MAX_CANVAS_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
 
 /// Groups are isolated unless a project says otherwise, so a document written
 /// before pass-through existed restores with exactly its original appearance.
@@ -252,6 +252,15 @@ impl Layer {
         }
         self.transform.validate()?;
         self.metadata.validate()?;
+        if let Some(raw) = &self.raw {
+            raw.validate()
+                .map_err(|error| AppError::InvalidLayerDocument(error.to_string()))?;
+            if !matches!(self.content, LayerContent::Pixel { .. }) {
+                return Err(AppError::InvalidLayerDocument(
+                    "only pixel layers can carry a RAW source".into(),
+                ));
+            }
+        }
 
         match &self.content {
             LayerContent::Pixel {
@@ -336,6 +345,8 @@ pub fn validate_dimensions(width: u32, height: u32) -> Result<(), AppError> {
 #[serde(rename_all = "camelCase")]
 pub struct LayerDocument {
     pub schema_version: u32,
+    #[serde(default)]
+    pub precision: crate::pixel::DocumentPrecision,
     pub canvas_width: u32,
     pub canvas_height: u32,
     #[serde(default)]
@@ -348,6 +359,7 @@ impl LayerDocument {
     pub fn new(canvas_width: u32, canvas_height: u32) -> Self {
         Self {
             schema_version: LAYER_SCHEMA_VERSION,
+            precision: crate::pixel::DocumentPrecision::default(),
             canvas_width,
             canvas_height,
             layers: Vec::new(),
@@ -683,6 +695,7 @@ pub(crate) mod fixtures {
     pub fn document(layers: Vec<Layer>) -> LayerDocument {
         LayerDocument {
             schema_version: LAYER_SCHEMA_VERSION,
+            precision: Default::default(),
             canvas_width: 16,
             canvas_height: 16,
             layers,

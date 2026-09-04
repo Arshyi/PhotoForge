@@ -17,7 +17,7 @@ use photoforge_lib::raw::dng::fixtures::DngBuilder;
 use serde_json::{json, Value};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
-use tauri::{WebviewWindow, WebviewWindowBuilder};
+use tauri::{Manager, WebviewWindow, WebviewWindowBuilder};
 
 struct Harness {
     /// Kept alive: dropping the app would take the webview with it.
@@ -34,6 +34,34 @@ impl Harness {
         let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .expect("mock webview");
+        // RAW layer edits now require a current document, like other layer IPC.
+        let original = std::sync::Arc::new(image::DynamicImage::new_rgba8(2, 2));
+        *app.state::<AppState>().session.lock().unwrap() =
+            Some(photoforge_lib::application::EditorSession {
+                document_id: 1,
+                analysis: None,
+                source: photoforge_lib::infrastructure::LoadedImage {
+                    path: "raw-command-test.png".into(),
+                    original: original.clone(),
+                    preview: original,
+                    working: None,
+                    metadata: photoforge_lib::domain::ImageMetadata {
+                        filename: "test.png".into(),
+                        width: 2,
+                        height: 2,
+                        format: "PNG".into(),
+                        file_size: 0,
+                        color_space: "sRGB".into(),
+                        bit_depth: 8,
+                        has_alpha: true,
+                        created_at: None,
+                        modified_at: None,
+                        camera_model: None,
+                        exif_available: false,
+                        raw: None,
+                    },
+                },
+            });
         Self { _app: app, webview }
     }
 
@@ -746,6 +774,7 @@ fn complex_raw_document(
 
     let document = LayerDocument {
         schema_version: photoforge_lib::layers::LAYER_SCHEMA_VERSION,
+        precision: Default::default(),
         canvas_width: width,
         canvas_height: height,
         layers: vec![base("plain"), group],

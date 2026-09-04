@@ -1,13 +1,16 @@
 use crate::application::AppState;
 use crate::domain::{EditOperation, ExportProfile, ExportResult, ImageMetadata, PreviewResult};
 use crate::error::AppError;
+use crate::image_processing::high_precision::pipeline_typed;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
 use crate::infrastructure::{encode_preview, load_image, save_image_with_profile, LoadedImage};
+use crate::layers::render_document_typed;
 use crate::layers::{
-    layer_mask_to_selection, preview_dimensions, render_layers, selection_to_layer_mask, BlendMode,
-    Layer, LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
+    layer_mask_to_selection, preview_dimensions, selection_to_layer_mask, BlendMode, Layer,
+    LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
 };
 use crate::mask::{MaskBitmap, MaskSnapshot};
+use crate::pixel::{DocumentPrecision, PixelBuffer};
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -26,6 +29,7 @@ pub struct LayerPixelsResult {
     pub width: u32,
     pub height: u32,
     pub filename: Option<String>,
+    pub raw: Option<crate::raw::RawLayerSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,10 +166,9 @@ pub async fn render_layer_composite(
 
     let started = Instant::now();
     let composited = tauri::async_runtime::spawn_blocking(move || {
-        let rendered = render_layers(
-            &document.layers,
-            document.canvas_width,
-            document.canvas_height,
+        let _job = crate::resources::acquire_job(None)?;
+        let rendered = render_document_typed(
+            &document,
             &resolved,
             RenderOptions {
                 scale,
@@ -173,7 +176,10 @@ pub async fn render_layer_composite(
             },
         )?;
         let prepared = prepare_preview_operations(&operations, canvas, preview_canvas)?;
-        apply_pipeline(&DynamicImage::ImageRgba8(rendered), &prepared)
+        let processed = pipeline_typed(rendered, &prepared, None)?;
+        Ok::<_, AppError>(DynamicImage::ImageRgba8(
+            processed.encoded8().as_ref().clone(),
+        ))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("layer render worker stopped".into()))??;
@@ -204,6 +210,7 @@ pub async fn export_layer_composite(
     document: LayerDocument,
     operations: Vec<EditOperation>,
     profile: ExportProfile,
+    color: Option<crate::color_management::ColorExportOptions>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     document.validate()?;
@@ -229,16 +236,61 @@ pub async fn export_layer_composite(
 
     let started = Instant::now();
     let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
-        let rendered = render_layers(
-            &document.layers,
-            document.canvas_width,
-            document.canvas_height,
-            &resolved,
-            RenderOptions::default(),
-        )?;
-        let processed = apply_pipeline(&DynamicImage::ImageRgba8(rendered), &operations)?;
-        let (width, height) = (processed.width(), processed.height());
-        let saved = save_image_with_profile(&processed, &original_path, &output_path, profile)?;
+        let _job = crate::resources::acquire_job(None)?;
+        for layer in document.iter() {
+            if let Some(raw) = &layer.raw {
+                if let Some(path) = raw.linked_path() {
+                    if std::fs::canonicalize(path).ok() == std::fs::canonicalize(&output_path).ok()
+                        && output_path.exists()
+                    {
+                        return Err(AppError::InvalidOutputPath);
+                    }
+                }
+            }
+        }
+        let rendered = render_document_typed(&document, &resolved, RenderOptions::default())?;
+        if document.precision == DocumentPrecision::LinearSrgbF32 {
+            crate::resources::ResourceEstimate::pipeline(
+                document.canvas_width,
+                document.canvas_height,
+                &operations,
+                crate::layers::PixelSource::resident_bytes(&resolved) + rendered.bytes(),
+            )?;
+        }
+        let processed = pipeline_typed(rendered, &operations, None)?;
+        let (width, height) = processed.dimensions();
+        let saved = match processed {
+            PixelBuffer::LinearRgbaF32(image) => crate::infrastructure::save_color_image(
+                &image,
+                &original_path,
+                &output_path,
+                profile,
+                color.unwrap_or(crate::color_management::ColorExportOptions {
+                    bit_depth: 8,
+                    ..Default::default()
+                }),
+                None,
+            )?,
+            PixelBuffer::EncodedSrgba8(image) => {
+                if let Some(color) = color {
+                    crate::infrastructure::save_color_image(
+                        &crate::color::FloatImage::from_rgba8(&image)?,
+                        &original_path,
+                        &output_path,
+                        profile,
+                        color,
+                        None,
+                    )?
+                } else {
+                    save_image_with_profile(
+                        &DynamicImage::ImageRgba8(image.as_ref().clone()),
+                        &original_path,
+                        &output_path,
+                        profile,
+                    )?
+                }
+            }
+        };
         Ok::<_, AppError>((saved, width, height))
     })
     .await
@@ -258,24 +310,45 @@ pub async fn import_layer_image(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<LayerPixelsResult, AppError> {
+    if std::path::Path::new(&path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("dng"))
+    {
+        let result = super::raw::open_raw_layer(path, None, true, state).await?;
+        return Ok(LayerPixelsResult {
+            pixel_id: result.pixel_id,
+            width: result.width,
+            height: result.height,
+            filename: Some(result.source.reference.filename.clone()),
+            raw: Some(result.source),
+        });
+    }
     let input_path = PathBuf::from(path);
-    let loaded = tauri::async_runtime::spawn_blocking(move || load_image(&input_path))
-        .await
-        .map_err(|_| AppError::ProcessingFailure("layer import worker stopped".into()))??;
+    let loaded = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        load_image(&input_path)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("layer import worker stopped".into()))??;
     let filename = loaded.metadata.filename.clone();
-    let image = loaded.original.to_rgba8();
-    let (width, height) = (image.width(), image.height());
+    let image = match loaded.working {
+        Some(working) => PixelBuffer::LinearRgbaF32(working),
+        None => loaded.original.to_rgba8().into(),
+    };
+    let (width, height) = image.dimensions();
 
     let mut store = state
         .layers
         .lock()
         .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    let pixel_id = store.register(image)?;
+    let pixel_id = store.register_typed(image)?;
     Ok(LayerPixelsResult {
         pixel_id,
         width,
         height,
         filename: Some(filename),
+        raw: None,
     })
 }
 
@@ -298,6 +371,7 @@ pub async fn create_layer_pixels(
         width,
         height,
         filename: None,
+        raw: None,
     })
 }
 
@@ -322,13 +396,11 @@ async fn render_subset_into_buffer(
     let canvas_width = document.canvas_width;
     let canvas_height = document.canvas_height;
     let rendered = tauri::async_runtime::spawn_blocking(move || {
-        render_layers(
-            &layers,
-            canvas_width,
-            canvas_height,
-            &resolved,
-            RenderOptions::default(),
-        )
+        let _job = crate::resources::acquire_job(None)?;
+        let mut subset = document;
+        subset.layers = layers;
+        subset.active_layer_id = None;
+        render_document_typed(&subset, &resolved, RenderOptions::default())
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("layer merge worker stopped".into()))??;
@@ -337,12 +409,13 @@ async fn render_subset_into_buffer(
         .layers
         .lock()
         .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    let pixel_id = store.register(rendered)?;
+    let pixel_id = store.register_typed(rendered)?;
     Ok(LayerPixelsResult {
         pixel_id,
         width: canvas_width,
         height: canvas_height,
         filename: None,
+        raw: None,
     })
 }
 
@@ -501,30 +574,33 @@ pub async fn apply_operations_to_layer(
             .layers
             .lock()
             .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-        store.full(&pixel_id)?
+        let source = store.full_typed(&pixel_id)?;
+        if document.precision == DocumentPrecision::LinearSrgbF32 {
+            PixelBuffer::LinearRgbaF32(source.linear()?)
+        } else {
+            PixelBuffer::EncodedSrgba8(source.encoded8())
+        }
     };
 
     let processed = tauri::async_runtime::spawn_blocking(move || {
-        apply_pipeline(
-            &DynamicImage::ImageRgba8(source.as_ref().clone()),
-            &operations,
-        )
+        let _job = crate::resources::acquire_job(None)?;
+        pipeline_typed(source, &operations, None)
     })
     .await
-    .map_err(|_| AppError::ProcessingFailure("layer edit worker stopped".into()))??
-    .to_rgba8();
-    let (width, height) = (processed.width(), processed.height());
+    .map_err(|_| AppError::ProcessingFailure("layer edit worker stopped".into()))??;
+    let (width, height) = processed.dimensions();
 
     let mut store = state
         .layers
         .lock()
         .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    let pixel_id = store.register(processed)?;
+    let pixel_id = store.register_typed(processed)?;
     Ok(LayerPixelsResult {
         pixel_id,
         width,
         height,
         filename: None,
+        raw: None,
     })
 }
 
@@ -565,19 +641,19 @@ pub async fn render_layer_thumbnail(
         }
         LayerKind::Group => {
             let (resolved, scale) = resolve_pixels(&state, &document, true)?;
-            let children = layer.children().to_vec();
-            let canvas = (document.canvas_width, document.canvas_height);
+            let mut thumbnail_document = document.clone();
+            thumbnail_document.layers = layer.children().to_vec();
+            thumbnail_document.active_layer_id = None;
             tauri::async_runtime::spawn_blocking(move || {
-                render_layers(
-                    &children,
-                    canvas.0,
-                    canvas.1,
+                render_document_typed(
+                    &thumbnail_document,
                     &resolved,
                     RenderOptions {
                         scale,
                         cancel: None,
                     },
                 )
+                .map(|image| (*image.encoded8()).clone())
             })
             .await
             .map_err(|_| AppError::ProcessingFailure("thumbnail worker stopped".into()))??
@@ -758,7 +834,7 @@ pub async fn save_layer_project(
             .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
         let mut buffers = Vec::new();
         for pixel_id in document.referenced_pixel_ids() {
-            let image = store.full(&pixel_id)?;
+            let image = store.full_typed(&pixel_id)?;
             buffers.push((pixel_id, image));
         }
         buffers
@@ -766,15 +842,12 @@ pub async fn save_layer_project(
 
     let started = Instant::now();
     let (saved_path, bytes) = tauri::async_runtime::spawn_blocking(move || {
-        let borrowed: Vec<(String, &RgbaImage)> = buffers
-            .iter()
-            .map(|(id, image)| (id.clone(), image.as_ref()))
-            .collect();
-        let bytes = crate::layers::save_project(
+        let _job = crate::resources::acquire_job(None)?;
+        let bytes = crate::layers::save_project_typed(
             &path,
             &document,
             &operations,
-            &borrowed,
+            &buffers,
             env!("CARGO_PKG_VERSION"),
             &created_at,
             &modified_at,
@@ -810,14 +883,16 @@ fn prepare_project(
     for (pixel_id, image) in loaded.pixels {
         store.register_with_id(&pixel_id, image)?;
     }
+    for (pixel_id, image) in loaded.linear_pixels {
+        store.register_typed_with_id(&pixel_id, image.into())?;
+    }
     let resolved = store.resolve(&loaded.document.referenced_pixel_ids(), false)?;
-    let original = Arc::new(DynamicImage::ImageRgba8(render_layers(
-        &loaded.document.layers,
-        width,
-        height,
-        &resolved,
-        RenderOptions::default(),
-    )?));
+    let typed = render_document_typed(&loaded.document, &resolved, RenderOptions::default())?;
+    let working = match &typed {
+        PixelBuffer::LinearRgbaF32(image) => Some(Arc::clone(image)),
+        _ => None,
+    };
+    let original = Arc::new(DynamicImage::ImageRgba8(typed.encoded8().as_ref().clone()));
     let (preview_width, preview_height) = preview_dimensions(width, height);
     let preview = if (preview_width, preview_height) == (width, height) {
         Arc::clone(&original)
@@ -830,7 +905,12 @@ fn prepare_project(
         (width, height),
         (preview_width, preview_height),
     )?;
-    let preview_data_url = if operations.is_empty() {
+    let preview_data_url = if let Some(working) = &working {
+        let prepared = working.resized(preview_width, preview_height)?;
+        let processed =
+            crate::image_processing::high_precision::pipeline(prepared, &operations, None)?;
+        encode_preview(&DynamicImage::ImageRgba8(processed.to_rgba8()))?
+    } else if operations.is_empty() {
         original_preview_data_url.clone()
     } else {
         encode_preview(&apply_pipeline(&preview, &operations)?)?
@@ -848,7 +928,7 @@ fn prepare_project(
             .map(|value| value.len())
             .unwrap_or(0),
         color_space: "sRGB".into(),
-        bit_depth: 8,
+        bit_depth: if working.is_some() { 32 } else { 8 },
         has_alpha: true,
         created_at: Some(loaded.created_at.clone()).filter(|value| !value.is_empty()),
         modified_at: Some(loaded.modified_at.clone()).filter(|value| !value.is_empty()),
@@ -862,6 +942,7 @@ fn prepare_project(
             original,
             preview,
             metadata: metadata.clone(),
+            working,
         },
         store,
         result: ProjectLoadResult {
@@ -892,6 +973,7 @@ async fn open_project(
     let request = super::editor::OpenRequest::begin(state, request_id)?;
     let input_path = PathBuf::from(path);
     let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
         let loaded = if recovery {
             crate::layers::read_managed_snapshot(&input_path)?
         } else {
@@ -947,20 +1029,17 @@ pub async fn write_recovery_snapshot(
             .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
         let mut buffers = Vec::new();
         for pixel_id in document.referenced_pixel_ids() {
-            buffers.push((pixel_id.clone(), store.full(&pixel_id)?));
+            buffers.push((pixel_id.clone(), store.full_typed(&pixel_id)?));
         }
         buffers
     };
 
     tauri::async_runtime::spawn_blocking(move || {
-        let borrowed: Vec<(String, &RgbaImage)> = buffers
-            .iter()
-            .map(|(id, image)| (id.clone(), image.as_ref()))
-            .collect();
-        crate::layers::write_recovery_snapshot(
+        let _job = crate::resources::acquire_job(None)?;
+        crate::layers::write_recovery_snapshot_typed(
             &document,
             &operations,
-            &borrowed,
+            &buffers,
             project_path.as_deref(),
             &document_name,
             env!("CARGO_PKG_VERSION"),
@@ -1061,6 +1140,8 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         discard_recovery_snapshot,
         plan_layer_workflow,
         super::editor::analyze_image,
+        super::editor::open_raw_image,
+        super::raw::develop_raw_layer,
         super::professional::generate_histogram,
         super::professional::inspect_image_pixel,
         super::professional::create_point_operation,
@@ -1079,12 +1160,14 @@ mod project_session_tests {
         LoadedProject {
             document: LayerDocument {
                 schema_version: crate::layers::LAYER_SCHEMA_VERSION,
+                precision: Default::default(),
                 canvas_width: 2,
                 canvas_height: 2,
                 layers: vec![test_pixel_layer("background", pixel_id, 2, 2)],
                 active_layer_id: Some("background".into()),
             },
             document_operations: vec![],
+            linear_pixels: vec![],
             pixels: vec![(
                 pixel_id.into(),
                 RgbaImage::from_pixel(2, 2, Rgba([value, 0, 0, 255])),

@@ -17,7 +17,7 @@ export interface ThumbnailEntry {
  * checksum rather than the mask payload, so comparing keys stays cheap.
  */
 export function thumbnailKey(layer: Layer, document: LayerDocument): string {
-  const parts: string[] = [layer.id];
+  const parts: string[] = [layer.id, document.precision ?? 'legacy_srgb8'];
   const content = layer.content;
   if (content.type === 'pixel') {
     parts.push('p', content.pixelId, String(content.width), String(content.height));
@@ -73,7 +73,8 @@ function transformSignature(layer: Layer): string {
     t.scaleY,
     t.rotationDegrees,
     t.flipHorizontal ? 1 : 0,
-    t.flipVertical ? 1 : 0
+    t.flipVertical ? 1 : 0,
+    t.interpolation ?? 'bilinear'
   ].join(':');
 }
 

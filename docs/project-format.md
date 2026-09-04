@@ -5,8 +5,8 @@ the layer tree, not a flattened image.
 
 ```text
 Extension:      .photoforge
-Container:      PhotoForge Container v1 (magic "PFORGE\r\n")
-Format version: 1
+Container:      PhotoForge Container v2 (magic "PFORGE\r\n")
+Format version: 2 (version 1 remains readable)
 ```
 
 ## Why not ZIP
@@ -18,10 +18,10 @@ structure, but as its own bounded container rather than a ZIP file.
 The reason is the threat model. A project file is untrusted input, and a general
 archive format brings decompression bombs, entry-name traversal, duplicate
 entries, and multi-gigabyte declared sizes along with it. PhotoForge's container
-has no general-purpose decompression stage at all: every stored payload is a PNG
-whose dimensions are declared in the manifest, checked before decoding, and
-decoded through the same bounded decoder the image importer already uses. There
-is nothing that can expand without limit. It also adds no new dependency.
+has no general-purpose archive decompression stage. Byte pixels/masks use
+bounded PNG; float pixels use exact little-endian RGBA f32 payloads. Declared
+dimensions, aggregate decoded bytes and mask scratch are admitted before
+allocation. Float payloads must have exactly width × height × 16 bytes.
 
 The trade-off is honest: a `.photoforge` file cannot be opened with a ZIP tool.
 It is a PhotoForge format, not an interchange format.
@@ -33,7 +33,7 @@ All integers are little-endian.
 ```text
 offset  size  field
 0       8     magic  "PFORGE\r\n"
-8       4     u32  container format version (1)
+8       4     u32  container format version (1 or 2)
 12      8     u64  manifest length in bytes
 20      N     manifest JSON (UTF-8)
 +       4     u32  entry count
@@ -46,7 +46,7 @@ Each entry:
 ```text
 2   u16  name length
 N        name (UTF-8)
-1   u8   encoding: 0 = raw, 1 = PNG
+1   u8   encoding: 0 = raw, 1 = PNG, 2 = linear RGBA f32 little-endian (v2 only)
 8   u64  payload length
 8   u64  FNV-1a-64 of the payload
 N        payload
@@ -120,9 +120,11 @@ the rejection is tested with `../escape.png`, `/absolute.png`,
 | Whole file | 1 GiB |
 | Manifest | 32 MiB |
 | Entries | 4,096 |
-| Single entry payload | 256 MiB |
+| Single entry payload | 1 GiB |
 | Entry name | 128 characters |
-| Decoded image | 20,000 px per side, 40 MP, 256 MiB decoder allocation |
+| Decoded image | 20,000 px per side, 67,108,864 pixels; legacy PNG decoder limit 256 MiB |
+| Aggregate stored pixel decode | 1 GiB |
+| Decode/save job estimate | 4 GiB including aggregate mask/scratch estimates |
 
 Every structural field is bounds-checked against the bytes actually present
 before any allocation follows it, so a declared length larger than the file
@@ -152,8 +154,9 @@ not a readable image, a mask for an unknown layer, a document referencing pixels
 the file omits, or a layer tree that fails validation.
 
 Reading a project file causes **no** network access, executable loading, script
-execution, plugin loading, or shell command. The format contains no code, path,
-command, or URL field of any kind.
+execution, plugin loading, or shell command. RAW layers may contain local linked
+source paths and hashes; these are data, not executable commands. Opening
+restores cached pixels without silently re-developing from those paths.
 
 ## Atomic saving
 
@@ -174,6 +177,22 @@ parent traversal.
 separate and both checked. A version newer than this build supports is rejected
 with `unsupported_project_version` or `unsupported_layer_schema` rather than
 being partially read.
+
+The JSON example above describes a historical v1 manifest. Version 2 writes
+`formatVersion: 2`, `applicationVersion: 0.10.0`, and a document `precision` of
+`legacy_srgb8` or `linear_srgb_f32`. Each pixel has explicit `format` metadata:
+sample representation, transfer function, color space and alpha representation.
+The only accepted combinations are sRGB/D65 encoded unorm8 straight RGBA and
+sRGB/D65 linear float32 straight RGBA. Encodings and metadata must agree.
+Float channels must be finite and alpha must be in [0,1].
+
+Missing precision/format metadata means legacy, never linear. V1 files cannot
+declare float entries. Tests construct an actual v1 container without the new
+fields and retain exact original pixels. New saves use v2; simply opening an
+old file does not modify it. RGB source precision survives bit-exact float
+serialization, including negative and above-one values. Recovery uses the same
+typed v2 payload and bounded reader. Entries borrow the input container while
+decoding instead of duplicating its entire payload.
 
 Opening ordinary PNG, JPEG, and WebP images continues to work exactly as before
 and produces a document with one background pixel layer. Phase 6 and 7 workflow

@@ -73,6 +73,8 @@ pub enum AppError {
     Permission,
     #[error("This image may require more memory than is safely available.")]
     OutOfMemoryRisk,
+    #[error("This operation needs an estimated {required} bytes; the memory budget is {limit} bytes. Reduce layers, history, or image dimensions.")]
+    ResourceBudget { required: u64, limit: u64 },
     #[error("Open an image before applying edits or exporting.")]
     NoImageOpen,
     #[error("Workflow import failed: {0}")]
@@ -187,6 +189,7 @@ impl AppError {
             Self::InvalidOutputPath => "invalid_output_path",
             Self::Permission => "permission_error",
             Self::OutOfMemoryRisk => "out_of_memory_risk",
+            Self::ResourceBudget { .. } => "resource_budget",
             Self::NoImageOpen => "no_image_open",
             Self::WorkflowImport(_) => "workflow_import",
             Self::WorkflowValidation(_) => "workflow_validation",

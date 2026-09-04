@@ -607,6 +607,11 @@ export interface Workflow {
 
 export interface WorkflowDocument { schemaVersion: 1 | 2; workflow: Workflow }
 export type ExportProfile = 'web' | 'print' | 'archive' | 'lossless' | 'high_jpeg' | 'maximum_compression';
+export interface ColorExportOptions {
+  colorSpace: 'srgb' | 'display_p3' | 'adobe_rgb';
+  bitDepth: 8 | 16;
+  dither: boolean;
+}
 export interface BatchOptions {
   inputFolder: string;
   outputFolder: string;
@@ -615,6 +620,7 @@ export interface BatchOptions {
   overwrite: boolean;
   workers: number;
   exportProfile: ExportProfile;
+  color?: ColorExportOptions;
   dryRun: boolean;
 }
 export type BatchState = 'idle' | 'discovering' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';

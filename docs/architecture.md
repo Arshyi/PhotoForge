@@ -1,13 +1,17 @@
 # Architecture
 
-## Phase 9 RAW development and precision boundary
+## Phase 10 typed precision boundary
 
 `src-tauri/src/color.rs` holds the bounded `FloatImage` representation. Encoded
 sRGB input is decoded at the source boundary into straight-alpha linear-sRGB
 `f32` samples; development controls operate there without clipping negative or
 above-white intermediates; display and export encode and clamp only at the
-output boundary. The `RgbaImage` layer store and compositor remain 8-bit, which
-is a documented quantisation boundary rather than an oversight — see
+output boundary. `pixel.rs` distinguishes encoded RGBA8 from straight linear
+RGBA f32. The immutable store retains both types; `layers/linear.rs` implements
+the full layer semantics without a byte bridge, while the original renderer
+remains explicit legacy compatibility. Float operations, profile-aware export
+and checked admission estimates live in `high_precision`, `color_management`,
+`color_io` and `resources`. See
 [color-pipeline.md](color-pipeline.md).
 
 RAW support lives in `src-tauri/src/raw.rs` and its submodules:
@@ -29,8 +33,9 @@ parameters, and the camera metadata. The developed raster in a project is a
 cache; the record is the document. The field is `#[serde(default)]`, so projects
 written before 0.9.0 load unchanged.
 
-See [raw-development.md](raw-development.md) and
-[phase-9-results.md](phase-9-results.md).
+See [raw-development.md](raw-development.md),
+[high-precision-rendering.md](high-precision-rendering.md) and
+[phase-10-results.md](phase-10-results.md).
 
 ## Phase 8 layers and compositing boundary
 
@@ -199,7 +204,7 @@ Generation races the request against document/request cancellation. The determin
 - Only native open/save dialogs choose paths.
 - File formats are detected from content and restricted to PNG, JPEG, and WebP.
 - Dimensions and encoded file size are checked before full decode.
-- Inputs are limited to 40 million pixels, 20,000 pixels per dimension, 256 MiB decoder allocation, and 750 MiB encoded size.
+- Inputs are limited to 20,000 pixels per dimension, a 1 GiB float source (67,108,864 pixels), checked 4 GiB per-job estimates, a separate 1 GiB immutable layer store including history, and 750 MiB encoded image size. These are admission estimates, not a hard operating-system process-memory cap. Embedded legacy project PNG decoding retains its 256 MiB decoder bound.
 - Output paths must be absolute, have an allowed image extension, and differ from the canonical input path.
 - Pixel-processing commands accept typed operations, never command strings. Guided text is accepted only by the bounded rule matcher and can produce only the typed plan schema.
 - Edited plans are revalidated in Rust before they can enter history or preview processing.

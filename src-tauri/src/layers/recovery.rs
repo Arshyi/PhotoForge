@@ -1,5 +1,5 @@
 use super::model::LayerDocument;
-use super::project::{decode_project, encode_project, LoadedProject};
+use super::project::{encode_project, encode_project_typed, load_project, LoadedProject};
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use image::RgbaImage;
@@ -92,7 +92,38 @@ pub fn write_snapshot(
         saved_at,
         saved_at,
     )?;
+    write_snapshot_bytes(bytes, project_path, document_name, saved_at, directory)
+}
 
+#[allow(clippy::too_many_arguments)]
+pub fn write_snapshot_typed(
+    document: &LayerDocument,
+    operations: &[EditOperation],
+    pixels: &[(String, crate::pixel::PixelBuffer)],
+    project_path: Option<&str>,
+    document_name: &str,
+    application_version: &str,
+    saved_at: &str,
+    directory: Option<&Path>,
+) -> Result<RecoveryRecord, AppError> {
+    let bytes = encode_project_typed(
+        document,
+        operations,
+        pixels,
+        application_version,
+        saved_at,
+        saved_at,
+    )?;
+    write_snapshot_bytes(bytes, project_path, document_name, saved_at, directory)
+}
+
+fn write_snapshot_bytes(
+    bytes: Vec<u8>,
+    project_path: Option<&str>,
+    document_name: &str,
+    saved_at: &str,
+    directory: Option<&Path>,
+) -> Result<RecoveryRecord, AppError> {
     let folder = match directory {
         Some(directory) => directory.to_path_buf(),
         None => recovery_directory()?,
@@ -219,8 +250,9 @@ pub fn read_snapshot(path: &Path) -> Result<LoadedProject, AppError> {
             "recovery snapshots must use the .{RECOVERY_EXTENSION} extension"
         )));
     }
-    let bytes = fs::read(path).map_err(map_io)?;
-    decode_project(&bytes)
+    // Managed Windows snapshots are canonicalized to a verbatim disk path.
+    // Convert that spelling back before the public loader's device-path guard.
+    load_project(Path::new(&crate::raw::presentable_path(path)))
 }
 
 /// Resolves a renderer-supplied snapshot path inside PhotoForge's own recovery

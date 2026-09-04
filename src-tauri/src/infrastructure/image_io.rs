@@ -5,8 +5,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::{
-    DynamicImage, ExtendedColorType, GenericImageView, ImageEncoder, ImageFormat, ImageReader,
-    Limits, Rgb, RgbImage,
+    DynamicImage, ExtendedColorType, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat,
+    ImageReader, Limits, Rgb, RgbImage,
 };
 use std::fs;
 use std::io::{BufWriter, Cursor};
@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use super::{camera_model, file_time};
 
-const MAX_PIXELS: u64 = 40_000_000;
+const MAX_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
 const MAX_DIMENSION: u32 = 20_000;
-const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DECODED_BYTES: u64 = crate::resources::MAX_WORKING_IMAGE_BYTES;
 const MAX_FILE_BYTES: u64 = 750 * 1024 * 1024;
 const PREVIEW_MAX_DIMENSION: u32 = 1_600;
 const JPEG_QUALITY: u8 = 90;
@@ -27,6 +27,9 @@ pub struct LoadedImage {
     pub original: Arc<DynamicImage>,
     pub preview: Arc<DynamicImage>,
     pub metadata: ImageMetadata,
+    /// Present for high-bit-depth or ICC sources. The byte preview is never
+    /// substituted for these authoritative samples in a linear document.
+    pub working: Option<Arc<crate::color::FloatImage>>,
 }
 
 pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
@@ -41,6 +44,7 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
 
     let (width, height) = image::image_dimensions(&canonical_path).map_err(map_image_error)?;
     validate_dimensions(width, height)?;
+    crate::resources::ResourceEstimate::decode(width, height, file_metadata.len())?;
 
     let mut reader = ImageReader::open(&canonical_path)
         .map_err(map_io_error)?
@@ -60,9 +64,26 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
     limits.max_alloc = Some(MAX_DECODED_BYTES);
     reader.limits(limits);
 
-    let decoded = reader.decode().map_err(map_image_error)?;
+    let mut decoder = reader.into_decoder().map_err(map_image_error)?;
+    if decoder.total_bytes() > MAX_DECODED_BYTES {
+        return Err(AppError::OutOfMemoryRisk);
+    }
+    let icc = decoder.icc_profile().map_err(map_image_error)?;
+    let decoded = DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
     let color = decoded.color();
-    let preview = if width > PREVIEW_MAX_DIMENSION || height > PREVIEW_MAX_DIMENSION {
+    let working = if let Some(profile) = &icc {
+        Some(Arc::new(crate::color_management::import_icc(
+            &decoded, profile,
+        )?))
+    } else if color.bits_per_pixel() / u16::from(color.channel_count()) > 8 {
+        Some(Arc::new(crate::color::FloatImage::from_dynamic(&decoded)?))
+    } else {
+        None
+    };
+    let preview = if let Some(working) = &working {
+        let (pw, ph) = crate::layers::preview_dimensions(width, height);
+        DynamicImage::ImageRgba8(working.resized(pw, ph)?.to_rgba8())
+    } else if width > PREVIEW_MAX_DIMENSION || height > PREVIEW_MAX_DIMENSION {
         decoded.thumbnail(PREVIEW_MAX_DIMENSION, PREVIEW_MAX_DIMENSION)
     } else {
         decoded.clone()
@@ -80,7 +101,11 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         height,
         format: format_name(format).to_string(),
         file_size: file_metadata.len(),
-        color_space: "sRGB".to_string(),
+        color_space: if icc.is_some() {
+            "Embedded RGB ICC → linear sRGB".to_string()
+        } else {
+            "sRGB".to_string()
+        },
         bit_depth: (color.bits_per_pixel() / u16::from(color.channel_count())).min(255) as u8,
         has_alpha: color.has_alpha(),
         created_at: file_time(file_metadata.created()),
@@ -95,6 +120,7 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         original: Arc::new(decoded),
         preview: Arc::new(preview),
         metadata,
+        working,
     })
 }
 
@@ -214,7 +240,10 @@ fn validate_dimensions(width: u32, height: u32) -> Result<u64, AppError> {
     Ok(pixels)
 }
 
-fn validate_output_path(original_path: &Path, output_path: &Path) -> Result<PathBuf, AppError> {
+pub(super) fn validate_output_path(
+    original_path: &Path,
+    output_path: &Path,
+) -> Result<PathBuf, AppError> {
     if !output_path.is_absolute() || output_path.file_name().is_none() {
         return Err(AppError::InvalidOutputPath);
     }
@@ -249,7 +278,7 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn output_format(path: &Path) -> Result<ImageFormat, AppError> {
+pub(super) fn output_format(path: &Path) -> Result<ImageFormat, AppError> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -363,10 +392,11 @@ mod tests {
             Err(AppError::ImageTooLarge { .. })
         ));
         assert!(matches!(
-            validate_dimensions(10_000, 5_000),
+            validate_dimensions(10_000, 7_000),
             Err(AppError::ImageTooLarge { .. })
         ));
         assert_eq!(validate_dimensions(8_000, 5_000).unwrap(), 40_000_000);
+        assert_eq!(validate_dimensions(9504, 6336).unwrap(), 60_217_344);
     }
 
     #[test]

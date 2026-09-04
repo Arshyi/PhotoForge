@@ -233,7 +233,7 @@ fn hsl(source: &RgbaImage, settings: &HslSettings) -> RgbaImage {
     })
 }
 
-fn hue_adjustment(settings: &HslSettings, hue: f32) -> HslAdjustment {
+pub(super) fn hue_adjustment(settings: &HslSettings, hue: f32) -> HslAdjustment {
     let entries = [
         (0.0, settings.red),
         (60.0, settings.yellow),
@@ -259,7 +259,7 @@ fn hue_adjustment(settings: &HslSettings, hue: f32) -> HslAdjustment {
     }
 }
 
-fn hue_distance(left: f32, right: f32) -> f32 {
+pub(super) fn hue_distance(left: f32, right: f32) -> f32 {
     let distance = (left - right).abs().rem_euclid(360.0);
     distance.min(360.0 - distance)
 }

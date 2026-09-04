@@ -1,5 +1,6 @@
 mod analysis;
 mod decontaminate;
+pub mod high_precision;
 mod inspection;
 mod preview_masks;
 mod processor;

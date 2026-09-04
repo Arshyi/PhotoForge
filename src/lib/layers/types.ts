@@ -117,6 +117,8 @@ export interface Layer {
 
 export interface LayerDocument {
   schemaVersion: typeof LAYER_SCHEMA_VERSION;
+  /** Missing metadata denotes the original encoded-sRGB compositor. */
+  precision?: 'legacy_srgb8' | 'linear_srgb_f32';
   canvasWidth: number;
   canvasHeight: number;
   /** Index 0 is the bottom of the stack; the panel displays this reversed. */
@@ -135,6 +137,7 @@ export interface LayerPixelsResult {
   width: number;
   height: number;
   filename: string | null;
+  raw?: RawLayerSource | null;
 }
 
 export interface LayerThumbnailResult {

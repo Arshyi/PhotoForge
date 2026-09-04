@@ -11,6 +11,7 @@
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
   import ProfessionalWorkspace from './lib/components/ProfessionalWorkspace.svelte';
+  import RawSourcePanel from './lib/components/RawSourcePanel.svelte';
   import RefineSelectionDialog from './lib/components/RefineSelectionDialog.svelte';
   import { REFINE_SELECTION_DEFAULTS, type RefineSelectionParameters } from './lib/components/refineSelectionDefaults';
   import SelectionWorkspace from './lib/components/SelectionWorkspace.svelte';
@@ -136,8 +137,8 @@
     type WorkspaceMutationGuard
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
-  import { isRawPath, metadataRows } from './lib/utils/raw';
-  import type { OpenRawImageResult, RawLayerSource } from './lib/types/editor';
+  import { developRawLayer, isRawPath, metadataRows } from './lib/utils/raw';
+  import type { ColorExportOptions, OpenRawImageResult, RawDevelopmentParameters, RawLayerSource } from './lib/types/editor';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import TransformOverlay from './lib/components/TransformOverlay.svelte';
   import TransformPanel from './lib/components/TransformPanel.svelte';
@@ -251,6 +252,9 @@
   let canUndo = false;
   let canRedo = false;
   let exportProfile: ExportProfile = 'lossless';
+  let outputColorSpace: ColorExportOptions['colorSpace'] = 'srgb';
+  let outputBitDepth: 8 | 16 = 16;
+  let outputDither = false;
   let shortcuts: ShortcutBinding[] = [];
   let selectionState: SelectionState = createSelectionState();
   let selectionBusy = false;
@@ -625,7 +629,7 @@
       startLayerDocument(
         createDocument(result.metadata.width, result.metadata.height, [
           rawSource ? { ...background, name: 'RAW', raw: rawSource } : background
-        ]),
+        ], 'linear_srgb_f32'),
         null
       );
       if (!selectionState.activeMask) selectionState = { ...selectionState, applyScope: 'global' };
@@ -1313,7 +1317,7 @@
       } else {
         const path = await open({
           multiple: false,
-          filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+          filters: [{ name: 'Images and camera RAW', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] }]
         });
         if (typeof path !== 'string') return;
         const imported = await importLayerImage(path);
@@ -1323,6 +1327,7 @@
           imported.width,
           imported.height
         );
+        if (imported.raw) layer.raw = imported.raw;
         commitLayers(
           insertLayer(document, layer, null, document.layers.length),
           'Place image as layer'
@@ -3030,6 +3035,7 @@
       const dialogRevision = layerRevision;
       const dialogGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
       const selectedProfile = exportProfile;
+      const selectedColor: ColorExportOptions = { colorSpace: outputColorSpace, bitDepth: ['lossless', 'archive'].includes(selectedProfile) ? outputBitDepth : 8, dither: outputDither };
       const stem = metadata.filename.replace(/\.[^.]+$/, '');
       const extension = ['web', 'print', 'high_jpeg'].includes(selectedProfile)
         ? 'jpg'
@@ -3057,9 +3063,9 @@
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
       // Exporting renders the visible composite. The editable document is never
       // flattened just because a flattened image was written.
-      const composite = compositeDocument();
+      const composite = layerDocument;
       const result = composite
-        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile)
+        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile, selectedColor)
         : await invoke<ExportResult>('export_with_profile', {
             outputPath,
             operations: exportOperations,
@@ -3076,6 +3082,24 @@
 
   function active(type: OperationType): boolean {
     return operations.some((operation) => operationType(operation) === type);
+  }
+
+  async function redevelopSelectedRaw(parameters: RawDevelopmentParameters) {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    const selected = activeLayerOf(layerDocument);
+    if (!selected?.raw || selected.content.type !== 'pixel') return;
+    const ownDocument = documentId;
+    const ownRevision = layerRevision;
+    layerBusy = true;
+    try {
+      const result = await developRawLayer(selected.raw, parameters, true, ownDocument, ++requestId);
+      if (!layerDocument || documentId !== ownDocument || layerRevision !== ownRevision) return;
+      const next = updateLayer(layerDocument, selected.id, (layer) => ({ ...layer, raw: result.source,
+        content: { type: 'pixel', pixelId: result.pixelId, width: result.width, height: result.height } }));
+      commitLayers(next, 'Develop RAW source');
+      processingTime = result.processingTimeMs;
+    } catch (error) { notify(errorMessage(error), 'error'); }
+    finally { layerBusy = false; }
   }
 
   const percent = (value: number) => `${Math.round(value * 100)}%`;
@@ -3253,6 +3277,22 @@
             <span>{metadata.width} × {metadata.height} · {formatBytes(metadata.fileSize)}</span>
           </div>
         </div>
+        <details class="raw-card">
+          <summary>Color and precision</summary>
+          <p>Source: {metadata.colorSpace} · {metadata.bitDepth}-bit</p>
+          <p>Working: {layerDocument?.precision === 'linear_srgb_f32' ? 'Linear sRGB · 32-bit float · straight alpha' : 'Legacy encoded sRGB · 8-bit'}</p>
+          <p>Preview: 8-bit sRGB; Windows / WebView2 handles display color. No monitor proofing.</p>
+          {#if layerDocument && layerDocument.precision !== 'linear_srgb_f32'}
+            <button disabled={fileMutationBusy} on:click={() => layerDocument && commitLayers({ ...layerDocument, precision: 'linear_srgb_f32' }, 'Convert to linear float')}>Convert to linear float (appearance may change)</button>
+          {/if}
+          <label>Output color space <select aria-label="Output color space" bind:value={outputColorSpace}><option value="srgb">sRGB</option><option value="display_p3">Display P3</option><option value="adobe_rgb">Adobe RGB (1998)</option></select></label>
+          <label>PNG bit depth <select aria-label="PNG bit depth" bind:value={outputBitDepth}><option value={16}>16-bit</option><option value={8}>8-bit</option></select></label>
+          <label><input type="checkbox" bind:checked={outputDither} /> Deterministic dither for 8-bit output (16-bit unaffected)</label>
+          <p>ICC profile embedded. JPEG and WebP are 8-bit. Camera EXIF/GPS is not exported.</p>
+        </details>
+        {#if layerDocument && activeLayerOf(layerDocument)?.raw}
+          <RawSourcePanel source={activeLayerOf(layerDocument)!.raw!} disabled={fileMutationBusy} onapply={redevelopSelectedRaw} />
+        {/if}
       {/if}
 
       {#if rawDevelopment && metadata?.raw}

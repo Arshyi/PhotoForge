@@ -12,7 +12,7 @@ use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use serde::{Deserialize, Serialize};
 
-const MAX_FLOAT_PIXELS: u64 = 40_000_000;
+const MAX_FLOAT_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
 const MAX_FLOAT_DIMENSION: u32 = 20_000;
 const SRGB_DECODE_BREAK: f32 = 0.04045;
 const SRGB_ENCODE_BREAK: f32 = 0.003_130_8;
@@ -28,6 +28,10 @@ pub enum ColorPipelineError {
     InvalidPixelCount,
     #[error("a colour value is not finite")]
     NonFiniteValue,
+    #[error("alpha must be between zero and one")]
+    InvalidAlpha,
+    #[error("the image allocation exceeds available resources")]
+    Allocation,
     #[error("development parameters are invalid: {0}")]
     InvalidParameters(String),
     #[error("PNG encoding failed: {0}")]
@@ -170,6 +174,12 @@ impl FloatImage {
         if pixels.iter().any(|pixel| !pixel.is_finite()) {
             return Err(ColorPipelineError::NonFiniteValue);
         }
+        if pixels
+            .iter()
+            .any(|pixel| !(0.0..=1.0).contains(&pixel.alpha))
+        {
+            return Err(ColorPipelineError::InvalidAlpha);
+        }
         Ok(Self {
             width,
             height,
@@ -183,15 +193,132 @@ impl FloatImage {
             return Err(ColorPipelineError::NonFiniteValue);
         }
         let count = usize::try_from(count).map_err(|_| ColorPipelineError::InvalidPixelCount)?;
-        Self::new(width, height, vec![fill; count])
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(count)
+            .map_err(|_| ColorPipelineError::Allocation)?;
+        pixels.resize(count, fill);
+        Self::new(width, height, pixels)
     }
 
     pub fn from_rgba8(image: &RgbaImage) -> Result<Self, ColorPipelineError> {
+        checked_pixel_count(image.width(), image.height())?;
         let pixels = image
             .pixels()
             .map(|pixel| FloatRgba::from_srgba8(pixel.0))
             .collect();
         Self::new(image.width(), image.height(), pixels)
+    }
+
+    /// Retain native source precision; float DynamicImage channels are encoded
+    /// sRGB here, matching the ordinary decoder's explicit input contract.
+    pub fn from_dynamic(image: &image::DynamicImage) -> Result<Self, ColorPipelineError> {
+        checked_pixel_count(image.width(), image.height())?;
+        match image {
+            image::DynamicImage::ImageRgba8(rgba) => Self::from_rgba8(rgba),
+            _ => {
+                let encoded = image.to_rgba32f();
+                Self::new(
+                    image.width(),
+                    image.height(),
+                    encoded
+                        .pixels()
+                        .map(|p| {
+                            FloatRgba::new(
+                                srgb_decode(p[0]),
+                                srgb_decode(p[1]),
+                                srgb_decode(p[2]),
+                                p[3],
+                            )
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ColorPipelineError> {
+        let count = checked_pixel_count(self.width, self.height)?;
+        if count as usize != self.pixels.len() {
+            return Err(ColorPipelineError::InvalidPixelCount);
+        }
+        if self.pixels.iter().any(|p| !p.is_finite()) {
+            return Err(ColorPipelineError::NonFiniteValue);
+        }
+        if self.pixels.iter().any(|p| !(0.0..=1.0).contains(&p.alpha)) {
+            return Err(ColorPipelineError::InvalidAlpha);
+        }
+        Ok(())
+    }
+
+    /// Pixel centres are at index + 0.5. Interpolate associated color so fully
+    /// transparent neighbors cannot contribute hidden RGB to an edge.
+    pub fn sample(&self, x: f32, y: f32, nearest: bool) -> FloatRgba {
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x >= self.width as f32
+            || y >= self.height as f32
+        {
+            return FloatRgba::TRANSPARENT;
+        }
+        if nearest {
+            return self
+                .get(x as u32, y as u32)
+                .unwrap_or(FloatRgba::TRANSPARENT);
+        }
+        let sx = x - 0.5;
+        let sy = y - 0.5;
+        let bx = sx.floor() as i64;
+        let by = sy.floor() as i64;
+        let fx = sx - sx.floor();
+        let fy = sy - sy.floor();
+        if fx == 0.0 && fy == 0.0 {
+            return self
+                .get(bx as u32, by as u32)
+                .unwrap_or(FloatRgba::TRANSPARENT);
+        }
+        let mut sum = [0.0_f32; 4];
+        for (dy, wy) in [(0, 1.0 - fy), (1, fy)] {
+            for (dx, wx) in [(0, 1.0 - fx), (1, fx)] {
+                let weight = wx * wy;
+                if weight <= 0.0 {
+                    continue;
+                }
+                if let Some(p) = self.get((bx + dx) as u32, (by + dy) as u32) {
+                    let a = p.alpha * weight;
+                    sum[0] += p.red * a;
+                    sum[1] += p.green * a;
+                    sum[2] += p.blue * a;
+                    sum[3] += a;
+                }
+            }
+        }
+        if sum[3] <= 0.0 {
+            FloatRgba::TRANSPARENT
+        } else {
+            FloatRgba::new(
+                sum[0] / sum[3],
+                sum[1] / sum[3],
+                sum[2] / sum[3],
+                sum[3].clamp(0.0, 1.0),
+            )
+        }
+    }
+
+    pub fn resized(&self, width: u32, height: u32) -> Result<Self, ColorPipelineError> {
+        let mut result = Self::blank(width, height, FloatRgba::TRANSPARENT)?;
+        for y in 0..height {
+            for x in 0..width {
+                let sx = ((x as f32 + 0.5) * self.width as f32 / width as f32)
+                    .clamp(0.5, self.width as f32 - 0.5);
+                let sy = ((y as f32 + 0.5) * self.height as f32 / height as f32)
+                    .clamp(0.5, self.height as f32 - 0.5);
+                result.pixels[(y * width + x) as usize] = self.sample(sx, sy, false);
+            }
+        }
+        Ok(result)
     }
 
     pub fn width(&self) -> u32 {

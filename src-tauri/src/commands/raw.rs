@@ -85,14 +85,32 @@ fn register(
     sensor: &dng::SensorImage,
     source: RawLayerSource,
     started: std::time::Instant,
+    expected: Option<(u64, u64)>,
 ) -> Result<RawDevelopResult, AppError> {
-    let image = developed.image.to_rgba8();
+    // Match the session -> store lock order used by Open. Keep session identity
+    // stable until the immutable result has been registered.
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+    if let Some((document_id, request_id)) = expected {
+        use std::sync::atomic::Ordering;
+        if state.pending_open_request.load(Ordering::Acquire) != 0
+            || !session
+                .as_ref()
+                .is_some_and(|s| s.document_id == document_id)
+            || state.latest_raw_request.load(Ordering::Acquire) != request_id
+        {
+            return Err(AppError::RenderCancelled);
+        }
+    }
+    let image = developed.image;
     let (width, height) = (image.width(), image.height());
     let mut store = state
         .layers
         .lock()
         .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    let pixel_id = store.register(image)?;
+    let pixel_id = store.register_float(image)?;
     Ok(RawDevelopResult {
         pixel_id,
         width,
@@ -137,9 +155,12 @@ pub async fn open_raw_layer(
     } else {
         RenderScale::Preview
     };
+    let requested_parameters = parameters.clone();
     // Decoding and demosaicing a large sensor is CPU-bound work and must not
     // run on the interface thread.
     let decoded = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)
+            .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
         let sensor = dng::decode(&bytes)?;
         let developed = develop_sensor(&sensor, &parameters, scale)?;
         Ok::<_, RawError>((sensor, developed))
@@ -155,24 +176,27 @@ pub async fn open_raw_layer(
         mode: RawSourceMode::Linked {
             path: canonical_string(&source_path)?,
         },
-        parameters: developed_parameters(&developed),
+        parameters: developed_parameters(&developed, requested_parameters),
         decoder: DECODER_ID.to_string(),
         decoder_version: DECODER_VERSION.to_string(),
         capture: sensor.metadata.clone(),
     };
     source.validate().map_err(map)?;
-    register(&state, developed, &sensor, source, started)
+    register(&state, developed, &sensor, source, started, None)
 }
 
 /// The parameters that produced a development, with the resolved white balance
 /// written back so reopening a project reproduces the same picture even if the
 /// automatic estimate would now differ.
-fn developed_parameters(developed: &DevelopedRaw) -> DevelopmentParameters {
+fn developed_parameters(
+    developed: &DevelopedRaw,
+    parameters: DevelopmentParameters,
+) -> DevelopmentParameters {
     DevelopmentParameters {
         white_balance: crate::color::WhiteBalance::Custom {
             multipliers: developed.multipliers,
         },
-        ..DevelopmentParameters::default()
+        ..parameters
     }
 }
 
@@ -189,6 +213,20 @@ pub async fn develop_raw_layer(
     state: State<'_, AppState>,
 ) -> Result<RawDevelopResult, AppError> {
     let started = std::time::Instant::now();
+    if !super::sampling::is_current(&state, request.document_id)? {
+        return Err(AppError::NoImageOpen);
+    }
+    state
+        .latest_raw_request
+        .store(request.request_id, std::sync::atomic::Ordering::Release);
+    let _permit = state.raw_gate.lock().await;
+    if state
+        .latest_raw_request
+        .load(std::sync::atomic::Ordering::Acquire)
+        != request.request_id
+    {
+        return Err(AppError::RenderCancelled);
+    }
     request.source.validate().map_err(map)?;
     let path = request
         .source
@@ -234,6 +272,8 @@ pub async fn develop_raw_layer(
 
     let for_worker = parameters.clone();
     let decoded = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)
+            .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
         let sensor = dng::decode(&bytes)?;
         let developed = develop_sensor(&sensor, &for_worker, scale)?;
         Ok::<_, RawError>((sensor, developed))
@@ -244,10 +284,26 @@ pub async fn develop_raw_layer(
     let (sensor, developed) = decoded;
 
     let mut source = request.source.clone();
-    source.parameters = parameters;
+    source.decoder_version = DECODER_VERSION.to_string();
+    source.parameters = developed_parameters(&developed, parameters);
     source.capture = sensor.metadata.clone();
     source.validate().map_err(map)?;
-    register(&state, developed, &sensor, source, started)
+    if !super::sampling::is_current(&state, request.document_id)?
+        || state
+            .latest_raw_request
+            .load(std::sync::atomic::Ordering::Acquire)
+            != request.request_id
+    {
+        return Err(AppError::RenderCancelled);
+    }
+    register(
+        &state,
+        developed,
+        &sensor,
+        source,
+        started,
+        Some((request.document_id, request.request_id)),
+    )
 }
 
 /// Reports whether a linked RAW source is present and unchanged.
@@ -331,6 +387,7 @@ pub async fn export_raw_layer_png16(
     let started = std::time::Instant::now();
 
     let (saved, width, height) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
         let sensor = dng::decode(&bytes).map_err(map)?;
         // Always the full sensor and the better algorithm, whatever the
         // interface was previewing.

@@ -949,6 +949,7 @@ mod tests {
                 path: PathBuf::from("test.png"),
                 original: image.clone(),
                 preview: image,
+                working: None,
                 metadata: ImageMetadata {
                     filename: "test.png".into(),
                     width: dimensions.0,

@@ -6,6 +6,7 @@
 
 mod blend;
 mod composite;
+mod linear;
 mod model;
 mod project;
 mod recovery;
@@ -16,19 +17,22 @@ mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
 pub use composite::{render_document, render_layers, PixelSource, RenderOptions};
+pub use linear::{render_document_float, render_document_typed};
 pub use model::{
     validate_dimensions, Layer, LayerContent, LayerDocument, LayerKind, LayerMask, LayerMetadata,
     LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS,
 };
 pub use project::{
-    decode_project, encode_project, load_project, save_project, LoadedProject, ProjectManifest,
-    MAX_PROJECT_BYTES, PROJECT_EXTENSION, PROJECT_FORMAT_VERSION,
+    decode_project, encode_project, encode_project_typed, load_project, save_project,
+    save_project_typed, LoadedProject, ProjectManifest, MAX_PROJECT_BYTES, PROJECT_EXTENSION,
+    PROJECT_FORMAT_VERSION,
 };
 pub use recovery::{
     discard_all as discard_recovery_snapshots, discard_managed_snapshot,
     discard_snapshot as discard_recovery_snapshot, list_snapshots as list_recovery_snapshots,
     read_managed_snapshot, read_snapshot as read_recovery_snapshot,
-    write_snapshot as write_recovery_snapshot, RecoveryRecord, MAX_RECOVERY_SNAPSHOTS,
+    write_snapshot as write_recovery_snapshot,
+    write_snapshot_typed as write_recovery_snapshot_typed, RecoveryRecord, MAX_RECOVERY_SNAPSHOTS,
     RECOVERY_EXTENSION,
 };
 pub use selection::{

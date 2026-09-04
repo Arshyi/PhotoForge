@@ -1,5 +1,7 @@
+mod color_io;
 mod component_io;
 mod image_io;
+pub use color_io::save_color_image;
 mod metadata;
 pub mod preferences;
 mod workflow_io;

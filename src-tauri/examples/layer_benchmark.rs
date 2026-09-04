@@ -95,6 +95,7 @@ fn adjustment_layer(id: &str, operation: EditOperation) -> Layer {
 fn document(width: u32, height: u32, layers: Vec<Layer>) -> LayerDocument {
     LayerDocument {
         schema_version: LAYER_SCHEMA_VERSION,
+        precision: Default::default(),
         canvas_width: width,
         canvas_height: height,
         layers,

@@ -1,6 +1,6 @@
 [package]
 name = "photoforge"
-version = "0.9.0"
+version = "0.10.0"
 description = "A private, local-first photo restoration and enhancement tool"
 authors = ["PhotoForge contributors"]
 edition = "2021"
@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 png = "0.18"
+moxcms = { version = "=0.8.1", features = ["extended_range"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

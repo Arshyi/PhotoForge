@@ -3,16 +3,20 @@
 // underlying Rust functions directly. Nothing outside the app consumes them.
 pub mod application;
 pub mod color;
+pub mod color_management;
 pub mod commands;
 pub mod components;
 pub mod domain;
 pub mod error;
 mod image_processing;
+pub use image_processing::high_precision;
 pub mod infrastructure;
 pub mod layers;
 pub mod mask;
 mod network_policy;
+pub mod pixel;
 pub mod raw;
+pub mod resources;
 
 use application::AppState;
 use commands::{

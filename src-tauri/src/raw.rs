@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 pub const RAW_MAX_FILE_BYTES: u64 = 750 * 1024 * 1024;
 pub const RAW_MAX_HEADER_BYTES: usize = 64 * 1024;
-pub const RAW_MAX_PIXELS: u64 = 40_000_000;
+pub const RAW_MAX_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
 
 /// Camera RAW families that the planned backend can identify by extension.
 /// Recognition is not a claim that this build can decode the format.
@@ -271,7 +271,7 @@ pub struct RawDecoderCapabilities {
 /// Identifier recorded in projects, so a file developed by a later decoder can
 /// be recognised as such rather than assumed identical.
 pub const DECODER_ID: &str = "photoforge-dng";
-pub const DECODER_VERSION: &str = "1";
+pub const DECODER_VERSION: &str = "2";
 
 pub fn decoder_capabilities() -> RawDecoderCapabilities {
     RawDecoderCapabilities {

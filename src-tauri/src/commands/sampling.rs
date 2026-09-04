@@ -1,13 +1,15 @@
 //! Immutable sources for tools that sample the displayed layer composite.
 use crate::application::AppState;
 use crate::error::AppError;
-use crate::layers::{render_layers, LayerDocument, RenderOptions, ResolvedPixels};
+use crate::layers::{render_document_typed, LayerDocument, RenderOptions, ResolvedPixels};
+use crate::pixel::PixelBuffer;
 use image::{DynamicImage, GenericImageView};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 enum Pixels {
     Opened(Arc<DynamicImage>),
+    Working(Arc<crate::color::FloatImage>),
     Layered {
         document: LayerDocument,
         pixels: ResolvedPixels,
@@ -24,22 +26,27 @@ impl SamplingSource {
     /// Only call in a blocking worker; resolving the handles is cheap, rendering
     /// them is not. The original session image is never replaced or modified.
     pub(super) fn render(self) -> Result<Arc<DynamicImage>, AppError> {
+        Ok(Arc::new(DynamicImage::ImageRgba8(
+            (*self.render_typed()?.encoded8()).clone(),
+        )))
+    }
+
+    pub(super) fn render_typed(self) -> Result<PixelBuffer, AppError> {
         match self.pixels {
-            Pixels::Opened(source) => Ok(source),
+            Pixels::Opened(source) => Ok(source.to_rgba8().into()),
+            Pixels::Working(source) => Ok(PixelBuffer::LinearRgbaF32(source)),
             Pixels::Layered {
                 document,
                 pixels,
                 scale,
-            } => Ok(Arc::new(DynamicImage::ImageRgba8(render_layers(
-                &document.layers,
-                document.canvas_width,
-                document.canvas_height,
+            } => render_document_typed(
+                &document,
                 &pixels,
                 RenderOptions {
                     scale,
                     cancel: None,
                 },
-            )?))),
+            ),
         }
     }
 }
@@ -98,11 +105,20 @@ pub(super) fn capture(
     } else {
         Ok(SamplingSource {
             full_dimensions: session.source.original.dimensions(),
-            pixels: Pixels::Opened(if preview {
-                session.source.preview.clone()
+            pixels: if let Some(working) = &session.source.working {
+                Pixels::Working(if preview {
+                    let (w, h) = session.source.preview.dimensions();
+                    Arc::new(working.resized(w, h)?)
+                } else {
+                    Arc::clone(working)
+                })
             } else {
-                session.source.original.clone()
-            }),
+                Pixels::Opened(if preview {
+                    session.source.preview.clone()
+                } else {
+                    session.source.original.clone()
+                })
+            },
         })
     }
 }

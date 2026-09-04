@@ -226,8 +226,10 @@ describe('App document lifecycle', () => {
       .toMatchObject({ pixelId: 'pxoriginal' });
     await waitFor(() => expect(screen.getByRole('button', { name: /^Save project/ }).hasAttribute('disabled')).toBe(false));
     await fireEvent.click(screen.getByRole('button', { name: '◐ Grayscale' }));
-    await waitFor(() => expect(calls('render_preview')).toHaveLength(1));
-    expect(argsFor('render_preview').operations).toEqual([{ type: 'grayscale' }]);
+    await waitFor(() => expect(calls('render_layer_composite')).toHaveLength(1));
+    expect(argsFor('render_layer_composite').operations).toEqual([{ type: 'grayscale' }]);
+    expect((argsFor('render_layer_composite').document as LayerDocument).precision).toBe('linear_srgb_f32');
+    expect(calls('render_preview')).toHaveLength(0);
   });
 
   it('keeps recovered work until a successful save and deletes only its own snapshot', async () => {

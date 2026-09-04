@@ -1,6 +1,8 @@
 use super::composite::PixelSource;
 use super::model::validate_dimensions;
+use crate::color::FloatImage;
 use crate::error::AppError;
+use crate::pixel::PixelBuffer;
 use image::{imageops, RgbaImage};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,18 +18,19 @@ pub const MAX_STORE_BYTES: u64 = 1_073_741_824;
 pub const MAX_STORE_BUFFERS: usize = 1_024;
 
 struct StoredPixels {
-    full: Arc<RgbaImage>,
-    preview: Arc<RgbaImage>,
+    full: PixelBuffer,
+    preview: PixelBuffer,
 }
 
 impl StoredPixels {
     fn bytes(&self) -> u64 {
-        buffer_bytes(&self.full) + buffer_bytes(&self.preview)
+        let shared = match (&self.full, &self.preview) {
+            (PixelBuffer::EncodedSrgba8(a), PixelBuffer::EncodedSrgba8(b)) => Arc::ptr_eq(a, b),
+            (PixelBuffer::LinearRgbaF32(a), PixelBuffer::LinearRgbaF32(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        self.full.bytes() + if shared { 0 } else { self.preview.bytes() }
     }
-}
-
-fn buffer_bytes(image: &RgbaImage) -> u64 {
-    u64::from(image.width()) * u64::from(image.height()) * 4
 }
 
 /// Immutable pixel buffers for the open layered document.
@@ -117,35 +120,57 @@ impl LayerPixelStore {
         format!("px{}", self.next_pixel)
     }
 
-    fn scaled_preview(&self, image: &RgbaImage) -> Arc<RgbaImage> {
+    fn scaled_preview(&self, image: &PixelBuffer) -> Result<PixelBuffer, AppError> {
         let scale = self.preview_scale();
         if scale >= 1.0 {
-            return Arc::new(image.clone());
+            return Ok(image.clone());
         }
-        let width = ((f64::from(image.width()) * scale).round() as u32).max(1);
-        let height = ((f64::from(image.height()) * scale).round() as u32).max(1);
+        let dimensions = image.dimensions();
+        let width = ((f64::from(dimensions.0) * scale).round() as u32).max(1);
+        let height = ((f64::from(dimensions.1) * scale).round() as u32).max(1);
         if (width, height) == image.dimensions() {
-            return Arc::new(image.clone());
+            return Ok(image.clone());
         }
-        Arc::new(imageops::thumbnail(image, width, height))
+        Ok(match image {
+            PixelBuffer::EncodedSrgba8(image) => {
+                imageops::thumbnail(image.as_ref(), width, height).into()
+            }
+            PixelBuffer::LinearRgbaF32(image) => image.resized(width, height)?.into(),
+        })
     }
 
-    fn insert(&mut self, id: String, image: RgbaImage) -> Result<String, AppError> {
-        validate_dimensions(image.width(), image.height())?;
+    fn insert(&mut self, id: String, image: PixelBuffer) -> Result<String, AppError> {
+        let (width, height) = image.dimensions();
+        validate_dimensions(width, height)?;
+        if let PixelBuffer::LinearRgbaF32(image) = &image {
+            image.validate()?;
+        }
         if !self.buffers.contains_key(&id) && self.buffers.len() >= MAX_STORE_BUFFERS {
             return Err(AppError::OutOfMemoryRisk);
         }
-        let preview = self.scaled_preview(&image);
-        let stored = StoredPixels {
-            full: Arc::new(image),
-            preview,
-        };
-        let incoming = stored.bytes();
         let replaced = self
             .buffers
             .get(&id)
             .map(StoredPixels::bytes)
             .unwrap_or_default();
+        let preview_bytes = if self.preview_scale() < 1.0 {
+            let w = ((f64::from(width) * self.preview_scale()).round() as u64).max(1);
+            let h = ((f64::from(height) * self.preview_scale()).round() as u64).max(1);
+            w.checked_mul(h)
+                .and_then(|n| {
+                    n.checked_mul(match image {
+                        PixelBuffer::EncodedSrgba8(_) => 4,
+                        PixelBuffer::LinearRgbaF32(_) => 16,
+                    })
+                })
+                .ok_or(AppError::OutOfMemoryRisk)?
+        } else {
+            0
+        };
+        let incoming = image
+            .bytes()
+            .checked_add(preview_bytes)
+            .ok_or(AppError::OutOfMemoryRisk)?;
         let projected = self
             .total_bytes()
             .saturating_sub(replaced)
@@ -153,12 +178,25 @@ impl LayerPixelStore {
         if projected > MAX_STORE_BYTES {
             return Err(AppError::OutOfMemoryRisk);
         }
+        let preview = self.scaled_preview(&image)?;
+        let stored = StoredPixels {
+            full: image,
+            preview,
+        };
         self.buffers.insert(id.clone(), stored);
         Ok(id)
     }
 
     /// Registers a buffer under a freshly generated identifier.
     pub fn register(&mut self, image: RgbaImage) -> Result<String, AppError> {
+        self.register_typed(image.into())
+    }
+
+    pub fn register_float(&mut self, image: FloatImage) -> Result<String, AppError> {
+        self.register_typed(image.into())
+    }
+
+    pub fn register_typed(&mut self, image: PixelBuffer) -> Result<String, AppError> {
         let id = self.next_identifier();
         self.insert(id, image)
     }
@@ -166,6 +204,10 @@ impl LayerPixelStore {
     /// Registers a buffer under a caller-supplied identifier, used when loading
     /// a project so the saved tree's references stay valid.
     pub fn register_with_id(&mut self, id: &str, image: RgbaImage) -> Result<(), AppError> {
+        self.register_typed_with_id(id, image.into())
+    }
+
+    pub fn register_typed_with_id(&mut self, id: &str, image: PixelBuffer) -> Result<(), AppError> {
         if id.is_empty()
             || id.len() > 64
             || !id
@@ -187,9 +229,13 @@ impl LayerPixelStore {
     }
 
     pub fn full(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError> {
+        Ok(self.full_typed(pixel_id)?.encoded8())
+    }
+
+    pub fn full_typed(&self, pixel_id: &str) -> Result<PixelBuffer, AppError> {
         self.buffers
             .get(pixel_id)
-            .map(|stored| Arc::clone(&stored.full))
+            .map(|stored| stored.full.clone())
             .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))
     }
 
@@ -203,13 +249,16 @@ impl LayerPixelStore {
                 .get(id)
                 .ok_or_else(|| AppError::LayerPixelsMissing(id.clone()))?;
             let buffer = if preview {
-                Arc::clone(&stored.preview)
+                stored.preview.clone()
             } else {
-                Arc::clone(&stored.full)
+                stored.full.clone()
             };
             resolved.insert(id.clone(), buffer);
         }
-        Ok(ResolvedPixels { buffers: resolved })
+        Ok(ResolvedPixels {
+            buffers: resolved,
+            resident_bytes: self.total_bytes(),
+        })
     }
 
     /// Drops every buffer not named in `keep`. Callers pass the union of the
@@ -230,7 +279,8 @@ impl LayerPixelStore {
 /// A render-time view over resolved buffers. Holding one keeps the pixel data
 /// alive without holding the session lock.
 pub struct ResolvedPixels {
-    buffers: HashMap<String, Arc<RgbaImage>>,
+    buffers: HashMap<String, PixelBuffer>,
+    resident_bytes: u64,
 }
 
 impl ResolvedPixels {
@@ -244,11 +294,34 @@ impl ResolvedPixels {
 }
 
 impl PixelSource for ResolvedPixels {
+    fn promotion_bytes(&self, _document: &super::LayerDocument) -> u64 {
+        self.buffers
+            .values()
+            .filter_map(|buffer| match buffer {
+                PixelBuffer::EncodedSrgba8(image) => {
+                    Some(u64::from(image.width()) * u64::from(image.height()) * 16)
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
     fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError> {
         self.buffers
             .get(pixel_id)
-            .map(Arc::clone)
+            .map(PixelBuffer::encoded8)
             .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))
+    }
+
+    fn resolve_linear(&self, pixel_id: &str) -> Result<Arc<FloatImage>, AppError> {
+        self.buffers
+            .get(pixel_id)
+            .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))?
+            .linear()
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
     }
 }
 
@@ -362,9 +435,8 @@ mod tests {
     fn total_bytes_counts_full_and_preview_buffers() {
         let mut store = store(64, 64);
         store.register(solid(16, 16, 1)).unwrap();
-        // 16 * 16 * 4 for the full buffer and the same again for the preview,
-        // because this canvas renders previews at full scale.
-        assert_eq!(store.total_bytes(), 16 * 16 * 4 * 2);
+        // A full-scale preview shares the immutable source rather than doubling it.
+        assert_eq!(store.total_bytes(), 16 * 16 * 4);
     }
 
     #[test]

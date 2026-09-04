@@ -3,8 +3,9 @@ use crate::domain::{
     Workflow, MAX_BATCH_FILES,
 };
 use crate::error::AppError;
-use crate::image_processing::apply_pipeline;
+use crate::image_processing::high_precision::{check_cancel, pipeline_typed};
 use crate::infrastructure::{load_image, save_image_with_profile};
+use crate::pixel::PixelBuffer;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ pub fn preview_batch(
     validate_batch_workflow(workflow)?;
     let input = canonical_folder(&options.input_folder)?;
     let output = canonical_folder(&options.output_folder)?;
+    validate_folders(&input, &output)?;
     let files = discover_images(&input, options.recursive)?;
     let mut sample_outputs = Vec::new();
     let mut skipped_existing = 0;
@@ -64,11 +66,7 @@ pub fn run_batch(
     });
     let input = canonical_folder(&options.input_folder)?;
     let output = canonical_folder(&options.output_folder)?;
-    if paths_equal(&input, &output) {
-        return Err(AppError::BatchFailure(
-            "input and output folders must be different".into(),
-        ));
-    }
+    validate_folders(&input, &output)?;
     let files = Arc::new(discover_images(&input, options.recursive)?);
     set_status(&status, |value| {
         value.state = BatchState::Running;
@@ -78,7 +76,9 @@ pub fn run_batch(
     let next = Arc::new(AtomicUsize::new(0));
     let claims = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
-    let worker_count = options.workers.min(files.len().max(1));
+    // One decoded image at a time: a float source can approach 1 GiB. The
+    // requested worker count remains an upper bound, never a memory promise.
+    let worker_count = 1;
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
             let files = Arc::clone(&files);
@@ -134,19 +134,71 @@ pub fn run_batch(
                     continue;
                 }
                 let result = (|| {
+                    let _job = crate::resources::acquire_job(Some(&cancelled))?;
+                    check_cancel(Some(&cancelled))?;
                     let (source, source_path) = if is_project(path) {
-                        load_project_composite(path)?
+                        load_project_composite_typed(path)?
+                    } else if path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.eq_ignore_ascii_case("dng"))
+                    {
+                        // Canonical Windows discovery uses a verbatim disk prefix;
+                        // the public RAW loader deliberately rejects device paths.
+                        let local_path = PathBuf::from(crate::raw::presentable_path(path));
+                        let bytes = crate::raw::read_source_bytes(&local_path)
+                            .map_err(|e| AppError::RawInspection(e.to_string()))?;
+                        check_cancel(Some(&cancelled))?;
+                        let developed = crate::raw::develop::develop_bytes(
+                            &bytes,
+                            &crate::color::DevelopmentParameters::default(),
+                            crate::raw::develop::RenderScale::Full,
+                        )
+                        .map_err(|e| AppError::RawInspection(e.to_string()))?;
+                        (developed.image.into(), path.clone())
                     } else {
                         let loaded = load_image(path)?;
-                        (loaded.original.as_ref().clone(), loaded.path)
+                        let pixels = match loaded.working {
+                            Some(image) => PixelBuffer::LinearRgbaF32(image),
+                            None => loaded.original.to_rgba8().into(),
+                        };
+                        (pixels, loaded.path)
                     };
-                    let processed = apply_pipeline(&source, &workflow.operations)?;
-                    save_image_with_profile(
-                        &processed,
-                        &source_path,
-                        &target,
-                        options.export_profile,
-                    )?;
+                    check_cancel(Some(&cancelled))?;
+                    let processed = pipeline_typed(source, &workflow.operations, Some(&cancelled))?;
+                    if options.color.is_some() || matches!(processed, PixelBuffer::LinearRgbaF32(_))
+                    {
+                        let color =
+                            options
+                                .color
+                                .unwrap_or(crate::color_management::ColorExportOptions {
+                                    bit_depth: if matches!(
+                                        options.export_profile,
+                                        ExportProfile::Archive | ExportProfile::Lossless
+                                    ) {
+                                        16
+                                    } else {
+                                        8
+                                    },
+                                    ..Default::default()
+                                });
+                        crate::infrastructure::save_color_image(
+                            processed.linear()?.as_ref(),
+                            &source_path,
+                            &target,
+                            options.export_profile,
+                            color,
+                            Some(&cancelled),
+                        )?;
+                    } else {
+                        check_cancel(Some(&cancelled))?;
+                        save_image_with_profile(
+                            &image::DynamicImage::ImageRgba8((*processed.encoded8()).clone()),
+                            &source_path,
+                            &target,
+                            options.export_profile,
+                        )?;
+                    }
                     Ok(())
                 })();
                 match result {
@@ -157,6 +209,7 @@ pub fn run_batch(
                             format!("OK\t{}\t{}", path.display(), target.display()),
                         );
                     }
+                    Err(AppError::RenderCancelled) => break,
                     Err(error) => record_failure(&status, &log, path, &error),
                 }
                 update_estimate(&status, started);
@@ -252,7 +305,7 @@ fn supported_image(path: &Path) -> bool {
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp")
+        Some("png" | "jpg" | "jpeg" | "webp" | "dng")
     ) || is_project(path)
 }
 
@@ -268,7 +321,7 @@ fn is_project(path: &Path) -> bool {
 }
 
 /// Renders a project's composite so the ordinary batch export path can write it.
-fn load_project_composite(path: &Path) -> Result<(image::DynamicImage, PathBuf), AppError> {
+fn load_project_composite_typed(path: &Path) -> Result<(PixelBuffer, PathBuf), AppError> {
     let project = crate::layers::load_project(path)?;
     let mut store = crate::layers::LayerPixelStore::default();
     store.reset(
@@ -278,19 +331,17 @@ fn load_project_composite(path: &Path) -> Result<(image::DynamicImage, PathBuf),
     for (pixel_id, image) in project.pixels {
         store.register_with_id(&pixel_id, image)?;
     }
+    for (pixel_id, image) in project.linear_pixels {
+        store.register_typed_with_id(&pixel_id, image.into())?;
+    }
     let resolved = store.resolve(&project.document.referenced_pixel_ids(), false)?;
-    let composite = crate::layers::render_layers(
-        &project.document.layers,
-        project.document.canvas_width,
-        project.document.canvas_height,
+    let composite = crate::layers::render_document_typed(
+        &project.document,
         &resolved,
         crate::layers::RenderOptions::default(),
     )?;
     // The project's own document pipeline runs first, then the workflow's.
-    let rendered = apply_pipeline(
-        &image::DynamicImage::ImageRgba8(composite),
-        &project.document_operations,
-    )?;
+    let rendered = pipeline_typed(composite, &project.document_operations, None)?;
     Ok((rendered, path.to_path_buf()))
 }
 
@@ -321,6 +372,17 @@ fn output_path(
     let mut target = output_folder.join(name);
     target.set_extension(extension);
     Ok(target)
+}
+
+fn validate_folders(input: &Path, output: &Path) -> Result<(), AppError> {
+    // Keep previously exported files out of recursive input discovery. This also
+    // prevents overwrite=true from destroying another member of the input set.
+    if output.ancestors().any(|parent| paths_equal(input, parent)) {
+        return Err(AppError::BatchFailure(
+            "the output folder must be outside the input folder".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn profile_extension(profile: ExportProfile) -> &'static str {
@@ -428,6 +490,7 @@ mod tests {
             overwrite: false,
             workers: 2,
             export_profile: ExportProfile::Lossless,
+            color: None,
             dry_run: false,
         }
     }
@@ -511,8 +574,8 @@ mod tests {
         .unwrap();
         let original = fs::read(&project_path).unwrap();
 
-        let (composite, source) = load_project_composite(&project_path).unwrap();
-        let rgba = composite.to_rgba8();
+        let (composite, source) = load_project_composite_typed(&project_path).unwrap();
+        let rgba = composite.encoded8();
         // The top layer covers the bottom except where it is transparent.
         assert_eq!(rgba.get_pixel(1, 1).0, [255, 0, 0, 255]);
         assert_eq!(rgba.get_pixel(0, 0).0, [0, 0, 255, 255]);
@@ -526,7 +589,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("broken.photoforge");
         fs::write(&path, b"not a project").unwrap();
-        assert!(load_project_composite(&path).is_err());
+        assert!(load_project_composite_typed(&path).is_err());
     }
 
     #[test]
@@ -541,6 +604,53 @@ mod tests {
         ] {
             assert_eq!(profile_extension(profile), extension);
         }
+    }
+
+    #[test]
+    fn batch_dng_is_full_precision_tagged_deterministic_and_source_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("in");
+        let output = root.path().join("out");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        let bytes = crate::raw::dng::fixtures::DngBuilder::new(4, 4, vec![1001; 16])
+            .levels(vec![0], (1, 1), 4095)
+            .build();
+        fs::write(input.join("a.dng"), &bytes).unwrap();
+        fs::write(input.join("b.dng"), &bytes).unwrap();
+        fs::write(input.join("bad.dng"), b"broken").unwrap();
+        let mut options = options(&input, &output);
+        options.color = Some(crate::color_management::ColorExportOptions {
+            color_space: crate::color_management::RgbColorSpace::DisplayP3,
+            ..Default::default()
+        });
+        let result = run_batch(
+            991,
+            options,
+            workflow(),
+            Arc::new(Mutex::new(BatchStatus::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!((result.completed, result.failed), (2, 1), "{result:?}");
+        let a = fs::read(output.join("a-0001.png")).unwrap();
+        let b = fs::read(output.join("b-0002.png")).unwrap();
+        assert_eq!(a, b);
+        let image = image::load_from_memory(&a).unwrap();
+        assert_eq!(image.color(), image::ColorType::Rgba16);
+        assert!(image.to_rgba16().pixels().any(|p| p[0] % 257 != 0));
+        assert_eq!(fs::read(input.join("a.dng")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn nested_output_is_rejected_even_when_overwrite_is_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        fs::create_dir(&output).unwrap();
+        let mut options = options(root.path(), &output);
+        options.overwrite = true;
+        options.recursive = true;
+        assert!(preview_batch(&options, &workflow()).is_err());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::layers::LayerPixelStore;
 use image::GenericImageView;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::State;
 
@@ -99,7 +100,12 @@ pub async fn open_image(
     let request = OpenRequest::begin(&state, request_id)?;
 
     let input_path = PathBuf::from(path);
-    let loaded = match tauri::async_runtime::spawn_blocking(move || load_image(&input_path)).await {
+    let loaded = match tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        load_image(&input_path)
+    })
+    .await
+    {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(error)) => {
             clear_pending_open(&state, request_id);
@@ -134,7 +140,12 @@ pub async fn open_image(
     let mut store = LayerPixelStore::default();
     let (width, height) = loaded.original.dimensions();
     store.reset(width, height)?;
-    let background_pixel_id = store.register(loaded.original.to_rgba8())?;
+    let background_pixel_id = match &loaded.working {
+        Some(working) => store.register_typed(crate::pixel::PixelBuffer::LinearRgbaF32(
+            Arc::clone(working),
+        ))?,
+        None => store.register(loaded.original.to_rgba8())?,
+    };
 
     let result = OpenImageResult {
         metadata: loaded.metadata.clone(),
@@ -509,6 +520,8 @@ pub async fn open_raw_image(
     // Decoding and demosaicing a full sensor is CPU-bound and must not run on
     // the interface thread.
     let developed = match tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)
+            .map_err(|e| crate::raw::RawError::InvalidMetadata(e.to_string()))?;
         let sensor = crate::raw::dng::decode(&bytes)?;
         let developed = crate::raw::develop::develop_sensor(
             &sensor,
@@ -567,8 +580,10 @@ pub async fn open_raw_image(
         return Ok(OpenRawImageResult::stale(metadata, request_id, started));
     }
 
-    let dynamic = image::DynamicImage::ImageRgba8(rendered.clone());
-    let preview_data_url = match encode_preview(&dynamic) {
+    let dynamic = image::DynamicImage::ImageRgba8(rendered);
+    let (pw, ph) = crate::layers::preview_dimensions(width, height);
+    let preview = image::DynamicImage::ImageRgba8(developed.image.resized(pw, ph)?.to_rgba8());
+    let preview_data_url = match encode_preview(&preview) {
         Ok(preview) => preview,
         Err(error) => {
             clear_pending_open(&state, request_id);
@@ -581,7 +596,10 @@ pub async fn open_raw_image(
         clear_pending_open(&state, request_id);
         return Err(error);
     }
-    let background_pixel_id = match store.register(rendered) {
+    let working = std::sync::Arc::new(developed.image);
+    let background_pixel_id = match store.register_typed(crate::pixel::PixelBuffer::LinearRgbaF32(
+        std::sync::Arc::clone(&working),
+    )) {
         Ok(id) => id,
         Err(error) => {
             clear_pending_open(&state, request_id);
@@ -614,9 +632,10 @@ pub async fn open_raw_image(
 
     let loaded = crate::infrastructure::LoadedImage {
         path: source_path,
-        original: std::sync::Arc::new(dynamic.clone()),
-        preview: std::sync::Arc::new(dynamic),
+        original: std::sync::Arc::new(dynamic),
+        preview: std::sync::Arc::new(preview),
         metadata: metadata.clone(),
+        working: Some(working),
     };
 
     let result = OpenRawImageResult {

@@ -7,8 +7,7 @@ use crate::domain::{
 };
 use crate::error::AppError;
 use crate::image_processing::{
-    apply_pipeline, apply_pipeline_float, calculate_histogram, inspect_pixel,
-    prepare_preview_operations,
+    apply_pipeline, calculate_histogram, inspect_pixel, prepare_preview_operations,
 };
 use crate::infrastructure::{
     load_workflow, parse_workflow_json, save_image_with_profile, save_workflow,
@@ -43,23 +42,28 @@ pub async fn generate_histogram(
     let full_source_dimensions = source.full_dimensions;
     let started = Instant::now();
     let (before, after) = tauri::async_runtime::spawn_blocking(move || {
-        let source = source.render()?;
+        let source = source.render_typed()?;
         let preview_operations =
             prepare_preview_operations(&operations, full_source_dimensions, source.dimensions())?;
-        let (before, after) = if operations
-            .iter()
-            .any(|operation| matches!(operation, EditOperation::RawDevelopment { .. }))
+        let (before, after) = if matches!(source, crate::pixel::PixelBuffer::LinearRgbaF32(_))
+            || operations
+                .iter()
+                .any(|operation| matches!(operation, EditOperation::RawDevelopment { .. }))
         {
-            let before_float = crate::color::FloatImage::from_rgba8(&source.to_rgba8())
-                .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
-            let after_float = apply_pipeline_float(source.as_ref(), &preview_operations)?;
+            let before_float = source.linear()?;
+            let after_float = crate::image_processing::high_precision::pipeline(
+                (*before_float).clone(),
+                &preview_operations,
+                None,
+            )?;
             (
                 float_histogram_channels(&before_float),
                 float_histogram_channels(&after_float),
             )
         } else {
-            let before = calculate_histogram(source.as_ref());
-            let processed = apply_pipeline(source.as_ref(), &preview_operations)?;
+            let source = image::DynamicImage::ImageRgba8((*source.encoded8()).clone());
+            let before = calculate_histogram(&source);
+            let processed = apply_pipeline(&source, &preview_operations)?;
             (before, calculate_histogram(&processed))
         };
         Ok::<_, AppError>((before, after))
@@ -115,9 +119,15 @@ pub async fn inspect_image_pixel(
     let source = super::sampling::capture(&state, document_id, layer_document, true)?;
     let full_source_dimensions = source.full_dimensions;
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let source = source.render()?;
-        let processed =
-            apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
+        let source = source.render_typed()?;
+        let preview_operations =
+            prepare_preview_operations(&operations, full_source_dimensions, source.dimensions())?;
+        let processed = crate::image_processing::high_precision::pipeline_typed(
+            source,
+            &preview_operations,
+            None,
+        )?;
+        let processed = image::DynamicImage::ImageRgba8((*processed.encoded8()).clone());
         inspect_pixel(&processed, x, y)
             .ok_or_else(|| AppError::CropBounds("pixel coordinates are outside the image".into()))
     })
@@ -129,6 +139,7 @@ pub async fn inspect_image_pixel(
     Ok(result)
 }
 
+#[cfg(test)]
 fn apply_preview_pipeline(
     source: &image::DynamicImage,
     full_source_dimensions: (u32, u32),

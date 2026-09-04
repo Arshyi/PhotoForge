@@ -161,11 +161,26 @@ pub struct BatchOptions {
     pub workers: usize,
     pub export_profile: ExportProfile,
     #[serde(default)]
+    pub color: Option<crate::color_management::ColorExportOptions>,
+    #[serde(default)]
     pub dry_run: bool,
 }
 
 impl BatchOptions {
     pub fn validate(&self) -> Result<(), AppError> {
+        if let Some(color) = self.color {
+            color.validate()?;
+            if color.bit_depth == 16
+                && !matches!(
+                    self.export_profile,
+                    ExportProfile::Archive | ExportProfile::Lossless
+                )
+            {
+                return Err(AppError::BatchFailure(
+                    "16-bit batch output requires PNG (Archive or Lossless)".into(),
+                ));
+            }
+        }
         if self.input_folder.trim().is_empty() || self.output_folder.trim().is_empty() {
             return Err(AppError::BatchFailure(
                 "input and output folders are required".into(),
@@ -450,6 +465,7 @@ mod tests {
                 overwrite: false,
                 workers,
                 export_profile: ExportProfile::Lossless,
+                color: None,
                 dry_run: false,
             };
             assert!(options.validate().is_err());
@@ -467,6 +483,7 @@ mod tests {
                 overwrite: false,
                 workers,
                 export_profile: ExportProfile::Web,
+                color: None,
                 dry_run: true,
             };
             options.validate().unwrap();

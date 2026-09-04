@@ -289,17 +289,12 @@ pub fn apply_camera_matrix(pixels: &mut [[f32; 3]], matrix: &[[f32; 3]; 3]) {
         let red = matrix[0][0] * pixel[0] + matrix[0][1] * pixel[1] + matrix[0][2] * pixel[2];
         let green = matrix[1][0] * pixel[0] + matrix[1][1] * pixel[1] + matrix[1][2] * pixel[2];
         let blue = matrix[2][0] * pixel[0] + matrix[2][1] * pixel[1] + matrix[2][2] * pixel[2];
-        // A matrix can drive a channel slightly negative on saturated colours.
-        // Negatives are not light, but the highlight side is left alone so
-        // recovery headroom survives.
+        // Negative working-space coordinates can represent an out-of-sRGB
+        // color. Preserve them until the explicit output gamut boundary.
         *pixel = [
-            if red.is_finite() { red.max(0.0) } else { 0.0 },
-            if green.is_finite() {
-                green.max(0.0)
-            } else {
-                0.0
-            },
-            if blue.is_finite() { blue.max(0.0) } else { 0.0 },
+            if red.is_finite() { red } else { 0.0 },
+            if green.is_finite() { green } else { 0.0 },
+            if blue.is_finite() { blue } else { 0.0 },
         ];
     }
 }
@@ -626,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_matrix_is_applied_and_negatives_are_not_light() {
+    fn the_camera_matrix_preserves_negative_out_of_gamut_coordinates() {
         let mut pixels = vec![[0.5f32, 0.5, 0.5], [1.0, 0.0, 0.0]];
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         apply_camera_matrix(&mut pixels, &identity);
@@ -636,7 +631,7 @@ mod tests {
         // A matrix row that would drive a channel negative.
         let matrix = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
         apply_camera_matrix(&mut pixels, &matrix);
-        assert_eq!(pixels[0][1], 0.0, "a negative channel was kept as light");
+        assert_eq!(pixels[0][1], -1.0, "out-of-gamut coordinates were clipped");
     }
 
     #[test]

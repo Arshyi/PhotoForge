@@ -2,10 +2,22 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 9 RAW
-development system. The current version is **0.9.0**. Native GUI/DPI
-verification, the elevated MSI lifecycle, and production signing acceptance
-remain outstanding.
+This repository contains the Phase 0 foundation through Phase 10 high-precision
+editing. The target version is **0.10.0**. See [Phase 10 results](docs/phase-10-results.md)
+for exact test, artifact, native GUI/DPI, installer and signing status.
+
+## High-precision editing (Phase 10)
+
+- Linear f32 layer/group/mask/adjustment/transform rendering with all 16 blend modes
+- Genuine layered PNG16 export, native PNG16 import, and typed project/recovery data
+- Embedded RGB ICC input and actual sRGB / Display P3 / Adobe RGB output transforms
+- Source-backed DNG placement and undoable full-resolution RAW re-development
+- Sequential RAW batch export with profile/bit-depth controls and source protection
+- Checked memory admission, bounded immutable caches, and measured 45/60 MP synthetic cases
+- Explicit legacy rendering for older projects; no silent appearance migration
+
+The CPU renderer is authoritative. Preview remains 8-bit sRGB; Windows/WebView2
+control monitor presentation. [Color pipeline](docs/color-pipeline.md).
 
 ## Camera RAW development (0.9.0)
 
@@ -24,18 +36,20 @@ writing to the original.
 - **Highlight headroom** — nothing clips before the display transform, so
   reducing exposure genuinely recovers detail an 8-bit path would have lost
 - **Source-backed projects** — a RAW layer stores the file it came from, its
-  SHA-256, and its development parameters, so reopening develops the photograph
-  again instead of inheriting a baked raster
+  SHA-256, and its development parameters alongside the exact developed pixels;
+  explicit re-development returns to the verified original
 - **Missing and changed sources** — detected and reported; a relink verifies the
   hash and refuses a different photograph
 - **True 16-bit PNG export** at full sensor resolution, quantised only at the
   file boundary
 
 **Only DNG is decoded.** CR2, CR3, NEF, ARW, RAF, ORF, and RW2 are recognised
-so the interface can explain itself, but no decoder is bundled: every mature
-Rust RAW decoder is LGPL or AGPL, and this repository reserves all rights.
-Convert with Adobe DNG Converter to open them today. Sensors above 40
-megapixels are refused by the application-wide pixel ceiling. See
+so the interface can explain itself, but no decoder for them is bundled.
+The scoped dependency assessment is documented below. Supported DNG variants
+can be used after external conversion; not every DNG encoding is supported.
+The float source ceiling is 1 GiB (67,108,864 pixels), with separate cache and
+job estimates; legal dimensions can still be rejected when history or scratch
+would exceed those budgets. See
 [docs/raw-development.md](docs/raw-development.md) and
 [docs/color-pipeline.md](docs/color-pipeline.md).
 
@@ -75,19 +89,15 @@ the existing Phase 7 mask engine unchanged.
   file
 - **Sibling multi-selection and grouping** in the Layers panel
 
-Opening an ordinary photo still produces a single background layer and keeps
-the original fast path until a layer-aware edit or project load needs the
-compositor. See [docs/layers.md](docs/layers.md),
+Opening an ordinary photo produces a single background layer in the linear
+document renderer. Older byte projects keep their compatibility path.
+See [docs/layers.md](docs/layers.md),
 [docs/compositing.md](docs/compositing.md), and
 [docs/project-format.md](docs/project-format.md).
 
-PhotoForge does not support PSD files, GPU acceleration, arbitrary ICC colour
-management, or camera RAW decoding yet. Phase 9 now has a tested linear-light
-float foundation, a non-destructive `raw_development` operation, true 16-bit
-PNG export, and metadata-only RAW inspection, but these are not a 0.9.0
-release. Those limits are
-stated plainly in [docs/phase-8-results.md](docs/phase-8-results.md) and
-[docs/phase-9-results.md](docs/phase-9-results.md).
+PhotoForge does not support PSD, GPU rendering, general TIFF import, CMYK,
+printer proofing or proprietary RAW formats. Earlier phase reports remain
+historical evidence; [Phase 10 results](docs/phase-10-results.md) records current limits.
 
 ## What works
 

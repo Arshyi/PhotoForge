@@ -138,6 +138,8 @@
   let overwrite = false;
   let workers = 2;
   let exportProfile: ExportProfile = 'lossless';
+  let batchColorSpace: 'srgb' | 'display_p3' | 'adobe_rgb' = 'srgb';
+  let batchBitDepth: 8 | 16 = 16;
   let batchPreview: BatchPreview | null = null;
   let batchStatus: BatchStatus | null = null;
   let batchRunning = false;
@@ -617,7 +619,8 @@
   }
 
   function batchOptions(dryRun: boolean): BatchOptions {
-    return { inputFolder, outputFolder, filenameTemplate, recursive, overwrite, workers, exportProfile, dryRun };
+    return { inputFolder, outputFolder, filenameTemplate, recursive, overwrite, workers, exportProfile, dryRun,
+      color: { colorSpace: batchColorSpace, bitDepth: ['lossless', 'archive'].includes(exportProfile) ? batchBitDepth : 8, dither: false } };
   }
 
   async function previewBatch() {
@@ -812,6 +815,9 @@
       <label class="field">Workflow<select bind:value={batchWorkflowId}><option value="">Choose workflow</option>{#each workflows as workflow}<option value={workflow.id}>{workflow.name}</option>{/each}</select></label>
       <label class="field">Filename template<input bind:value={filenameTemplate} /></label>
       <label class="field">Export profile<select bind:value={exportProfile}>{#each ['web', 'print', 'archive', 'lossless', 'high_jpeg', 'maximum_compression'] as profile}<option value={profile}>{profile.replaceAll('_', ' ')}</option>{/each}</select></label>
+      <label class="field">Batch output color space<select bind:value={batchColorSpace}><option value="srgb">sRGB</option><option value="display_p3">Display P3</option><option value="adobe_rgb">Adobe RGB (1998)</option></select></label>
+      <label class="field">Batch PNG bit depth<select bind:value={batchBitDepth}><option value={16}>16-bit</option><option value={8}>8-bit</option></select></label>
+      <p class="hint">DNG files develop at full resolution. One image is decoded at a time within a checked memory budget. ICC profiles are embedded; camera EXIF/GPS is stripped. Cancellation stops between decode/development stages and during float processing/export.</p>
       <SliderControl label="Bounded workers" value={workers} min={1} max={8} step={1} defaultValue={2} format={(value) => `${value}`} onchange={(value) => (workers = value)} />
       <div class="check-grid"><label><input type="checkbox" bind:checked={recursive} /> Recursive</label><label><input type="checkbox" bind:checked={overwrite} /> Allow overwrite</label></div>
       <div class="button-row"><button disabled={batchRunning} on:click={previewBatch}>Batch preview</button><button class="primary" disabled={batchRunning} on:click={startBatch}>Start batch</button><button disabled={!batchRunning} on:click={cancelBatch}>Cancel</button></div>

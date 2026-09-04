@@ -1,7 +1,9 @@
 use super::model::{Layer, LayerDocument, LayerMask, MAX_CANVAS_DIMENSION};
+use crate::color::{FloatImage, FloatRgba};
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::mask::{MaskBitmap, MaskSnapshot};
+use crate::pixel::{DocumentPrecision, PixelBuffer, PixelFormat};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -15,17 +17,22 @@ pub const PROJECT_EXTENSION: &str = "photoforge";
 /// Container magic. The trailing CR/LF pair makes a file mangled by a text-mode
 /// transfer fail immediately instead of decoding into nonsense.
 pub const PROJECT_MAGIC: &[u8; 8] = b"PFORGE\r\n";
-pub const PROJECT_FORMAT_VERSION: u32 = 1;
+pub const PROJECT_FORMAT_VERSION: u32 = 2;
 
 pub const MAX_PROJECT_BYTES: u64 = 1_073_741_824;
 pub const MAX_MANIFEST_BYTES: u64 = 33_554_432;
 pub const MAX_PROJECT_ENTRIES: usize = 4_096;
-pub const MAX_ENTRY_BYTES: u64 = 268_435_456;
+pub const MAX_ENTRY_BYTES: u64 = crate::resources::MAX_WORKING_IMAGE_BYTES;
 pub const MAX_ENTRY_NAME_CHARS: usize = 128;
 const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
 const ENCODING_RAW: u8 = 0;
 const ENCODING_PNG: u8 = 1;
+const ENCODING_LINEAR_F32: u8 = 2;
+
+fn legacy_pixel_format() -> PixelFormat {
+    PixelFormat::SRGBA8
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -34,6 +41,8 @@ pub struct ProjectPixelEntry {
     pub entry: String,
     pub width: u32,
     pub height: u32,
+    #[serde(default = "legacy_pixel_format")]
+    pub format: PixelFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +87,7 @@ pub struct LoadedProject {
     pub document: LayerDocument,
     pub document_operations: Vec<EditOperation>,
     pub pixels: Vec<(String, RgbaImage)>,
+    pub linear_pixels: Vec<(String, FloatImage)>,
     pub application_version: String,
     pub created_at: String,
     pub modified_at: String,
@@ -87,6 +97,14 @@ struct Entry {
     name: String,
     encoding: u8,
     payload: Vec<u8>,
+}
+
+// Decode entries borrow the bounded container instead of duplicating up to a
+// gigabyte of payload while the reconstructed pixel buffers are being allocated.
+struct ReadEntry<'a> {
+    name: String,
+    encoding: u8,
+    payload: &'a [u8],
 }
 
 fn fnv1a64(data: &[u8]) -> u64 {
@@ -244,24 +262,158 @@ pub fn encode_project(
     created_at: &str,
     modified_at: &str,
 ) -> Result<Vec<u8>, AppError> {
+    let sources: Vec<_> = pixels
+        .iter()
+        .map(|(id, image)| (id.clone(), ProjectPixelRef::Encoded(image)))
+        .collect();
+    encode_project_sources(
+        document,
+        document_operations,
+        &sources,
+        application_version,
+        created_at,
+        modified_at,
+    )
+}
+
+enum ProjectPixelRef<'a> {
+    Encoded(&'a RgbaImage),
+    Linear(&'a FloatImage),
+}
+
+pub fn encode_project_typed(
+    document: &LayerDocument,
+    document_operations: &[EditOperation],
+    pixels: &[(String, PixelBuffer)],
+    application_version: &str,
+    created_at: &str,
+    modified_at: &str,
+) -> Result<Vec<u8>, AppError> {
+    let sources: Vec<_> = pixels
+        .iter()
+        .map(|(id, image)| {
+            (
+                id.clone(),
+                match image {
+                    PixelBuffer::EncodedSrgba8(image) => ProjectPixelRef::Encoded(image),
+                    PixelBuffer::LinearRgbaF32(image) => ProjectPixelRef::Linear(image),
+                },
+            )
+        })
+        .collect();
+    encode_project_sources(
+        document,
+        document_operations,
+        &sources,
+        application_version,
+        created_at,
+        modified_at,
+    )
+}
+
+fn encode_project_sources(
+    document: &LayerDocument,
+    document_operations: &[EditOperation],
+    pixels: &[(String, ProjectPixelRef<'_>)],
+    application_version: &str,
+    created_at: &str,
+    modified_at: &str,
+) -> Result<Vec<u8>, AppError> {
     document.validate()?;
     for operation in document_operations {
         operation.validate()?;
     }
 
-    let mut stripped = document.clone();
-    let detached = detach_masks(&mut stripped);
-
     let mut entries: Vec<Entry> = Vec::new();
     let mut pixel_entries = Vec::new();
     let referenced = document.referenced_pixel_ids();
+    let mut source_bytes = 0_u64;
+    for (id, image) in pixels.iter().filter(|(id, _)| referenced.contains(id)) {
+        let (w, h, bpp) = match image {
+            ProjectPixelRef::Encoded(image) => (image.width(), image.height(), 4),
+            ProjectPixelRef::Linear(image) => (image.width(), image.height(), 16),
+        };
+        super::model::validate_dimensions(w, h)?;
+        if document.iter().any(|layer| {
+            layer.pixel_id() == Some(id.as_str()) && layer.pixel_dimensions() != Some((w, h))
+        }) {
+            return Err(AppError::ProjectFormat(
+                "layer dimensions disagree with stored pixels".into(),
+            ));
+        }
+        source_bytes = source_bytes
+            .checked_add(u64::from(w) * u64::from(h) * bpp)
+            .ok_or(AppError::OutOfMemoryRisk)?;
+    }
+    let mask_bytes =
+        document
+            .iter()
+            .filter_map(|l| l.mask.as_ref())
+            .try_fold(0_u64, |total, mask| {
+                total
+                    .checked_add(
+                        u64::from(mask.snapshot.width) * u64::from(mask.snapshot.height) * 10,
+                    )
+                    .ok_or(AppError::OutOfMemoryRisk)
+            })?;
+    crate::resources::ResourceEstimate::new(
+        source_bytes,
+        source_bytes
+            .checked_mul(2)
+            .ok_or(AppError::OutOfMemoryRisk)?,
+        mask_bytes,
+        64 * 1024 * 1024,
+    )?;
+    let mut stripped = document.clone();
+    let detached = detach_masks(&mut stripped);
     for pixel_id in &referenced {
         let image = pixels
             .iter()
             .find(|(id, _)| id == pixel_id)
-            .map(|(_, image)| *image)
+            .map(|(_, image)| image)
             .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.clone()))?;
-        let entry = format!("layers/{pixel_id}.png");
+        let (width, height, format, encoding, payload, extension) = match image {
+            ProjectPixelRef::Encoded(image) => (
+                image.width(),
+                image.height(),
+                PixelFormat::SRGBA8,
+                ENCODING_PNG,
+                encode_rgba_png(image)?,
+                "png",
+            ),
+            ProjectPixelRef::Linear(image) => {
+                image.validate()?;
+                let len = image
+                    .pixels()
+                    .len()
+                    .checked_mul(16)
+                    .ok_or(AppError::OutOfMemoryRisk)?;
+                if len as u64 > MAX_ENTRY_BYTES {
+                    return Err(AppError::ProjectTooLarge {
+                        bytes: len as u64,
+                        limit: MAX_ENTRY_BYTES,
+                    });
+                }
+                let mut payload = Vec::new();
+                payload
+                    .try_reserve_exact(len)
+                    .map_err(|_| AppError::OutOfMemoryRisk)?;
+                for p in image.pixels() {
+                    for c in [p.red, p.green, p.blue, p.alpha] {
+                        payload.extend_from_slice(&c.to_le_bytes());
+                    }
+                }
+                (
+                    image.width(),
+                    image.height(),
+                    PixelFormat::LINEAR_RGBA_F32,
+                    ENCODING_LINEAR_F32,
+                    payload,
+                    "f32le",
+                )
+            }
+        };
+        let entry = format!("layers/{pixel_id}.{extension}");
         if !valid_entry_name(&entry) {
             return Err(AppError::ProjectFormat(format!(
                 "{pixel_id} cannot be stored under a safe entry name"
@@ -270,13 +422,14 @@ pub fn encode_project(
         pixel_entries.push(ProjectPixelEntry {
             pixel_id: pixel_id.clone(),
             entry: entry.clone(),
-            width: image.width(),
-            height: image.height(),
+            width,
+            height,
+            format,
         });
         entries.push(Entry {
             name: entry,
-            encoding: ENCODING_PNG,
-            payload: encode_rgba_png(image)?,
+            encoding,
+            payload,
         });
     }
 
@@ -322,7 +475,27 @@ pub fn encode_project(
         )));
     }
 
+    let required = entries
+        .iter()
+        .try_fold(
+            PROJECT_MAGIC.len() as u64 + 4 + 8 + manifest_bytes.len() as u64 + 4 + 8,
+            |sum, entry| {
+                sum.checked_add(
+                    2 + entry.name.len() as u64 + 1 + 8 + 8 + entry.payload.len() as u64,
+                )
+            },
+        )
+        .ok_or(AppError::OutOfMemoryRisk)?;
+    if required > MAX_PROJECT_BYTES {
+        return Err(AppError::ProjectTooLarge {
+            bytes: required,
+            limit: MAX_PROJECT_BYTES,
+        });
+    }
     let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(required as usize)
+        .map_err(|_| AppError::OutOfMemoryRisk)?;
     bytes.extend_from_slice(PROJECT_MAGIC);
     bytes.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
@@ -433,7 +606,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         offset: PROJECT_MAGIC.len(),
     };
     let version = cursor.u32()?;
-    if version != PROJECT_FORMAT_VERSION {
+    if !matches!(version, 1 | PROJECT_FORMAT_VERSION) {
         return Err(AppError::UnsupportedProjectVersion(version));
     }
     let manifest_len = cursor.u64()?;
@@ -447,9 +620,56 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         cursor.take(usize::try_from(manifest_len).map_err(|_| AppError::OutOfMemoryRisk)?)?;
     let manifest: ProjectManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|error| AppError::ProjectFormat(format!("manifest is unreadable: {error}")))?;
-    if manifest.format_version != PROJECT_FORMAT_VERSION {
+    if manifest.format_version != version {
         return Err(AppError::UnsupportedProjectVersion(manifest.format_version));
     }
+    if version == 1
+        && (manifest.document.precision != DocumentPrecision::LegacySrgb8
+            || manifest
+                .pixels
+                .iter()
+                .any(|pixel| pixel.format != PixelFormat::SRGBA8))
+    {
+        return Err(AppError::ProjectFormat(
+            "version 1 projects cannot declare float pixel semantics".into(),
+        ));
+    }
+    if manifest.pixels.len() > super::store::MAX_STORE_BUFFERS {
+        return Err(AppError::OutOfMemoryRisk);
+    }
+    // Admit the aggregate declared decode, not merely each PNG separately.
+    // Ten mask bytes/pixel covers coverage, PNG conversion, temporary RLE and
+    // retained base64 snapshots. Pixel payloads borrow the bounded container.
+    let mut declared_pixels = 0_u64;
+    for pixel in &manifest.pixels {
+        let n = crate::resources::checked_pixels(pixel.width, pixel.height)?;
+        let bpp = if pixel.format == PixelFormat::SRGBA8 {
+            4
+        } else {
+            16
+        };
+        declared_pixels = declared_pixels
+            .checked_add(n * bpp)
+            .ok_or(AppError::OutOfMemoryRisk)?;
+    }
+    if declared_pixels > super::store::MAX_STORE_BYTES
+        || manifest.masks.len() > super::model::MAX_LAYERS
+    {
+        return Err(AppError::OutOfMemoryRisk);
+    }
+    let mut mask_bytes = 0_u64;
+    for mask in &manifest.masks {
+        let n = crate::resources::checked_pixels(mask.width, mask.height)?;
+        mask_bytes = mask_bytes
+            .checked_add(n * 10)
+            .ok_or(AppError::OutOfMemoryRisk)?;
+    }
+    crate::resources::ResourceEstimate::new(
+        bytes.len() as u64,
+        declared_pixels * 2,
+        mask_bytes,
+        64 * 1024 * 1024,
+    )?;
 
     let entry_count = cursor.u32()? as usize;
     if entry_count > MAX_PROJECT_ENTRIES {
@@ -457,7 +677,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             "the project declares {entry_count} entries; the limit is {MAX_PROJECT_ENTRIES}"
         )));
     }
-    let mut entries: Vec<Entry> = Vec::new();
+    let mut entries: Vec<ReadEntry<'_>> = Vec::new();
     for _ in 0..entry_count {
         let name_len = cursor.u16()? as usize;
         if name_len > MAX_ENTRY_NAME_CHARS {
@@ -480,7 +700,9 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             )));
         }
         let encoding = cursor.u8()?;
-        if !matches!(encoding, ENCODING_RAW | ENCODING_PNG) {
+        if !matches!(encoding, ENCODING_RAW | ENCODING_PNG | ENCODING_LINEAR_F32)
+            || (version == 1 && encoding == ENCODING_LINEAR_F32)
+        {
             return Err(AppError::ProjectFormat(format!(
                 "entry {name} uses unsupported encoding {encoding}"
             )));
@@ -493,15 +715,14 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             });
         }
         let checksum = cursor.u64()?;
-        let payload = cursor
-            .take(usize::try_from(payload_len).map_err(|_| AppError::OutOfMemoryRisk)?)?
-            .to_vec();
-        if fnv1a64(&payload) != checksum {
+        let payload =
+            cursor.take(usize::try_from(payload_len).map_err(|_| AppError::OutOfMemoryRisk)?)?;
+        if fnv1a64(payload) != checksum {
             return Err(AppError::ProjectFormat(format!(
                 "entry {name} failed its integrity check"
             )));
         }
-        entries.push(Entry {
+        entries.push(ReadEntry {
             name,
             encoding,
             payload,
@@ -513,7 +734,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         ));
     }
 
-    let find = |name: &str| -> Result<&Entry, AppError> {
+    let find = |name: &str| -> Result<&ReadEntry<'_>, AppError> {
         entries
             .iter()
             .find(|entry| entry.name == name)
@@ -522,17 +743,79 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
 
     let mut document = manifest.document;
     let mut restored_pixels = Vec::new();
+    let mut linear_pixels = Vec::new();
+    let mut decoded_bytes = 0_u64;
+    let mut pixel_ids = std::collections::HashSet::new();
     for pixel in &manifest.pixels {
-        let entry = find(&pixel.entry)?;
-        if entry.encoding != ENCODING_PNG {
-            return Err(AppError::ProjectFormat(format!(
-                "layer entry {} must be stored as PNG",
-                pixel.entry
-            )));
+        if !pixel_ids.insert(&pixel.pixel_id) {
+            return Err(AppError::ProjectFormat(
+                "duplicate pixel identifiers".into(),
+            ));
         }
+        let entry = find(&pixel.entry)?;
         super::model::validate_dimensions(pixel.width, pixel.height)?;
-        let decoded = decode_png(&entry.payload, (pixel.width, pixel.height))?;
-        restored_pixels.push((pixel.pixel_id.clone(), decoded.to_rgba8()));
+        if document.iter().any(|layer| {
+            layer.pixel_id() == Some(pixel.pixel_id.as_str())
+                && layer.pixel_dimensions() != Some((pixel.width, pixel.height))
+        }) {
+            return Err(AppError::ProjectFormat(
+                "layer geometry disagrees with the pixel manifest".into(),
+            ));
+        }
+        let count = u64::from(pixel.width) * u64::from(pixel.height);
+        let bytes = count
+            .checked_mul(if pixel.format == PixelFormat::SRGBA8 {
+                4
+            } else {
+                16
+            })
+            .ok_or(AppError::OutOfMemoryRisk)?;
+        decoded_bytes = decoded_bytes
+            .checked_add(bytes)
+            .ok_or(AppError::OutOfMemoryRisk)?;
+        if decoded_bytes > super::store::MAX_STORE_BYTES {
+            return Err(AppError::OutOfMemoryRisk);
+        }
+        if entry.encoding == ENCODING_PNG && pixel.format == PixelFormat::SRGBA8 {
+            let decoded = decode_png(entry.payload, (pixel.width, pixel.height))?;
+            restored_pixels.push((pixel.pixel_id.clone(), decoded.to_rgba8()));
+        } else if entry.encoding == ENCODING_LINEAR_F32
+            && pixel.format == PixelFormat::LINEAR_RGBA_F32
+            && version >= 2
+        {
+            if entry.payload.len() as u64 != bytes {
+                return Err(AppError::ProjectFormat(
+                    "float pixel payload length disagrees with its dimensions".into(),
+                ));
+            }
+            let mut samples = Vec::new();
+            samples
+                .try_reserve_exact(count as usize)
+                .map_err(|_| AppError::OutOfMemoryRisk)?;
+            for sample in entry.payload.chunks_exact(16) {
+                let channel = |offset: usize| {
+                    f32::from_le_bytes(
+                        sample[offset..offset + 4]
+                            .try_into()
+                            .expect("checked sample width"),
+                    )
+                };
+                samples.push(FloatRgba::new(
+                    channel(0),
+                    channel(4),
+                    channel(8),
+                    channel(12),
+                ));
+            }
+            linear_pixels.push((
+                pixel.pixel_id.clone(),
+                FloatImage::new(pixel.width, pixel.height, samples)?,
+            ));
+        } else {
+            return Err(AppError::ProjectFormat(
+                "pixel encoding and color/precision metadata disagree".into(),
+            ));
+        }
     }
 
     for mask in &manifest.masks {
@@ -543,7 +826,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
                 mask.entry
             )));
         }
-        let decoded = decode_png(&entry.payload, (mask.width, mask.height))?;
+        let decoded = decode_png(entry.payload, (mask.width, mask.height))?;
         let coverage = decoded.to_luma8();
         let bitmap = MaskBitmap::from_coverage(mask.width, mask.height, coverage.into_raw())?;
         let restored = LayerMask {
@@ -561,7 +844,9 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
 
     // Every pixel the tree references must have arrived with the file.
     for pixel_id in document.referenced_pixel_ids() {
-        if !restored_pixels.iter().any(|(id, _)| *id == pixel_id) {
+        if !restored_pixels.iter().any(|(id, _)| *id == pixel_id)
+            && !linear_pixels.iter().any(|(id, _)| *id == pixel_id)
+        {
             return Err(AppError::LayerPixelsMissing(pixel_id));
         }
     }
@@ -574,6 +859,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         document,
         document_operations: manifest.document_operations,
         pixels: restored_pixels,
+        linear_pixels,
         application_version: manifest.application_version,
         created_at: manifest.created_at,
         modified_at: manifest.modified_at,
@@ -592,6 +878,38 @@ pub fn save_project(
     created_at: &str,
     modified_at: &str,
 ) -> Result<u64, AppError> {
+    let bytes = encode_project(
+        document,
+        document_operations,
+        pixels,
+        application_version,
+        created_at,
+        modified_at,
+    )?;
+    save_project_bytes(path, &bytes)
+}
+
+pub fn save_project_typed(
+    path: &Path,
+    document: &LayerDocument,
+    document_operations: &[EditOperation],
+    pixels: &[(String, PixelBuffer)],
+    application_version: &str,
+    created_at: &str,
+    modified_at: &str,
+) -> Result<u64, AppError> {
+    let bytes = encode_project_typed(
+        document,
+        document_operations,
+        pixels,
+        application_version,
+        created_at,
+        modified_at,
+    )?;
+    save_project_bytes(path, &bytes)
+}
+
+fn save_project_bytes(path: &Path, bytes: &[u8]) -> Result<u64, AppError> {
     validate_local_path(path)?;
     if path
         .extension()
@@ -604,15 +922,6 @@ pub fn save_project(
             "project files must use the .{PROJECT_EXTENSION} extension"
         )));
     }
-    let bytes = encode_project(
-        document,
-        document_operations,
-        pixels,
-        application_version,
-        created_at,
-        modified_at,
-    )?;
-
     let parent = path
         .parent()
         .ok_or_else(|| AppError::ProjectIo("project path has no parent folder".into()))?;
@@ -623,7 +932,7 @@ pub fn save_project(
         .map_err(map_io)?;
     {
         let mut writer = BufWriter::new(temporary.as_file());
-        writer.write_all(&bytes).map_err(map_io)?;
+        writer.write_all(bytes).map_err(map_io)?;
         writer.flush().map_err(map_io)?;
     }
     temporary.as_file().sync_all().map_err(map_io)?;
@@ -1173,6 +1482,63 @@ mod tests {
     }
 
     #[test]
+    fn version_one_without_precision_metadata_keeps_exact_legacy_pixels() {
+        let mut document = LayerDocument::new(8, 8);
+        document.layers = vec![pixel_layer("base", 8, 8)];
+        let manifest = manifest_for(
+            document.clone(),
+            vec![ProjectPixelEntry {
+                format: PixelFormat::SRGBA8,
+                pixel_id: "pxbase".into(),
+                entry: "layers/pxbase.png".into(),
+                width: 8,
+                height: 8,
+            }],
+        );
+        let payload = encode_rgba_png(&image(8, 8, 37)).unwrap();
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value["formatVersion"] = 1.into();
+        value["document"]
+            .as_object_mut()
+            .unwrap()
+            .remove("precision");
+        value["pixels"][0].as_object_mut().unwrap().remove("format");
+        let json = serde_json::to_vec(&value).unwrap();
+        let original = handmade(&manifest, &[("layers/pxbase.png", payload)]);
+        let original_json_len = u64::from_le_bytes(original[12..20].try_into().unwrap()) as usize;
+        let mut bytes = PROJECT_MAGIC.to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&json);
+        bytes.extend_from_slice(&original[20 + original_json_len..original.len() - 8]);
+        let checksum = fnv1a64(&bytes);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        let loaded = decode_project(&bytes).unwrap();
+        assert_eq!(loaded.document, document);
+        assert_eq!(loaded.pixels[0].1, image(8, 8, 37));
+        assert!(loaded.linear_pixels.is_empty());
+    }
+
+    #[test]
+    fn aggregate_mask_bomb_is_rejected_before_payload_decode() {
+        let mut manifest = manifest_for(LayerDocument::new(8, 8), Vec::new());
+        manifest.masks = (0..16)
+            .map(|n| ProjectMaskEntry {
+                layer_id: format!("mask{n}"),
+                entry: format!("masks/{n}.png"),
+                width: 9504,
+                height: 6336,
+                enabled: true,
+                inverted: false,
+            })
+            .collect();
+        assert!(matches!(
+            decode_project(&handmade(&manifest, &[])),
+            Err(AppError::ResourceBudget { .. })
+        ));
+    }
+
+    #[test]
     fn an_embedded_image_whose_size_disagrees_with_the_manifest_is_rejected() {
         let mut document = LayerDocument::new(8, 8);
         document.layers = vec![pixel_layer("base", 8, 8)];
@@ -1180,6 +1546,7 @@ mod tests {
         let manifest = manifest_for(
             document,
             vec![ProjectPixelEntry {
+                format: PixelFormat::SRGBA8,
                 pixel_id: "pxbase".into(),
                 entry: "layers/pxbase.png".into(),
                 width: 8,
@@ -1201,6 +1568,7 @@ mod tests {
         let manifest = manifest_for(
             document,
             vec![ProjectPixelEntry {
+                format: PixelFormat::SRGBA8,
                 pixel_id: "pxbase".into(),
                 entry: "layers/pxbase.png".into(),
                 width: 19_000,
@@ -1222,6 +1590,7 @@ mod tests {
         let manifest = manifest_for(
             document,
             vec![ProjectPixelEntry {
+                format: PixelFormat::SRGBA8,
                 pixel_id: "pxbase".into(),
                 entry: "layers/pxbase.png".into(),
                 width: 8,
@@ -1240,6 +1609,7 @@ mod tests {
         let manifest = manifest_for(
             sample_document(),
             vec![ProjectPixelEntry {
+                format: PixelFormat::SRGBA8,
                 pixel_id: "pxbase".into(),
                 entry: "layers/absent.png".into(),
                 width: 8,
@@ -1279,12 +1649,14 @@ mod tests {
             masks: Vec::new(),
             pixels: vec![
                 ProjectPixelEntry {
+                    format: PixelFormat::SRGBA8,
                     pixel_id: "pxbase".into(),
                     entry: "layers/pxbase.png".into(),
                     width: 8,
                     height: 8,
                 },
                 ProjectPixelEntry {
+                    format: PixelFormat::SRGBA8,
                     pixel_id: "pxchild".into(),
                     entry: "layers/pxchild.png".into(),
                     width: 4,

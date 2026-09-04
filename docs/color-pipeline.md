@@ -1,119 +1,94 @@
-# Colour pipeline and precision boundaries
+# Color pipeline and precision boundaries — Phase 10
 
-PhotoForge mixes a high-precision development path with an 8-bit compositor
-inherited from Phase 8. That is a deliberate, bounded arrangement rather than an
-oversight, and this page says exactly where precision is kept and where it is
-given up, so nobody has to guess.
+New documents use linear-sRGB/D65 f32 RGBA through sources, layers, masks,
+groups, adjustments, transforms, merge, project persistence and final export.
+Projects without explicit precision metadata keep the original encoded-sRGB
+RGBA8 renderer. Conversion of an old document is explicit and may change its
+appearance; expanding an old byte source does not restore lost precision.
 
-## Where precision lives
-
-| Stage | Representation | Precision |
-| --- | --- | --- |
-| RAW sensor samples | `u16` | 8-16 bits, as the camera recorded |
-| Black-level normalisation | `f32` | Full float; **not** clipped at 1.0 |
-| White balance (on the CFA) | `f32` | Full float |
-| Demosaic | `f32` RGB | Full float |
-| Camera RGB to linear sRGB | `f32` RGB | Full float; negatives clamped, highlights kept |
-| Exposure and tone controls | `FloatImage` (`f32` RGBA) | Full float, scene-linear, unclipped |
-| **Layer pixel store** | `RgbaImage` (`u8`) | **8 bits — quantisation boundary** |
-| **Compositor and blend modes** | `u8` in, `f32` internally, `u8` out | **8 bits at every layer boundary** |
-| Preview to screen | `u8` PNG data URL | 8 bits |
-| 8-bit export (PNG/JPEG/WebP) | `u8` | 8 bits |
-| **16-bit PNG export** | `u16` straight from `FloatImage` | **16 bits — no 8-bit stage** |
-
-## The two paths, stated plainly
-
-**RAW to 16-bit PNG never passes through 8 bits.** `export_raw_layer_png16`
-decodes the original again, develops it at full sensor resolution with the
-high-quality demosaic, and quantises once, at the file. This is verified rather
-than asserted: every 8-bit value maps to a multiple of 257 in 16 bits, so the
-test counts samples that are *not* multiples of 257 and requires most of them
-to be, which an 8-bit image expanded into a 16-bit container could never
-satisfy.
-
-**RAW inside a layered document is quantised to 8 bits when it becomes a
-layer.** The pixel store holds `RgbaImage`, so a developed RAW is rounded to 8
-bits per channel before it can be composited with other layers, masked, or
-blended. Re-developing with new parameters goes back to the original file, so
-the *decision* stays non-destructive — but the composite the screen shows, and
-any 8-bit export of it, carries 8-bit layer data.
-
-That is the honest summary: **the development is high precision; the compositor
-is not.**
-
-## Highlight headroom
-
-Nothing clips before the display or export transform. A photosite brighter than
-the nominal white level normalises to a value above 1.0 and stays there through
-white balance, demosaic, the colour matrix, and the tone controls.
-
-Verified on a real photograph: the Canon EOS 5D Mark III sample records samples
-up to 15464 against a white level of 15000, 305 pixels are still above 1.0
-after a full development, and reducing exposure by one stop brings them back.
-A synthetic test pins the same behaviour against what an early 8-bit conversion
-would have kept, and shows the linear path recovers strictly more.
-
-## sRGB transfer function
-
-The encode and decode functions implement IEC 61966-2-1 exactly, including the
-linear segment below the 0.0031308 / 0.04045 threshold rather than a pure 2.2
-power approximation. Reference values at 0, the threshold region, 0.18, 0.5,
-and 1.0 are pinned by test, along with round-trip tolerance.
-
-## Working colour space
-
-The working space is **linear sRGB primaries under D65**. The camera-to-working
-transform is derived from the DNG `ColorMatrix` tag: the XYZ-to-camera matrix is
-composed with sRGB-to-XYZ, its rows are normalised so a camera-neutral signal
-maps to sRGB white — the convention the DNG specification describes, and the
-reason a grey card comes out grey — and the result is inverted. A singular
-matrix is refused rather than producing infinities.
-
-A file with no colour matrix is developed in the camera's own RGB and
-`colorManaged` comes back false. The interface says so; it does not imply the
-result is colour managed when it is not.
-
-## Display P3 and Adobe RGB
-
-**Not implemented.** The enumeration in `color::WorkingColorSpace` exists, but
-no conversion to or from Display P3 or Adobe RGB has been written, so neither
-is offered in the interface. A dropdown label is not colour management, and
-exposing one would be a false claim.
-
-Adding them is bounded work — both are matrix-plus-transfer-function
-conversions with published constants — and is deferred rather than abandoned.
-
-## ICC profiles
-
-**Not implemented, and deliberately not half-implemented.** Arbitrary ICC
-support means parsing untrusted profile data, which is a decoder in its own
-right with its own attack surface. The options assessed:
-
-| Option | Assessment |
+| Stage | Representation / boundary |
 | --- | --- |
-| Little-CMS via bindings | Mature and correct, but a C library to build, package, verify, and license-notice on Windows — the same cost that ruled out LibRaw for RAW |
-| `qcms` (Firefox's) | MPL-2.0, pure Rust, much smaller surface. The realistic candidate |
-| Hand-written ICC parser | Rejected. A half-correct colour-management implementation is worse than none |
+| DNG sensor | Bounded u16 photosites; actual bit depth and black/white levels |
+| RAW development | CFA white balance once, demosaic, camera matrix, float tone |
+| Ordinary PNG/JPEG/WebP | Embedded RGB ICC honored; untagged input assumes sRGB |
+| Native PNG16 | Decoded directly to float, without an RGBA8 intermediate |
+| Authoritative store | Typed immutable encoded RGBA8 or straight linear RGBA f32 |
+| Linear document | Transfer-decodes ordinary byte sources; no byte bridge in final rendering |
+| Masks | Existing u8 scalar coverage, converted to float opacity; not color data |
+| Display/thumbnail | Bounded sRGB-encoded RGBA8 PNG; intentionally clipped/quantized |
+| PNG16 export | Float layered composite, output-space conversion, one u16 quantization |
+| PNG8/JPEG/WebP | Intentional 8-bit quantization; optional deterministic ordered dither |
 
-Embedded ICC profiles in opened files are neither read nor honoured today.
-Deferred to Phase 10 with `qcms` as the recommended starting point.
+## Alpha and blend semantics
 
-## Float compositing
+Sources and stored results use straight alpha in [0,1]. Compositing,
+interpolation, isolated groups and pass-through crossfades use premultiplied
+linear values internally. See [high-precision-rendering.md](high-precision-rendering.md)
+for equations. Zero-alpha samples become transparent black when unassociated;
+blur/resampling weight color by alpha rather than leaking invisible RGB.
 
-Evaluated, not implemented. Moving the compositor to `f32` RGBA would end the
-8-bit layer boundary above, but it quadruples every layer buffer, changes the
-memory ceiling that bounds a document, and would need every blend-mode test
-re-derived at a new precision. Phase 8's compositor is heavily tested and
-stable; destabilising it to remove a quantisation step that only affects
-layered RAW work did not seem a good trade inside this phase.
+All 16 existing modes are supported. Normal, multiply, screen, darken, lighten,
+difference and exclusion extend their arithmetic to finite out-of-range linear
+values. Overlay, dodge, burn, hard/soft light use bounded SDR blend inputs;
+their nonlinear semantics are not an HDR artistic standard. Hue, saturation,
+color and luminosity explicitly encode float sRGB, apply the existing W3C
+nonseparable equations, and decode again. They do not apply HSL to linear RGB.
+Alpha never participates in color-space transfer functions. Invalid finite/
+alpha inputs are rejected rather than silently switching to the byte renderer.
 
-The boundary is documented above rather than quietly moved, so the cost is
-visible and the change can be made deliberately later.
+Exposure, white balance, convolution and alpha filtering operate in linear
+light. Brightness, contrast, gamma, curves, levels, HSL, selective color and
+sepia deliberately use encoded **float** sRGB for familiar control behavior.
+Local contrast/lighting use alpha-weighted linear luminance. SDR tone controls
+and SDR blend definitions may intentionally bound color; this is not a blanket
+promise of unlimited HDR preservation through every artistic operation.
 
-## Known quantisation limitations
+## Source, working, display and output are separate
 
-1. A RAW layer inside a layered document is 8-bit once composited.
-2. Display P3 and Adobe RGB have no implementation.
-3. Embedded ICC profiles are ignored.
-4. Blend modes operate on encoded sRGB values, not linear light — unchanged
-   from Phase 8 and documented in `docs/compositing.md`.
+Working primaries are fixed to sRGB under D65. Float RGB may be negative or
+above one, allowing colors outside the sRGB gamut without early gamut clipping.
+Display P3 uses P3 primaries, D65 and the sRGB transfer curve. Adobe RGB (1998)
+uses its published primaries, D65 and exponent 563/256. Conversion uses XYZ
+matrices, not relabeling. Bradford adaptation is tested for D50/D65.
+Reference constants: [W3C color conversion code](https://www.w3.org/TR/css-color-4/#color-conversion-code)
+and [Adobe RGB (1998) specification](https://www.adobe.com/digitalimag/pdfs/AdobeRGB1998.pdf).
+
+Embedded RGB ICC input uses **moxcms 0.8.1**, pinned in Cargo, with float
+transforms and extended-range support. This pure-Rust backend was already an
+image dependency; Phase 10 enables it directly without another DLL or runtime
+download. Its upstream license choice is BSD-3-Clause or Apache-2.0; the BSD
+notice ships with the artifacts. [Upstream](https://github.com/awxkee/moxcms).
+qcms/MPL-2.0 was considered; using the already-locked float-capable backend
+keeps the Windows build smaller in scope. This is not an exhaustive CMS survey.
+
+Profiles are bounded to 4 MiB, 256 tags, 1 MiB CLUTs and 16,384 TRC entries;
+non-RGB, malformed and oversized profiles fail import. Backend TRC lookup
+interpolation has finite precision (roughly 14-bit tables), not infinite
+analytic ICC accuracy. Controlled sRGB/P3/Adobe fixtures and malformed-profile
+tests exercise the selected subset; arbitrary third-party profile coverage is
+not exhaustively certified.
+
+Output selection supports sRGB, Display P3 and Adobe RGB. All three transform
+pixels **and embed the corresponding RGB ICC profile** in PNG/JPEG/WebP. PNG
+supports 8/16 bits; JPEG/WebP are 8-bit. JPEG flattens transparency against white
+in linear light. Export strips source EXIF/GPS and embeds only the chosen ICC.
+Ordered 4x4 Bayer dither affects RGB in 8-bit output only, not alpha, endpoints
+or 16-bit output. Same build/settings/input produce deterministic bytes.
+
+## Explicit limits
+
+Windows/WebView2 own the final monitor presentation. PhotoForge sends sRGB
+previews but does not select/calibrate a monitor ICC profile or certify the
+complete display chain. No printer soft proofing, CMYK editing, arbitrary
+user-selected output ICC, HDR display pipeline or general TIFF import is
+implemented. TIFF is parsed only inside the supported DNG subset.
+
+The standalone compatibility command export_raw_layer_png16 still exists,
+but document export uses the actual layered compositor. Reopening a project
+restores its exact typed developed buffers; RAW source hashes/parameters are
+retained for explicit re-development, not silently replayed with a newer decoder.
+Decoder version 2 corrects a double white-balance application and preserves
+negative camera-transform components; only explicit re-development changes
+old cached source appearance.
+
+See [phase-10-results.md](phase-10-results.md) for tested versus unverified claims.

@@ -224,6 +224,8 @@ pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
         .u32(TAG_IMAGE_LENGTH)
         .ok_or_else(|| RawError::Malformed("the sensor image declares no height".into()))?;
     super::validate_dimensions(width, height)?;
+    crate::resources::ResourceEstimate::decode(width, height, data.len() as u64)
+        .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
 
     let photometric = raw.u32(TAG_PHOTOMETRIC).unwrap_or(PHOTOMETRIC_CFA);
     let linear = photometric == PHOTOMETRIC_LINEAR_RAW;
@@ -235,10 +237,11 @@ pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
     let samples_per_pixel = raw.u32(TAG_SAMPLES_PER_PIXEL).unwrap_or(1);
     if samples_per_pixel != 1 {
         return Err(RawError::Unsupported(format!(
-            "{samples_per_pixel} samples per pixel is not supported; only single-channel CFA data is"
+            "{samples_per_pixel} samples per pixel is not supported; only Bayer CFA and monochrome LinearRaw are implemented"
         )));
     }
-    let bits_per_sample = raw.u32(TAG_BITS_PER_SAMPLE).unwrap_or(16) as u8;
+    let bits_per_sample = u8::try_from(raw.u32(TAG_BITS_PER_SAMPLE).unwrap_or(16))
+        .map_err(|_| RawError::Unsupported("invalid BitsPerSample".into()))?;
     if !matches!(bits_per_sample, 8 | 10 | 12 | 14 | 16) {
         return Err(RawError::Unsupported(format!(
             "{bits_per_sample}-bit sensor samples are not supported"
@@ -571,7 +574,6 @@ fn decode_samples(
     if pixels > RAW_MAX_PIXELS {
         return Err(RawError::FileTooLarge);
     }
-    let mut out = vec![0u16; pixels as usize];
 
     let tiled = ifd.get(TAG_TILE_OFFSETS).is_some();
     let (offsets, counts) = if tiled {
@@ -611,6 +613,35 @@ fn decode_samples(
     } else {
         1
     };
+    let down = height.div_ceil(segment_height);
+    let expected_segments = u64::from(across) * u64::from(down);
+    if expected_segments != offsets.len() as u64
+        || u64::from(segment_width) * u64::from(segment_height) > RAW_MAX_PIXELS
+    {
+        return Err(RawError::Malformed(
+            "strip/tile dimensions and segment count disagree".into(),
+        ));
+    }
+    for (tag, name) in [
+        (317, "Predictor"),
+        (339, "SampleFormat"),
+        (284, "PlanarConfiguration"),
+    ] {
+        if ifd.u32(tag).unwrap_or(1) != 1 {
+            return Err(RawError::Unsupported(format!(
+                "non-default {name} is not implemented"
+            )));
+        }
+    }
+    if ifd.get(50712).is_some() {
+        return Err(RawError::Unsupported(
+            "DNG LinearizationTable is not implemented".into(),
+        ));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels as usize)
+        .map_err(|_| RawError::FileTooLarge)?;
+    out.resize(pixels as usize, 0u16);
 
     for (index, (offset, count)) in offsets.iter().zip(counts.iter()).enumerate() {
         let start = *offset as usize;
@@ -634,7 +665,13 @@ fn decode_samples(
         }
 
         match compression {
-            COMPRESSION_NONE => copy_uncompressed(
+            COMPRESSION_NONE => {
+                let rows = if tiled { segment_height } else { segment_height.min(height-origin_y) };
+                let needed = (u64::from(segment_width)*u64::from(bits)).div_ceil(8).checked_mul(u64::from(rows)).ok_or(RawError::FileTooLarge)?;
+                if (payload.len() as u64) < needed {
+                    return Err(RawError::Malformed("uncompressed strip/tile payload is truncated".into()));
+                }
+                copy_uncompressed(
                 payload,
                 &mut out,
                 width,
@@ -644,10 +681,16 @@ fn decode_samples(
                 segment_width,
                 segment_height,
                 bits,
-            ),
+                data.starts_with(b"II"),
+            )},
             COMPRESSION_LOSSLESS_JPEG => {
                 let frame = ljpeg::decode(payload)
                     .map_err(|error| RawError::Malformed(error.to_string()))?;
+                if frame.width.checked_mul(frame.components) != Some(segment_width as usize)
+                    || frame.height < segment_height.min(height-origin_y) as usize
+                    || frame.height > segment_height as usize {
+                    return Err(RawError::Malformed("lossless JPEG frame dimensions disagree with its strip/tile".into()));
+                }
                 copy_frame(&frame, &mut out, width, height, origin_x, origin_y);
             }
             other => {
@@ -671,6 +714,7 @@ fn copy_uncompressed(
     segment_width: u32,
     segment_height: u32,
     bits: u8,
+    little_endian: bool,
 ) {
     // TIFF pads each row to a byte boundary, so rows are addressed by their own
     // stride rather than by a running bit position.
@@ -690,7 +734,14 @@ fn copy_uncompressed(
             if x >= width {
                 break;
             }
-            let value = read_packed(row_data, column as usize, bits);
+            let value = if bits == 16 && !little_endian {
+                u16::from_be_bytes([
+                    row_data[column as usize * 2],
+                    row_data[column as usize * 2 + 1],
+                ])
+            } else {
+                read_packed(row_data, column as usize, bits)
+            };
             out[y as usize * width as usize + x as usize] = value;
         }
     }
@@ -775,6 +826,7 @@ pub mod fixtures {
         pub orientation: u16,
         pub iso: Option<u32>,
         pub photometric: u32,
+        pub tile_size: Option<(u32, u32)>,
     }
 
     impl DngBuilder {
@@ -796,6 +848,7 @@ pub mod fixtures {
                 orientation: 1,
                 iso: None,
                 photometric: PHOTOMETRIC_CFA,
+                tile_size: None,
             }
         }
 
@@ -887,8 +940,10 @@ pub mod fixtures {
             entries.push((TAG_MAKE, 2, format!("{}\0", self.make).into_bytes()));
             entries.push((TAG_MODEL, 2, format!("{}\0", self.model).into_bytes()));
             entries.push((TAG_DNG_VERSION, 1, vec![1, 4, 0, 0]));
-            entries.push((TAG_CFA_REPEAT_DIM, 3, vec![2, 0, 2, 0]));
-            entries.push((TAG_CFA_PATTERN, 1, self.cfa.to_vec()));
+            if self.photometric == PHOTOMETRIC_CFA {
+                entries.push((TAG_CFA_REPEAT_DIM, 3, vec![2, 0, 2, 0]));
+                entries.push((TAG_CFA_PATTERN, 1, self.cfa.to_vec()));
+            }
             entries.push((
                 TAG_BLACK_LEVEL_REPEAT_DIM,
                 3,
@@ -937,11 +992,51 @@ pub mod fixtures {
                 ));
             }
 
-            let pixels = self.packed_rows();
+            let mut tile_offsets = Vec::new();
+            let pixels = if let Some((tw, th)) = self.tile_size {
+                assert_eq!(
+                    self.bits, 16,
+                    "the synthetic tile writer supports 16-bit only"
+                );
+                assert!(tw > 0 && th > 0);
+                let mut payload = Vec::new();
+                let mut counts = Vec::new();
+                for ty in 0..self.height.div_ceil(th) {
+                    for tx in 0..self.width.div_ceil(tw) {
+                        tile_offsets.push(payload.len() as u32);
+                        for y in 0..th {
+                            for x in 0..tw {
+                                let (sx, sy) = (tx * tw + x, ty * th + y);
+                                let value = if sx < self.width && sy < self.height {
+                                    self.samples[(sy * self.width + sx) as usize]
+                                } else {
+                                    0
+                                };
+                                payload.extend_from_slice(&value.to_le_bytes());
+                            }
+                        }
+                        counts.push(tw * th * 2);
+                    }
+                }
+                entries.retain(|(tag, _, _)| *tag != TAG_ROWS_PER_STRIP);
+                push_long(&mut entries, TAG_TILE_WIDTH, tw);
+                push_long(&mut entries, TAG_TILE_LENGTH, th);
+                entries.push((TAG_TILE_OFFSETS, 4, vec![0; tile_offsets.len() * 4]));
+                entries.push((
+                    TAG_TILE_BYTE_COUNTS,
+                    4,
+                    counts.iter().flat_map(|n| n.to_le_bytes()).collect(),
+                ));
+                payload
+            } else {
+                self.packed_rows()
+            };
             // Two placeholder entries reserve the strip table; their values are
             // filled in once the directory size is known.
-            push_long(&mut entries, TAG_STRIP_OFFSETS, 0);
-            push_long(&mut entries, TAG_STRIP_BYTE_COUNTS, pixels.len() as u32);
+            if self.tile_size.is_none() {
+                push_long(&mut entries, TAG_STRIP_OFFSETS, 0);
+                push_long(&mut entries, TAG_STRIP_BYTE_COUNTS, pixels.len() as u32);
+            }
             entries.sort_by_key(|(tag, _, _)| *tag);
 
             let count = entries.len();
@@ -974,6 +1069,11 @@ pub mod fixtures {
                 directory.extend(((payload.len() / width) as u32).to_le_bytes());
                 let payload = if *tag == TAG_STRIP_OFFSETS {
                     (pixel_offset as u32).to_le_bytes().to_vec()
+                } else if *tag == TAG_TILE_OFFSETS {
+                    tile_offsets
+                        .iter()
+                        .flat_map(|offset| (pixel_offset as u32 + offset).to_le_bytes())
+                        .collect()
                 } else {
                     payload.clone()
                 };
@@ -1280,5 +1380,56 @@ mod tests {
     fn the_active_area_defaults_to_the_whole_sensor_when_absent() {
         let data = DngBuilder::new(6, 4, ramp(6, 4)).build();
         assert_eq!(decode(&data).unwrap().active_area, (0, 0, 6, 4));
+    }
+
+    #[test]
+    fn tiled_uncompressed_edges_and_padding_decode_sample_for_sample() {
+        for (w, h) in [(8, 6), (33, 19), (32, 32)] {
+            let samples = ramp(w, h);
+            let mut builder = DngBuilder::new(w, h, samples.clone());
+            builder.tile_size = Some((16, 16));
+            let sensor = decode(&builder.build()).unwrap();
+            assert_eq!(sensor.data, samples);
+        }
+    }
+
+    #[test]
+    fn truncated_segment_counts_fail_instead_of_manufacturing_black_pixels() {
+        let mut bytes = DngBuilder::new(8, 8, ramp(8, 8)).build();
+        patch_long(&mut bytes, TAG_STRIP_BYTE_COUNTS, 2);
+        assert!(matches!(decode(&bytes), Err(RawError::Malformed(_))));
+        let mut builder = DngBuilder::new(8, 8, ramp(8, 8));
+        builder.tile_size = Some((16, 16));
+        let mut bytes = builder.build();
+        patch_long(&mut bytes, TAG_TILE_WIDTH, u32::MAX);
+        assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn structured_malformed_offsets_dimensions_and_depths_never_panic() {
+        let base = DngBuilder::new(8, 8, ramp(8, 8)).build();
+        for tag in [
+            TAG_IMAGE_WIDTH,
+            TAG_IMAGE_LENGTH,
+            TAG_STRIP_OFFSETS,
+            TAG_STRIP_BYTE_COUNTS,
+            TAG_ROWS_PER_STRIP,
+        ] {
+            for value in [0, 1, 3, 19_999, 20_001, u32::MAX] {
+                let mut bytes = base.clone();
+                patch_long(&mut bytes, tag, value);
+                assert!(std::panic::catch_unwind(|| decode(&bytes)).is_ok());
+            }
+        }
+        for offset in 0..base.len() {
+            for byte in [0, 255] {
+                let mut bytes = base.clone();
+                bytes[offset] = byte;
+                assert!(
+                    std::panic::catch_unwind(|| decode(&bytes)).is_ok(),
+                    "offset {offset}"
+                );
+            }
+        }
     }
 }

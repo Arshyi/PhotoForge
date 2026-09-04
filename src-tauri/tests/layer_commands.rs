@@ -198,11 +198,126 @@ fn document(canvas: (u32, u32), layers: Vec<Layer>) -> LayerDocument {
     let active = layers.last().map(|layer| layer.id.clone());
     LayerDocument {
         schema_version: photoforge_lib::layers::LAYER_SCHEMA_VERSION,
+        precision: Default::default(),
         canvas_width: canvas.0,
         canvas_height: canvas.1,
         layers,
         active_layer_id: active,
     }
+}
+
+fn precision_raw_round_trip(path: &std::path::Path) {
+    use photoforge_lib::color::DevelopmentParameters;
+    use photoforge_lib::domain::EditOperation;
+    use photoforge_lib::pixel::DocumentPrecision;
+    use sha2::{Digest, Sha256};
+    let original_hash = Sha256::digest(std::fs::read(path).unwrap());
+    let harness = Harness::new();
+    let opened = harness.ok(
+        "open_raw_image",
+        json!({"path":path.to_string_lossy(),"requestId":100}),
+    );
+    let id = opened["documentId"].as_u64().unwrap();
+    let w = opened["metadata"]["width"].as_u64().unwrap() as u32;
+    let h = opened["metadata"]["height"].as_u64().unwrap() as u32;
+    let mut raw = pixel_layer("raw", opened["backgroundPixelId"].as_str().unwrap(), w, h);
+    raw.raw = Some(serde_json::from_value(opened["source"].clone()).unwrap());
+    raw.mask = Some(LayerMask {
+        snapshot: MaskSnapshot::encode(
+            &MaskBitmap::from_coverage(w, h, vec![128; (w * h) as usize]).unwrap(),
+        ),
+        enabled: true,
+        inverted: false,
+    });
+    let mut adjustment = pixel_layer("adjustment", "unused", w, h);
+    adjustment.content = LayerContent::Adjustment {
+        operation: Box::new(EditOperation::Brightness { amount: 0.013 }),
+    };
+    let mut doc = document(
+        (w, h),
+        vec![raw, group_layer("group", vec![adjustment], false)],
+    );
+    doc.precision = DocumentPrecision::LinearSrgbF32;
+    let changed=harness.ok("develop_raw_layer",json!({"request":{"source":opened["source"],"parameters":DevelopmentParameters{exposure_ev:-0.5,..Default::default()},"fullResolution":true,"documentId":id,"requestId":101}}));
+    doc.layers[0].raw = Some(serde_json::from_value(changed["source"].clone()).unwrap());
+    doc.layers[0].content = LayerContent::Pixel {
+        pixel_id: changed["pixelId"].as_str().unwrap().into(),
+        width: w,
+        height: h,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("linear.photoforge");
+    harness.ok("save_layer_project",json!({"outputPath":project.to_string_lossy(),"document":doc,"operations":[],"createdAt":"fixed","modifiedAt":"fixed"}));
+    let stored = photoforge_lib::layers::load_project(&project).unwrap();
+    assert_eq!(stored.linear_pixels.len(), 1);
+    assert_eq!(stored.pixels.len(), 0);
+    drop(stored);
+    let reopened = harness.ok(
+        "load_layer_project",
+        json!({"path":project.to_string_lossy(),"requestId":102}),
+    );
+    assert_eq!(reopened["document"]["precision"], "linear_srgb_f32");
+    let output = directory.path().join("layered16.png");
+    harness.ok("export_layer_composite",json!({"outputPath":output.to_string_lossy(),"document":reopened["document"],"operations":[],"profile":"lossless","color":{"colorSpace":"srgb","bitDepth":16,"dither":false}}));
+    let image = image::open(&output).unwrap();
+    assert_eq!(image.color(), image::ColorType::Rgba16);
+    let pixels = image.to_rgba16();
+    assert_eq!(pixels.dimensions(), (w, h));
+    assert!(pixels
+        .pixels()
+        .any(|p| p.0[..3].iter().any(|v| v % 257 != 0)));
+    assert!(pixels.pixels().all(|p| (32894..=32898).contains(&p[3])));
+    assert_eq!(Sha256::digest(std::fs::read(path).unwrap()), original_hash);
+}
+
+#[test]
+fn float_raw_mask_group_redevelopment_project_and_png16_cross_real_ipc() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("precision.dng");
+    let bytes = photoforge_lib::raw::dng::fixtures::DngBuilder::new(
+        16,
+        16,
+        (0..256).map(|i| 600 + i * 9).collect(),
+    )
+    .levels(vec![512], (1, 1), 4000)
+    .build();
+    std::fs::write(&path, bytes).unwrap();
+    precision_raw_round_trip(&path);
+}
+
+#[test]
+fn real_dng_float_layer_pipeline_when_fixtures_are_supplied() {
+    let Ok(folder) = std::env::var("PHOTOFORGE_RAW_FIXTURES") else {
+        eprintln!("skipped: PHOTOFORGE_RAW_FIXTURES is not set");
+        return;
+    };
+    precision_raw_round_trip(
+        &std::path::PathBuf::from(folder).join("5G4A9394-compressed-lossless.DNG"),
+    );
+}
+
+#[test]
+fn placing_dng_preserves_raw_source_and_float_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("placed.dng");
+    std::fs::write(
+        &path,
+        photoforge_lib::raw::dng::fixtures::DngBuilder::new(4, 4, vec![1001; 16])
+            .levels(vec![0], (1, 1), 4095)
+            .build(),
+    )
+    .unwrap();
+    let harness = Harness::new();
+    let result = harness.import(&path);
+    assert_eq!(result["raw"]["reference"]["format"], "DNG");
+    let state = harness.app.state::<AppState>();
+    let store = state.layers.lock().unwrap();
+    assert!(matches!(
+        store
+            .full_typed(result["pixelId"].as_str().unwrap())
+            .unwrap(),
+        photoforge_lib::pixel::PixelBuffer::LinearRgbaF32(_)
+    ));
 }
 
 /// A soft-edged half-coverage mask, so applying it is visible in the alpha.

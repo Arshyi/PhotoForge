@@ -21,16 +21,13 @@ pub fn apply_pipeline(
     Ok(DynamicImage::ImageRgba8(current))
 }
 
-/// Applies a pipeline while keeping the dedicated photographic-development
-/// operation in linear `f32` space until the final export boundary. Legacy
-/// operations still run through their established RGBA8 implementation; the
-/// conversion is explicit so a future float compositor can replace those
-/// bridges one operation at a time without changing old project semantics.
+/// Explicit float pipeline. Native 16-bit input is decoded without an RGBA8
+/// bridge; integer quantization occurs only at an output boundary.
 pub fn apply_pipeline_float(
     source: &DynamicImage,
     operations: &[EditOperation],
 ) -> Result<crate::color::FloatImage, AppError> {
-    let mut current = crate::color::FloatImage::from_rgba8(&source.to_rgba8())
+    let mut current = crate::color::FloatImage::from_dynamic(source)
         .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
     for operation in operations {
         operation.validate()?;
@@ -68,11 +65,7 @@ fn apply_operation_float(
             let adjusted = apply_operation_float(image, operation)?;
             blend_masked_float(image, &adjusted, &decoded, *invert)
         }
-        _ => {
-            let processed = apply_operation(&image.to_rgba8(), operation)?;
-            crate::color::FloatImage::from_rgba8(&processed)
-                .map_err(|error| AppError::ColorPipeline(error.to_string()))
-        }
+        _ => super::high_precision::apply(image, operation, None),
     }
 }
 

@@ -17,6 +17,21 @@ use std::sync::Arc;
 /// the resolved buffer rather than from the document.
 pub trait PixelSource {
     fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError>;
+    fn resolve_linear(&self, pixel_id: &str) -> Result<Arc<crate::color::FloatImage>, AppError> {
+        let image = self.resolve(pixel_id)?;
+        Ok(Arc::new(crate::color::FloatImage::from_rgba8(&image)?))
+    }
+    fn resident_bytes(&self) -> u64 {
+        0
+    }
+    fn promotion_bytes(&self, document: &LayerDocument) -> u64 {
+        document
+            .iter()
+            .filter_map(|layer| layer.pixel_dimensions())
+            .map(|(w, h)| u64::from(w) * u64::from(h) * 16)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,7 +298,7 @@ fn cross_fade(
 /// Scales a layer transform into render space. Only the translation depends on
 /// the render scale; scale, rotation, and flips are relative to the layer's own
 /// dimensions and therefore already scale-free.
-fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
+pub(super) fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
     LayerTransform {
         translate_x: (f64::from(transform.translate_x) * scale) as f32,
         translate_y: (f64::from(transform.translate_y) * scale) as f32,
@@ -291,14 +306,14 @@ fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
     }
 }
 
-fn decoded_mask(layer: &Layer) -> Result<Option<MaskBitmap>, AppError> {
+pub(super) fn decoded_mask(layer: &Layer) -> Result<Option<MaskBitmap>, AppError> {
     match &layer.mask {
         Some(mask) if mask.enabled => Ok(Some(mask.snapshot.decode()?)),
         _ => Ok(None),
     }
 }
 
-fn mask_inverted(layer: &Layer) -> bool {
+pub(super) fn mask_inverted(layer: &Layer) -> bool {
     layer.mask.as_ref().is_some_and(|mask| mask.inverted)
 }
 
@@ -745,7 +760,7 @@ fn sample_rgba(
 /// The mask is stored at the layer's full-resolution dimensions, so a preview
 /// render samples it normalised against the layer's space rather than
 /// resampling the whole coverage bitmap first.
-fn mask_coverage(
+pub(super) fn mask_coverage(
     mask: Option<&MaskBitmap>,
     inverted: bool,
     local_x: f32,
@@ -850,6 +865,7 @@ mod tests {
     fn document_with(layers: Vec<Layer>, width: u32, height: u32) -> LayerDocument {
         LayerDocument {
             schema_version: crate::layers::model::LAYER_SCHEMA_VERSION,
+            precision: Default::default(),
             canvas_width: width,
             canvas_height: height,
             layers,

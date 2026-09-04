@@ -4,41 +4,30 @@ PhotoForge decodes camera RAW files locally and develops them without ever
 writing to the original. This page says exactly which formats that covers, how
 the decoder was chosen, and what the pipeline does in what order.
 
-## Decoder choice
+## Decoder choice (reviewed 2026-09-04)
 
-**PhotoForge decodes DNG with its own decoder, written against the published
-Adobe DNG specification. No third-party RAW library is linked.**
+The existing in-house DNG subset remains the only RAW decoder. Phase 10 does
+not expand to proprietary formats. This is a scoped engineering/distribution
+decision, not a claim about every Rust RAW library.
 
-That is a licensing decision as much as an engineering one, and it is worth
-stating plainly because it bounds what PhotoForge can support.
+| Candidate / reviewed source | License stated by upstream | Capability / decision |
+| --- | --- | --- |
+| rawloader 0.37.1 Cargo manifest | LGPL-2.1 | Multi-camera sensor extraction; not integrated because a distribution/compliance choice and new fixture coverage remain outside this phase |
+| rawler 0.8.0 Cargo manifest | LGPL-2.1 | Multi-format RAW extraction; same scope/distribution reason |
+| LibRaw About page, reviewed 2026-09-04 (no version selected) | LGPL-2.1 or CDDL-1.0 | Broad RAW data/metadata extraction; not selected because native integration, packaging and distribution obligations were not resolved |
+| PhotoForge DNG decoder version 2 | Repository distribution terms | Existing implementation retained and hardened; no additional decoder library |
 
-| Candidate | Licence | Camera coverage | Native build | Verdict |
-| --- | --- | --- | --- | --- |
-| `rawloader` 0.37 | **LGPL-2.1** | Very broad | None (pure Rust) | Rejected on licence |
-| `rawler` 0.8 (dnglab) | **LGPL-2.1** | Very broad, actively maintained | None | Rejected on licence |
-| `quickraw` 0.2-alpha | **LGPL-2.1** | Moderate | None | Rejected on licence and maturity |
-| `dng` 1.6 | **AGPL-3.0** | DNG only | None | Rejected on licence |
-| `zenraw` 0.2 | **AGPL-3.0** or commercial | Moderate | None | Rejected on licence |
-| LibRaw (via `libraw-sys`) | **LGPL-2.1 or CDDL-1.0** | Broadest available, incl. CR3 | C++ build, DLL to package | Rejected on packaging and licence risk |
-| `rawkit` 0.1 | **MIT or Apache-2.0** | **Sony ARW only** | None (pure Rust) | Licence fine, coverage too narrow to test |
-| **Own DNG decoder** | PhotoForge's own | DNG | None | **Chosen** |
+Sources: [rawloader manifest](https://raw.githubusercontent.com/pedrocr/rawloader/master/Cargo.toml),
+[rawler manifest](https://raw.githubusercontent.com/dnglab/dnglab/main/rawler/Cargo.toml),
+[LibRaw licensing](https://www.libraw.org/about).
+These license labels are not a legal conclusion that static linking is
+automatically forbidden. The earlier blanket statement to that effect was
+incorrect and has been removed. Other candidates listed in the older report
+were not revalidated in this review and are not presented as current findings.
 
-The deciding constraint: PhotoForge's README states that *all rights are
-reserved*. Statically linking an LGPL-2.1 crate into a distributed
-closed-source binary is a licence violation the repository owner has not
-chosen to make, and AGPL is stricter still. LibRaw's CDDL-1.0 option would be
-workable, but it brings a C++ toolchain, a DLL to package and verify, and a
-second licence notice to ship — a large cost for a phase whose brief warns
-against destabilising the application.
-
-DNG is a published specification, so it can be read without any of that. It is
-also not a niche choice: Leica, Pentax, Ricoh, Sigma, DJI, and Apple ProRAW
-write DNG natively, and Adobe's free DNG Converter turns any other camera's
-RAW into one.
-
-`rawkit` is the right thing to revisit for Sony ARW when a test fixture for it
-is available; its licence is compatible and its API exposes everything needed.
-It was not added here because ARW support that cannot be tested is not support.
+For ICC, a separate problem from RAW decoding, Phase 10 selects the pinned
+pure-Rust moxcms 0.8.1 backend; see [color-pipeline.md](color-pipeline.md) and
+the bundled third-party notice.
 
 ## Format capability
 
@@ -47,8 +36,8 @@ It was not added here because ARW support that cannot be tested is not support.
 | DNG, uncompressed | **Tested** | Verified against Canon EOS 5D Mark III output and synthetic fixtures at 8, 10, 12, 14, and 16 bits |
 | DNG, lossless JPEG (compression 7) | **Tested** | Verified bit-identical to the uncompressed encoding of the same photograph |
 | DNG, lossy JPEG (compression 34892) | **Refused by name** | Stores three demosaiced samples per pixel, not CFA data |
-| DNG, tiled | **Implemented, not tested** | Tile placement is implemented; no tiled fixture was available |
-| DNG, LinearRaw photometric | **Implemented, not tested** | Accepted; no fixture available |
+| DNG, tiled | **Synthetic format tests** | Multi-tile placement and partial edge tiles match exact samples; no real-camera tiled validation |
+| DNG, LinearRaw photometric | **Synthetic monochrome test only** | One-channel linear samples bypass Bayer demosaic; three-channel LinearRaw is explicitly unsupported |
 | DNG, deflate / packbits / VC-5 | **Unsupported** | Refused by compression number |
 | CR2, CR3, NEF, ARW, RAF, ORF, RW2, and others | **Recognised, not decodable** | The extension is understood so the interface can explain itself; no decoder is bundled. Convert with Adobe DNG Converter to open them today |
 | X-Trans and other non-Bayer CFAs | **Refused by name** | The demosaic implements Bayer only |
@@ -165,7 +154,9 @@ attacker-controlled.
 - Lossless JPEG: declared frame geometry bounded before allocation; the bit
   reader cannot read past its buffer; Huffman codes longer than 16 bits refused
 - Black and white levels validated; a black level at or above white is refused
-- Strip and tile tables bounded; offsets and lengths checked against the file
+- Strip and tile tables bounded; exact segment counts, decoded geometry, truncation, and offsets/lengths checked against the file
+- Unsupported predictors, floating samples, planar variants and LinearizationTable are rejected explicitly
+- Structured deterministic mutations cover offsets, dimensions, bit-depth wraparound and tile tables; this is bounded property testing, not an exhaustive fuzz campaign
 - No RAW file causes a network request, a process launch, or a library load
 
 Tested against empty files, random bytes, truncated files, header-only files,
@@ -207,3 +198,24 @@ profile is downloaded, at any point, including the first time a format is seen.
 The optional fixture script is the only thing in the repository that touches
 the network, it is never run by a test, and it downloads sample photographs
 rather than anything the application uses.
+
+## Phase 10 layers and batch
+
+DNG placement retains float source pixels, SHA-256, metadata and development
+parameters. The selected-source panel applies a full-resolution re-development
+as one undoable edit; pending/stale document requests cannot publish into a new
+session. RAW files are read-only. Decoder version 2 fixes white balance being
+applied twice and keeps negative camera-transform results. Old project caches
+remain exact until the user explicitly re-develops.
+
+Batch processes one image at a time under the shared CPU admission gate:
+default sensor development, then the selected working-space edit workflow,
+then selected output space/profile and bit depth. A workflow RawDevelopment
+operation is a post-demosaic working-RGB adjustment, not a sensor preset.
+Progress/failures/cancellation remain per-file; output folders must be outside
+the input folder, duplicate names are claimed once, and existing targets are
+skipped unless overwrite is selected. PNG16 writes atomically, row by row.
+Cancellation is checked around decode/development and between operation/export
+rows; the existing sensor decoder itself is not interruptible mid-segment.
+
+See [Phase 10 results](phase-10-results.md) for current real-file and packaged evidence.

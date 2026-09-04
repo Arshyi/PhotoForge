@@ -217,6 +217,54 @@ pub fn develop_sensor(
     parameters
         .validate()
         .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
+    super::validate_dimensions(sensor.width, sensor.height)?;
+    let n = u64::from(sensor.width) * u64::from(sensor.height);
+    if sensor.data.len() as u64 != n {
+        return Err(RawError::InvalidMetadata(
+            "sensor sample count does not match its dimensions".into(),
+        ));
+    }
+    crate::resources::ResourceEstimate::decode(sensor.width, sensor.height, n * 2)
+        .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
+    if sensor.linear {
+        // The supported one-channel LinearRaw is monochrome, not a Bayer CFA.
+        // Demosaicing it would fabricate colors and discard native detail.
+        let step = if scale == RenderScale::Preview {
+            preview_factor(sensor.width, sensor.height)
+        } else {
+            1
+        };
+        let (w, h) = (sensor.width.div_ceil(step), sensor.height.div_ceil(step));
+        let mut image = FloatImage::blank(w, h, FloatRgba::TRANSPARENT)
+            .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
+        for y in 0..h {
+            for x in 0..w {
+                let (sx, sy) = (
+                    (x * step).min(sensor.width - 1),
+                    (y * step).min(sensor.height - 1),
+                );
+                let black = sensor.black_level[dng::CfaPattern::cell_index(sx, sy)];
+                let value = (f32::from(sensor.data[(sy * sensor.width + sx) as usize]) - black)
+                    / (sensor.white_level - black);
+                image.pixels_mut()[(y * w + x) as usize] = FloatRgba::new(value, value, value, 1.0);
+            }
+        }
+        let tone = DevelopmentParameters {
+            white_balance: WhiteBalance::Custom {
+                multipliers: [1.0; 3],
+            },
+            ..parameters.clone()
+        };
+        apply_development(&mut image, &tone)
+            .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
+        return Ok(DevelopedRaw {
+            image,
+            multipliers: [1.0; 3],
+            color_managed: false,
+            demosaic: scale.quality(),
+            source_dimensions: (sensor.width, sensor.height),
+        });
+    }
 
     // 1. Black level and normalisation.
     let mut cfa = demosaic::normalize(sensor);
@@ -259,7 +307,15 @@ pub fn develop_sensor(
         .collect();
     let mut image = FloatImage::new(cfa.width, cfa.height, pixels)
         .map_err(|error: ColorPipelineError| RawError::InvalidMetadata(error.to_string()))?;
-    apply_development(&mut image, parameters)
+    // Sensor white balance was already applied before demosaicing. Applying it
+    // again in working RGB would double the gains in the wrong color space.
+    let tone_parameters = DevelopmentParameters {
+        white_balance: WhiteBalance::Custom {
+            multipliers: [1.0; 3],
+        },
+        ..parameters.clone()
+    };
+    apply_development(&mut image, &tone_parameters)
         .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
 
     Ok(DevelopedRaw {
@@ -303,6 +359,33 @@ mod tests {
 
     fn parameters() -> DevelopmentParameters {
         DevelopmentParameters::default()
+    }
+
+    #[test]
+    fn monochrome_linear_raw_keeps_every_sample_without_demosaicing() {
+        let samples = vec![0, 250, 500, 750, 1000, 1250];
+        let mut builder = DngBuilder::new(3, 2, samples.clone()).levels(vec![0], (1, 1), 1000);
+        builder.photometric = 34892;
+        let developed = develop_bytes(&builder.build(), &parameters(), RenderScale::Full).unwrap();
+        for (p, value) in developed.image.pixels().iter().zip(samples) {
+            assert!((p.red - f32::from(value) / 1000.0).abs() < 1e-6);
+            assert_eq!(p.red, p.green);
+            assert_eq!(p.green, p.blue);
+        }
+    }
+
+    #[test]
+    fn sensor_white_balance_is_applied_once_not_squared() {
+        let mut settings = parameters();
+        settings.white_balance = WhiteBalance::Custom {
+            multipliers: [2.0, 1.0, 1.5],
+        };
+        let developed =
+            develop_bytes(&flat_dng(8, 8, 1000, 4000), &settings, RenderScale::Full).unwrap();
+        let p = developed.image.get(4, 4).unwrap();
+        assert!((p.red - 0.5).abs() < 1e-6);
+        assert!((p.green - 0.25).abs() < 1e-6);
+        assert!((p.blue - 0.375).abs() < 1e-6);
     }
 
     #[test]

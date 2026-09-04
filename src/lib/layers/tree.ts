@@ -94,10 +94,12 @@ export function createAdjustmentLayer(
 export function createDocument(
   canvasWidth: number,
   canvasHeight: number,
-  layers: Layer[] = []
+  layers: Layer[] = [],
+  precision: LayerDocument['precision'] = 'legacy_srgb8'
 ): LayerDocument {
   return {
     schemaVersion: LAYER_SCHEMA_VERSION,
+    precision,
     canvasWidth,
     canvasHeight,
     layers,
@@ -497,6 +499,7 @@ function isIdentityPlacement(transform: LayerTransform): boolean {
  * exactly as it did before layers existed.
  */
 export function isSimpleDocument(document: LayerDocument): boolean {
+  if (document.precision === 'linear_srgb_f32') return false;
   if (document.layers.length !== 1) return false;
   const layer = document.layers[0];
   if (layer.content.type !== 'pixel') return false;
