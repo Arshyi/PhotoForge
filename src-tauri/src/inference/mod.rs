@@ -18,6 +18,10 @@
 //! whether a model is installed, and both are reported separately, because
 //! "no runtime" and "no model" are different problems with different fixes.
 pub mod model;
+#[cfg(any(test, feature = "inference"))]
+pub mod onnx_fixture;
+#[cfg(feature = "inference")]
+pub mod runtime;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

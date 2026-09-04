@@ -4,7 +4,7 @@ version = "0.11.0"
 description = "A private, local-first photo restoration and enhancement tool"
 authors = ["PhotoForge contributors"]
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.91"
 
 [lib]
 name = "photoforge_lib"
@@ -23,6 +23,9 @@ png = "0.18"
 # a graph where neither compiles. DX12 measured about twice Vulkan's upload
 # throughput here, so this costs real performance and is recorded as such in
 # docs/gpu-rendering.md rather than being papered over.
+# Pure Rust ONNX inference: no native library, nothing downloaded at build
+# time, and a graph format that cannot carry executable code.
+tract-onnx = { version = "0.23", optional = true }
 wgpu = { version = "30", optional = true, default-features = false, features = [
     "std",
     "parking_lot",
@@ -50,15 +53,14 @@ webview2-com = "=0.38.2"
 windows-core = "=0.61.2"
 
 [features]
-default = ["custom-protocol", "gpu"]
+default = ["custom-protocol", "gpu", "inference"]
 custom-protocol = ["tauri/custom-protocol"]
 # Canonical desktop builds include GPU support, but acceleration remains
 # runtime-optional and every operation retains its CPU fallback. A deliberately
 # CPU-only build is: cargo build --no-default-features --features custom-protocol.
 # The wgpu graph currently requires Rust 1.90 (ordered-float via wgpu-hal).
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
-# Optional local neural inference. Off until a runtime is actually integrated
-# and validated end to end; the model registry, its security checks and the
-# capability reporting are always compiled, because they have to work — and be
-# tested — in the normal case where no model and no runtime exist.
-inference = []
+# Local neural inference. On by default so a user who brings their own model
+# has a working capability; no model ships, and nothing downloads one. tract is
+# pure Rust, so this adds no native DLL to the installer. It requires Rust 1.91.
+inference = ["dep:tract-onnx"]
