@@ -54,7 +54,9 @@ export type BaseEditOperation =
   | { type: 'sharpen'; strength: number }
   | { type: 'auto_white_balance'; strength: number }
   | { type: 'local_contrast'; strength: number; tile_size: number; clip_limit: number }
-  | { type: 'denoise'; strength: number; preserve_edges: number }
+  | { type: 'denoise'; strength: number; preserve_edges: number; color: number }
+  | { type: 'remove_defects'; strength: number; threshold: number }
+  | { type: 'deconvolve'; kernel: BlurKernel; iterations: number; damping: number }
   | { type: 'deblock'; strength: number }
   | { type: 'edge_aware_sharpen'; strength: number; radius: number; threshold: number }
   | { type: 'mild_deblur'; strength: number; radius: number }
@@ -73,6 +75,13 @@ export type BaseEditOperation =
   | { type: 'temperature_tint'; temperature: number; tint: number }
   | { type: 'raw_development'; parameters: DevelopmentParameters }
   | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };
+
+/// The point-spread function a deconvolution inverts. Tagged exactly as the
+/// Rust `BlurKernel` serialises, so a workflow written here round-trips.
+export type BlurKernel =
+  | { type: 'defocus'; radius: number }
+  | { type: 'motion'; angleDegrees: number; distance: number }
+  | { type: 'gaussian'; sigma: number };
 
 export type EditOperation =
   | BaseEditOperation
@@ -701,3 +710,44 @@ export interface WorkspaceLayout {
 }
 export interface ShortcutBinding { action: string; keys: string }
 export type ComparisonMode = 'swipe' | 'split' | 'blink' | 'difference';
+
+/// What the Model Manager shows. Mirrors `inference::InferenceStatus`.
+///
+/// `runtimeCompiled` and an empty `installed` are different states with
+/// different fixes, which is why both are reported rather than collapsed into
+/// one "unavailable".
+export interface InferenceModel {
+  id: string;
+  name: string;
+  version: string;
+  architecture: string;
+  capability: string;
+  format: string;
+  colorSpace: string;
+  normalization: string;
+  inputChannels: number;
+  outputChannels: number;
+  scale: number;
+  tileSize: number;
+  tileOverlap: number;
+  fileBytes: number;
+  sha256: string;
+  license: string;
+  source: string;
+}
+
+export interface InferenceCapability {
+  capability: string;
+  available: boolean;
+  models: string[];
+  reason: string;
+}
+
+export interface InferenceStatus {
+  runtimeCompiled: boolean;
+  runtime: string;
+  modelDirectory: string;
+  installed: InferenceModel[];
+  capabilities: InferenceCapability[];
+  classicalOnly: boolean;
+}

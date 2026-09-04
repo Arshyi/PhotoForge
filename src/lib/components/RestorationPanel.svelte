@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { BaseEditOperation, EditOperation, OperationType } from '../types/editor';
+  import type { BaseEditOperation, BlurKernel, EditOperation, OperationType } from '../types/editor';
   import { baseOperation, operationType } from '../utils/operations';
   import SliderControl from './SliderControl.svelte';
 
@@ -24,6 +24,29 @@
     return typeof candidate?.[key] === 'boolean' ? (candidate[key] as boolean) : fallback;
   }
 
+  /// The deconvolution kernel currently chosen, read back out of the operation
+  /// so the controls stay the single source of truth.
+  function currentKernel(): BlurKernel {
+    const candidate = operation('deconvolve') as unknown as Record<string, unknown> | undefined;
+    const kernel = candidate?.kernel as BlurKernel | undefined;
+    if (kernel?.type === 'motion') return kernel;
+    if (kernel?.type === 'gaussian') return kernel;
+    return { type: 'defocus', radius: kernel?.type === 'defocus' ? kernel.radius : 1.5 };
+  }
+
+  function setKernel(kernel: BlurKernel) {
+    onset(
+      {
+        type: 'deconvolve',
+        kernel,
+        iterations: Math.round(numberParameter('deconvolve', 'iterations', 12)),
+        damping: numberParameter('deconvolve', 'damping', 0.3)
+      },
+      true,
+      'deconvolve:kernel'
+    );
+  }
+
   function setStrength(type: OperationType, strength: number) {
     const enabled = strength > 0.0001;
     let next: EditOperation;
@@ -43,7 +66,19 @@
         next = {
           type,
           strength,
-          preserve_edges: numberParameter(type, 'preserve_edges', 0.82)
+          preserve_edges: numberParameter(type, 'preserve_edges', 0.82),
+          color: numberParameter(type, 'color', 0.5)
+        };
+        break;
+      case 'remove_defects':
+        next = { type, strength, threshold: numberParameter(type, 'threshold', 3) };
+        break;
+      case 'deconvolve':
+        next = {
+          type,
+          kernel: currentKernel(),
+          iterations: Math.round(numberParameter(type, 'iterations', 12)),
+          damping: numberParameter(type, 'damping', 0.3)
         };
         break;
       case 'deblock':
@@ -87,7 +122,21 @@
         clip_limit: key === 'clip_limit' ? value : numberParameter(type, 'clip_limit', 1.5)
       };
     } else if (type === 'denoise') {
-      next = { type, strength, preserve_edges: value };
+      next = {
+        type,
+        strength,
+        preserve_edges: key === 'preserve_edges' ? value : numberParameter(type, 'preserve_edges', 0.82),
+        color: key === 'color' ? value : numberParameter(type, 'color', 0.5)
+      };
+    } else if (type === 'remove_defects') {
+      next = { type, strength, threshold: value };
+    } else if (type === 'deconvolve') {
+      next = {
+        type,
+        kernel: currentKernel(),
+        iterations: Math.round(key === 'iterations' ? value : numberParameter(type, 'iterations', 12)),
+        damping: key === 'damping' ? value : numberParameter(type, 'damping', 0.3)
+      };
     } else if (type === 'edge_aware_sharpen') {
       next = {
         type,
@@ -155,12 +204,23 @@
     <button class="advanced-toggle" type="button" aria-expanded={expanded === 'denoise'} on:click={() => toggleAdvanced('denoise')}>Advanced denoise controls</button>
     {#if expanded === 'denoise'}
       <div class="advanced-controls">
-        <SliderControl label="Edge preservation" value={numberParameter('denoise', 'preserve_edges', 0.82)} min={0} max={1} step={0.02} defaultValue={0.82} format={percent} onchange={(value) => updateAdvanced('denoise', 'preserve_edges', value)} />
+        <SliderControl label="Detail" value={numberParameter('denoise', 'preserve_edges', 0.82)} min={0} max={1} step={0.02} defaultValue={0.82} format={percent} onchange={(value) => updateAdvanced('denoise', 'preserve_edges', value)} />
+        <SliderControl label="Colour noise" value={numberParameter('denoise', 'color', 0.5)} min={0} max={1} step={0.02} defaultValue={0.5} format={percent} onchange={(value) => updateAdvanced('denoise', 'color', value)} />
+        <p class="note">Colour noise is filtered over a wider area than luminance, guided by luminance edges, because the eye resolves far less colour detail.</p>
       </div>
     {/if}
   </div>
 
   <div class="restore-tool" title="Conservatively softens visible 8×8 compression boundaries.">
+    <SliderControl label="Dust &amp; hot pixels" value={numberParameter('remove_defects', 'strength', 0)} min={0} max={1} step={0.02} defaultValue={0} format={percent} onchange={(value) => setStrength('remove_defects', value)} />
+    <button class="advanced-toggle" type="button" aria-expanded={expanded === 'remove_defects'} on:click={() => toggleAdvanced('remove_defects')}>Advanced defect controls</button>
+    {#if expanded === 'remove_defects'}
+      <div class="advanced" role="group" aria-label="Advanced defect controls">
+        <SliderControl label="Sensitivity" value={numberParameter('remove_defects', 'threshold', 3)} min={1} max={9} step={0.5} defaultValue={3} format={(value) => `${value.toFixed(1)}x`} onchange={(value) => updateAdvanced('remove_defects', 'threshold', value)} />
+        <p class="note">A pixel is repaired only when it is this many times further from its neighbours than they are from each other, and they agree with one another. Stars and single-pixel lines fail that test and are kept.</p>
+      </div>
+    {/if}
+
     <SliderControl label="JPEG Cleanup" value={numberParameter('deblock', 'strength', 0)} min={0} max={1} step={0.02} defaultValue={0} format={percent} onchange={(value) => setStrength('deblock', value)} />
   </div>
 
@@ -183,6 +243,26 @@
         <SliderControl label="Deblur radius" value={numberParameter('mild_deblur', 'radius', 1.2)} min={0.5} max={3} step={0.1} defaultValue={1.2} format={(value) => value.toFixed(1)} onchange={(value) => updateAdvanced('mild_deblur', 'radius', value)} />
       </div>
     {/if}
+    <div class="deconvolve" role="group" aria-label="Deconvolution">
+      <p class="heading">Deconvolution</p>
+      <p class="note">Reverses a blur you can name. It needs to be told which blur — PhotoForge does not estimate an unknown one — and it is slower than sharpening because it works the kernel backwards.</p>
+      <div class="kernels">
+        <button type="button" class:active={currentKernel().type === 'defocus'} on:click={() => setKernel({ type: 'defocus', radius: 1.5 })}>Out of focus</button>
+        <button type="button" class:active={currentKernel().type === 'motion'} on:click={() => setKernel({ type: 'motion', angleDegrees: 0, distance: 7 })}>Motion</button>
+        <button type="button" class:active={currentKernel().type === 'gaussian'} on:click={() => setKernel({ type: 'gaussian', sigma: 1.5 })}>Soft focus</button>
+      </div>
+      {#if currentKernel().type === 'defocus'}
+        <SliderControl label="Blur radius" value={currentKernel().type === 'defocus' ? (currentKernel() as { radius: number }).radius : 1.5} min={0.5} max={16} step={0.5} defaultValue={1.5} format={(value) => value.toFixed(1)} onchange={(value) => setKernel({ type: 'defocus', radius: value })} />
+      {:else if currentKernel().type === 'motion'}
+        <SliderControl label="Angle" value={currentKernel().type === 'motion' ? (currentKernel() as { angleDegrees: number }).angleDegrees : 0} min={-180} max={180} step={1} defaultValue={0} format={(value) => `${Math.round(value)}°`} onchange={(value) => setKernel({ type: 'motion', angleDegrees: value, distance: currentKernel().type === 'motion' ? (currentKernel() as { distance: number }).distance : 7 })} />
+        <SliderControl label="Distance" value={currentKernel().type === 'motion' ? (currentKernel() as { distance: number }).distance : 7} min={1} max={32} step={1} defaultValue={7} format={(value) => `${Math.round(value)} px`} onchange={(value) => setKernel({ type: 'motion', angleDegrees: currentKernel().type === 'motion' ? (currentKernel() as { angleDegrees: number }).angleDegrees : 0, distance: value })} />
+      {:else}
+        <SliderControl label="Softness" value={currentKernel().type === 'gaussian' ? (currentKernel() as { sigma: number }).sigma : 1.5} min={0.2} max={5} step={0.1} defaultValue={1.5} format={(value) => value.toFixed(1)} onchange={(value) => setKernel({ type: 'gaussian', sigma: value })} />
+      {/if}
+      <SliderControl label="Iterations" value={numberParameter('deconvolve', 'iterations', 12)} min={1} max={40} step={1} defaultValue={12} format={(value) => `${Math.round(value)}`} onchange={(value) => updateAdvanced('deconvolve', 'iterations', value)} />
+      <SliderControl label="Ringing control" value={numberParameter('deconvolve', 'damping', 0.3)} min={0} max={1} step={0.05} defaultValue={0.3} format={percent} onchange={(value) => updateAdvanced('deconvolve', 'damping', value)} />
+    </div>
+
     {#if numberParameter('mild_deblur', 'strength', 0) > 0.7}
       <p class="warning" role="note">Strong deblur may amplify noise or create halos.</p>
     {/if}
@@ -222,4 +302,36 @@
   .mode-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .mode-buttons button { padding: 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink-faint); background: var(--surface); font-size: 0.6rem; cursor: pointer; }
   .mode-buttons button.active, .mode-buttons button:hover { border-color: #59684a; color: var(--accent-bright); background: var(--accent-dim); }
+  .deconvolve {
+    display: grid;
+    gap: 0.4rem;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--panel-border, rgba(255, 255, 255, 0.12));
+  }
+  .deconvolve .heading {
+    margin: 0;
+    font-weight: 600;
+  }
+  .kernels {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .kernels button {
+    flex: 1 1 auto;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.3rem;
+    border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.2));
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  .kernels button.active {
+    background: var(--accent, rgba(120, 170, 255, 0.25));
+  }
+  .note {
+    margin: 0;
+    font-size: 0.78rem;
+    opacity: 0.75;
+  }
 </style>

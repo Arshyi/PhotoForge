@@ -32,7 +32,7 @@ function plan(): EditPlan {
     confidence: 0.8,
     warnings: ['Review the result.'],
     operations: [
-      { type: 'denoise', strength: 0.3, preserve_edges: 0.8 },
+      { type: 'denoise', strength: 0.3, preserve_edges: 0.8, color: 0 },
       { type: 'edge_aware_sharpen', strength: 0.2, radius: 1, threshold: 0.04 }
     ],
     operationExplanations: ['Reduce noise.', 'Improve edges.']
@@ -147,7 +147,7 @@ describe('guided editing utilities', () => {
     const next = updatePlanOperation(plan(), 0, {
       type: 'denoise',
       strength: 0.7,
-      preserve_edges: 0.8
+      preserve_edges: 0.8, color: 0
     });
     expect(next.operations[0]).toMatchObject({ strength: 0.7 });
   });

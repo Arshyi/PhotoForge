@@ -8,6 +8,7 @@
   import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
   import ComponentsSettings from './lib/components/ComponentsSettings.svelte';
   import DiagnosticsSettings from './lib/components/DiagnosticsSettings.svelte';
+  import ModelManager from './lib/components/ModelManager.svelte';
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
   import ProfessionalWorkspace from './lib/components/ProfessionalWorkspace.svelte';
@@ -3688,6 +3689,7 @@
         <ComponentsSettings />
       {:else if settingsPage === 'diagnostics'}
         <DiagnosticsSettings />
+        <ModelManager />
       {:else}
         <LocalAiPrivacy />
       {/if}

@@ -94,14 +94,14 @@ describe('operation helpers', () => {
 
   it('coalesces restoration strength gestures and preserves advanced changes', () => {
     const history = new EditHistory();
-    history.commit([{ type: 'denoise', strength: 0.2, preserve_edges: 0.8 }], 'denoise', 1_000);
-    history.commit([{ type: 'denoise', strength: 0.4, preserve_edges: 0.8 }], 'denoise', 1_100);
+    history.commit([{ type: 'denoise', strength: 0.2, preserve_edges: 0.8, color: 0 }], 'denoise', 1_000);
+    history.commit([{ type: 'denoise', strength: 0.4, preserve_edges: 0.8, color: 0 }], 'denoise', 1_100);
     history.commit(
-      [{ type: 'denoise', strength: 0.4, preserve_edges: 0.95 }],
+      [{ type: 'denoise', strength: 0.4, preserve_edges: 0.95, color: 0 }],
       'denoise:preserve_edges',
       1_200
     );
-    expect(history.undo()).toEqual([{ type: 'denoise', strength: 0.4, preserve_edges: 0.8 }]);
+    expect(history.undo()).toEqual([{ type: 'denoise', strength: 0.4, preserve_edges: 0.8, color: 0 }]);
     expect(history.undo()).toEqual([]);
   });
 });

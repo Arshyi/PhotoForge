@@ -55,7 +55,7 @@ const everyBaseOperation: EditOperation[] = [
   { type: 'gamma', value: 1 }, { type: 'grayscale' }, { type: 'sepia' }, { type: 'reflect_horizontal' },
   { type: 'rotate', degrees: -90 }, { type: 'gaussian_blur', radius: 1 }, { type: 'sharpen', strength: 1 },
   { type: 'auto_white_balance', strength: 1 }, { type: 'local_contrast', strength: 1, tile_size: 32, clip_limit: 2 },
-  { type: 'denoise', strength: 1, preserve_edges: 1 }, { type: 'deblock', strength: 1 },
+  { type: 'denoise', strength: 1, preserve_edges: 1, color: 0 }, { type: 'deblock', strength: 1 },
   { type: 'edge_aware_sharpen', strength: 1, radius: 1, threshold: 0.1 },
   { type: 'mild_deblur', strength: 1, radius: 1 }, { type: 'document_enhance', strength: 1, grayscale: false },
   { type: 'uneven_lighting_correction', strength: 1, radius: 16 },

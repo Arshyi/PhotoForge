@@ -339,9 +339,10 @@ export const adjustmentDefinitions: AdjustmentDefinition[] = [
     description: 'Smooths noise while preserving edges.',
     fields: [
       { key: 'strength', label: 'Strength', min: 0, max: 1, defaultValue: 0.3, ...percent },
-      { key: 'preserve_edges', label: 'Preserve edges', min: 0, max: 1, defaultValue: 0.8, ...percent }
+      { key: 'preserve_edges', label: 'Detail', min: 0, max: 1, defaultValue: 0.8, ...percent },
+      { key: 'color', label: 'Colour noise', min: 0, max: 1, defaultValue: 0.5, ...percent }
     ],
-    build: () => ({ type: 'denoise', strength: 0.3, preserve_edges: 0.8 })
+    build: () => ({ type: 'denoise', strength: 0.3, preserve_edges: 0.8, color: 0.5 })
   },
   {
     type: 'deblock',

@@ -35,7 +35,7 @@ function planned(): EditPlan {
     warnings: ['Sharpening may amplify noise.'],
     layerSteps: [],
     operations: [
-      { type: 'denoise', strength: 0.3, preserve_edges: 0.84 },
+      { type: 'denoise', strength: 0.3, preserve_edges: 0.84, color: 0 },
       { type: 'edge_aware_sharpen', strength: 0.25, radius: 1, threshold: 0.04 }
     ],
     operationExplanations: ['Reduce small pixel variation.', 'Improve captured edges.']

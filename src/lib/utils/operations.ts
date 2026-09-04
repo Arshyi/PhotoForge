@@ -62,7 +62,7 @@ export const presets: Preset[] = [
     description: 'Even lighting, reduce noise, and restore restrained clarity.',
     operations: [
       { type: 'uneven_lighting_correction', strength: 0.62, radius: 40 },
-      { type: 'denoise', strength: 0.28, preserve_edges: 0.82 },
+      { type: 'denoise', strength: 0.28, preserve_edges: 0.82, color: 0.4 },
       { type: 'edge_aware_sharpen', strength: 0.46, radius: 1.2, threshold: 0.035 }
     ]
   },
@@ -72,7 +72,7 @@ export const presets: Preset[] = [
     description: 'Soften block boundaries without blurring major edges.',
     operations: [
       { type: 'deblock', strength: 0.58 },
-      { type: 'denoise', strength: 0.18, preserve_edges: 0.88 }
+      { type: 'denoise', strength: 0.18, preserve_edges: 0.88, color: 0.3 }
     ]
   },
   {
@@ -109,7 +109,7 @@ export const presets: Preset[] = [
     operations: [
       { type: 'auto_white_balance', strength: 0.42 },
       { type: 'local_contrast', strength: 0.26, tile_size: 40, clip_limit: 1.25 },
-      { type: 'denoise', strength: 0.22, preserve_edges: 0.86 },
+      { type: 'denoise', strength: 0.22, preserve_edges: 0.86, color: 0.35 },
       { type: 'edge_aware_sharpen', strength: 0.3, radius: 1.1, threshold: 0.04 }
     ]
   }
@@ -190,6 +190,8 @@ export function cloneOperations(operations: EditOperation[]): EditOperation[] {
 }
 
 export const operationLabels: Record<OperationType, string> = {
+  remove_defects: 'Dust & Hot Pixels',
+  deconvolve: 'Deconvolution',
   brightness: 'Brightness',
   contrast: 'Contrast',
   saturation: 'Saturation',
