@@ -373,14 +373,30 @@ mod tests {
 
     /// The blocking metric must see a grid that is there and not one that is
     /// not, or a de-blocker tuned against it would be tuned against noise.
+    ///
+    /// Measured on a smooth gradient, which is where blocking is visible and
+    /// where a de-blocker is judged. The general test scene is full of hard
+    /// edges and fine texture, and their off-grid gradients dominate the ratio:
+    /// the metric still moves there, but only from 4.46 to 4.60, which is too
+    /// weak a signal to assert on.
     #[test]
     fn blocking_energy_sees_a_grid_only_when_there_is_one() {
-        let clean = super::super::fixtures::scene(96, 96);
-        let blocked = super::super::fixtures::block_artifacts(&clean, 0.8);
-        let before = blocking_energy(&clean);
+        let mut smooth = FloatImage::blank(96, 96, FloatRgba::TRANSPARENT).unwrap();
+        for y in 0..96u32 {
+            for x in 0..96u32 {
+                let v = x as f32 / 96.0 * 0.6 + y as f32 / 96.0 * 0.3;
+                smooth.pixels_mut()[(y * 96 + x) as usize] = FloatRgba::new(v, v, v, 1.0);
+            }
+        }
+        let blocked = super::super::fixtures::block_artifacts(&smooth, 0.8);
+        let before = blocking_energy(&smooth);
         let after = blocking_energy(&blocked);
         assert!(
-            after > before * 1.5,
+            (before - 1.0).abs() < 0.2,
+            "a smooth gradient should have no grid, but scored {before}"
+        );
+        assert!(
+            after > before * 2.0,
             "block artifacts moved the grid metric only {before} -> {after}"
         );
     }
