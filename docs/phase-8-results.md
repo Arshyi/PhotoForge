@@ -75,6 +75,25 @@ The native 73-item GUI/DPI matrix, elevated all-users MSI lifecycle, trusted
 Authenticode signing, and complete-process-tree zero-network claim remain
 unfulfilled. The historical binaries remain explicitly unsigned.
 
+### Freeze audit — 2026-09-04
+
+| Area | Status and evidence |
+| --- | --- |
+| Source freeze | **Committed locally** as `908c0ab` (`Complete PhotoForge 0.8.2 hardening`); this audit is recorded separately. `origin/main` remains at `7ad313a` because `git push origin main` could not reach GitHub and the supported elevated retry was rejected by the host usage limit. |
+| Frontend Vitest / Svelte check / Vite build | **Environment blocked.** Each command stops before loading `vite.config.ts` with esbuild `Cannot read directory "../../..": Access is denied` and `Could not resolve ...\\vite.config.ts`. No current frontend test or bundle success is claimed. |
+| TypeScript source check | **Automated verified:** `npx tsc --noEmit --pretty false` passed. |
+| Rust gates | **Automated verified:** 722 unit tests and 39 IPC/integration tests passed; `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` passed. |
+| Unbundled Rust release executable | **Built, not a Tauri bundle:** `src-tauri/target/release/photoforge.exe`, 16,560,128 bytes, SHA-256 `6EE254E9A721A7F495114F8A2960CECA10FCA63AF2EDEEC43A064B82D78F2D47`. |
+| Tauri installers in `release/` | **Stale/unverified for this source.** The 0.8.2-named portable/NSIS/MSI files are internally versioned 0.8.2 and their manifest hashes match their bytes, but they were built at 10:12 before later source edits (the current source continued through 12:57). They are not distribution artifacts for this commit and are not reused as final evidence. |
+| `cargo tauri build` | **Blocked** by the same `npm run build` esbuild failure before packaging. |
+| Portable, NSIS, MSI, native GUI/DPI | **Not verified for this source.** The historical 0.8.1 records remain separate below; MSI/UAC and the 100/125/150/200% Windows-DPI matrix remain unverified. |
+| Network and signing | **Deferred/limited:** WebView2 runtime TLS traffic was observed historically, so no process-tree zero-network claim is made; no trusted Authenticode identity is configured and artifacts remain unsigned. |
+
+This is the strongest achievable local freeze under the current execution
+limits. The source commit is intentionally frozen before any Phase 9 changes;
+Phase 9 must begin from a follow-up commit after the remote publication blocker
+is resolved.
+
 ---
 
 # Implementation record
