@@ -3,11 +3,16 @@ use crate::domain::{EditOperation, ExportProfile, ExportResult, ImageMetadata, P
 use crate::error::AppError;
 use crate::image_processing::high_precision::pipeline_typed;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
-use crate::infrastructure::{encode_preview, load_image, save_image_with_profile, LoadedImage};
-use crate::layers::render_document_typed;
+use crate::infrastructure::{
+    encode_preview, load_image, save_color_image_streaming, save_image_with_profile, LoadedImage,
+};
 use crate::layers::{
     layer_mask_to_selection, preview_dimensions, selection_to_layer_mask, BlendMode, Layer,
     LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
+};
+use crate::layers::{
+    render_document_streaming, render_document_typed, render_document_typed_cached,
+    DEFAULT_TILE_SIZE,
 };
 use crate::mask::{MaskBitmap, MaskSnapshot};
 use crate::pixel::{DocumentPrecision, PixelBuffer};
@@ -165,15 +170,21 @@ pub async fn render_layer_composite(
     let preview_canvas = preview_dimensions(canvas.0, canvas.1);
 
     let started = Instant::now();
+    // The interactive path is the one that re-renders the same document over
+    // and over — a panel opening, an undo, a pointer release that changes
+    // nothing. Export and merge deliberately do not share it: they run once
+    // per document and would only evict tiles the interface still wants.
+    let cache = Arc::clone(&state.render_cache);
     let composited = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        let rendered = render_document_typed(
+        let rendered = render_document_typed_cached(
             &document,
             &resolved,
             RenderOptions {
                 scale,
                 cancel: None,
             },
+            Some(cache.as_ref()),
         )?;
         let prepared = prepare_preview_operations(&operations, canvas, preview_canvas)?;
         let processed = pipeline_typed(rendered, &prepared, None)?;
@@ -248,6 +259,39 @@ pub async fn export_layer_composite(
                 }
             }
         }
+        let streams_directly = document.precision == DocumentPrecision::LinearSrgbF32
+            && operations.is_empty()
+            && output_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
+        if streams_directly {
+            let saved = save_color_image_streaming(
+                document.canvas_width,
+                document.canvas_height,
+                &original_path,
+                &output_path,
+                profile,
+                color.unwrap_or(crate::color_management::ColorExportOptions {
+                    bit_depth: 8,
+                    ..Default::default()
+                }),
+                None,
+                |emit| {
+                    render_document_streaming(
+                        &document,
+                        &resolved,
+                        RenderOptions::default(),
+                        DEFAULT_TILE_SIZE,
+                        0,
+                        emit,
+                    )
+                    .map(|_| ())
+                },
+            )?;
+            return Ok((saved, document.canvas_width, document.canvas_height));
+        }
+
         let rendered = render_document_typed(&document, &resolved, RenderOptions::default())?;
         if document.precision == DocumentPrecision::LinearSrgbF32 {
             crate::resources::ResourceEstimate::pipeline(

@@ -3554,6 +3554,10 @@
     operationCount={operations.length}
     {processingTime}
     isCurrent={previewCurrent}
+    rendering={processing && !opening}
+    refining={refineBusy}
+    {exporting}
+    {opening}
   />
 </div>
 

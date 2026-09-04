@@ -242,9 +242,7 @@ pub fn read_snapshot(path: &Path) -> Result<LoadedProject, AppError> {
     if path
         .extension()
         .and_then(|value| value.to_str())
-        .map_or(true, |value| {
-            !value.eq_ignore_ascii_case(RECOVERY_EXTENSION)
-        })
+        .is_none_or(|value| !value.eq_ignore_ascii_case(RECOVERY_EXTENSION))
     {
         return Err(AppError::ProjectIo(format!(
             "recovery snapshots must use the .{RECOVERY_EXTENSION} extension"
@@ -272,9 +270,7 @@ fn managed_snapshot_path(path: &Path, directory: &Path) -> Result<PathBuf, AppEr
     if path
         .extension()
         .and_then(|value| value.to_str())
-        .map_or(true, |value| {
-            !value.eq_ignore_ascii_case(RECOVERY_EXTENSION)
-        })
+        .is_none_or(|value| !value.eq_ignore_ascii_case(RECOVERY_EXTENSION))
     {
         return Err(AppError::ProjectIo(format!(
             "recovery snapshots must use the .{RECOVERY_EXTENSION} extension"
@@ -306,9 +302,7 @@ pub fn discard_snapshot(path: &Path) -> Result<(), AppError> {
     if path
         .extension()
         .and_then(|value| value.to_str())
-        .map_or(true, |value| {
-            !value.eq_ignore_ascii_case(RECOVERY_EXTENSION)
-        })
+        .is_none_or(|value| !value.eq_ignore_ascii_case(RECOVERY_EXTENSION))
     {
         return Err(AppError::ProjectIo(
             "that path is not a recovery snapshot".into(),

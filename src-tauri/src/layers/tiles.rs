@@ -314,7 +314,11 @@ pub fn behavior(operation: &EditOperation, _scale: f64) -> TileBehavior {
 /// What tiling a whole document would require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DocumentTiling {
-    /// Largest halo any adjustment in the tree asks for.
+    /// Largest end-to-end dependency radius in the render graph.
+    ///
+    /// Sequential neighbourhood adjustments accumulate. Isolated sibling
+    /// branches take the maximum of their radii instead, because neither reads
+    /// the other's intermediate.
     pub halo: u32,
     /// True when some operation cannot be evaluated on a sub-rectangle.
     pub has_global: bool,
@@ -328,12 +332,27 @@ impl DocumentTiling {
 
 /// Inspects a layer tree for the halo and global operations it contains.
 pub fn document_tiling(document: &LayerDocument, scale: f64) -> DocumentTiling {
-    let mut result = DocumentTiling::default();
-    inspect(&document.layers, scale, &mut result);
-    result
+    let dependency = inspect_stack(&document.layers, scale);
+    let halo = dependency.through.max(dependency.independent);
+    DocumentTiling {
+        halo,
+        has_global: dependency.has_global || halo > MAX_HALO,
+    }
 }
 
-fn inspect(layers: &[Layer], scale: f64, result: &mut DocumentTiling) {
+/// A stack transforms an incoming backdrop dependency `h` into
+/// `max(h + through, independent)`. Keeping both terms is what distinguishes
+/// sequential pass-through work (which accumulates) from independent isolated
+/// branches (which only take a maximum).
+#[derive(Debug, Clone, Copy, Default)]
+struct StackDependency {
+    through: u32,
+    independent: u32,
+    has_global: bool,
+}
+
+fn inspect_stack(layers: &[Layer], scale: f64) -> StackDependency {
+    let mut result = StackDependency::default();
     for layer in layers {
         // A hidden or fully transparent layer contributes nothing and is not
         // evaluated, so its halo must not force every tile to grow.
@@ -343,13 +362,31 @@ fn inspect(layers: &[Layer], scale: f64, result: &mut DocumentTiling) {
         match &layer.content {
             LayerContent::Adjustment { operation } => {
                 let behavior = behavior(operation, scale);
-                result.halo = result.halo.max(behavior.halo());
+                let radius = behavior.halo();
+                result.through = result.through.saturating_add(radius);
+                result.independent = result.independent.saturating_add(radius);
                 result.has_global |= behavior.is_global();
             }
-            LayerContent::Group { children, .. } => inspect(children, scale, result),
+            LayerContent::Group { children, isolated } => {
+                let child = inspect_stack(children, scale);
+                result.has_global |= child.has_global;
+                if *isolated {
+                    let child_halo = child.through.max(child.independent);
+                    result.independent = result.independent.max(child_halo);
+                } else {
+                    // A pass-through group starts from the current backdrop,
+                    // so its through dependency composes with the parent stack.
+                    result.independent = result
+                        .independent
+                        .saturating_add(child.through)
+                        .max(child.independent);
+                    result.through = result.through.saturating_add(child.through);
+                }
+            }
             LayerContent::Pixel { .. } => {}
         }
     }
+    result
 }
 
 #[cfg(test)]
@@ -589,5 +626,48 @@ mod tests {
             mask_id: None,
         };
         assert_eq!(behavior(&masked, 1.0).halo(), 13);
+    }
+
+    fn adjustment(id: &str, operation: EditOperation) -> Layer {
+        let mut layer = crate::layers::test_pixel_layer(id, "unused", 256, 256);
+        layer.content = LayerContent::Adjustment {
+            operation: Box::new(operation),
+        };
+        layer
+    }
+
+    #[test]
+    fn sequential_neighbourhood_adjustments_accumulate_their_halos() {
+        let mut document = LayerDocument::new(256, 256);
+        document.layers = vec![
+            crate::layers::test_pixel_layer("base", "px1", 256, 256),
+            adjustment("blur-1", EditOperation::GaussianBlur { radius: 2.0 }),
+            adjustment("blur-2", EditOperation::GaussianBlur { radius: 2.0 }),
+        ];
+        // Each operation needs seven pixels. Taking only the maximum would
+        // leave the second blur reading a first-blur border computed without
+        // all of its own source pixels.
+        assert_eq!(document_tiling(&document, 1.0).halo, 14);
+    }
+
+    #[test]
+    fn isolated_sibling_branches_take_the_maximum_not_the_sum() {
+        let isolated = |id: &str, pixel_id: &str| {
+            let mut group = crate::layers::test_pixel_layer(id, "unused", 256, 256);
+            group.content = LayerContent::Group {
+                children: vec![
+                    crate::layers::test_pixel_layer(&format!("{id}-base"), pixel_id, 256, 256),
+                    adjustment(
+                        &format!("{id}-blur"),
+                        EditOperation::GaussianBlur { radius: 2.0 },
+                    ),
+                ],
+                isolated: true,
+            };
+            group
+        };
+        let mut document = LayerDocument::new(256, 256);
+        document.layers = vec![isolated("left", "px1"), isolated("right", "px2")];
+        assert_eq!(document_tiling(&document, 1.0).halo, 7);
     }
 }

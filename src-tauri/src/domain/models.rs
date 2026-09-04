@@ -347,9 +347,7 @@ impl EditOperation {
                     && *height > 0.0
                     && *x + *width <= 1.000_001
                     && *y + *height <= 1.000_001
-                    && aspect_ratio
-                        .as_ref()
-                        .map_or(true, |ratio| ratio.len() <= 32)
+                    && aspect_ratio.as_ref().is_none_or(|ratio| ratio.len() <= 32)
             }
             Self::Straighten { degrees } => degrees.is_finite() && (-45.0..=45.0).contains(degrees),
             Self::Perspective { corners } => validate_corners(corners),

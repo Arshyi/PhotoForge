@@ -1,10 +1,10 @@
 [package]
 name = "photoforge"
-version = "0.10.0"
+version = "0.11.0"
 description = "A private, local-first photo restoration and enhancement tool"
 authors = ["PhotoForge contributors"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90"
 
 [lib]
 name = "photoforge_lib"
@@ -50,9 +50,10 @@ webview2-com = "=0.38.2"
 windows-core = "=0.61.2"
 
 [features]
-default = ["custom-protocol"]
+default = ["custom-protocol", "gpu"]
 custom-protocol = ["tauri/custom-protocol"]
-# Off by default. wgpu 30 requires Rust 1.93 and pulls in around 190 crates,
-# and the CPU path is complete without it, so the cost is opt-in. Building
-# with this feature raises the toolchain requirement for the whole crate.
+# Canonical desktop builds include GPU support, but acceleration remains
+# runtime-optional and every operation retains its CPU fallback. A deliberately
+# CPU-only build is: cargo build --no-default-features --features custom-protocol.
+# The wgpu graph currently requires Rust 1.90 (ordered-float via wgpu-hal).
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

@@ -158,6 +158,16 @@ execution, plugin loading, or shell command. RAW layers may contain local linked
 source paths and hashes; these are data, not executable commands. Opening
 restores cached pixels without silently re-developing from those paths.
 
+## Render cache is not project state
+
+Phase 11 render tiles are transient. The default cache is an in-memory bounded
+LRU. An explicitly enabled optional disk tier stores only checksummed,
+versioned f32 tile payloads under a local PhotoForge cache directory; its files
+are disposable and are never embedded in `.photoforge` containers. Deleting the
+cache, changing the cache budget, or opening the project on another machine
+must leave the editable layer tree, source pixels, masks and document
+operations unchanged. A missing or corrupt tile is simply recomputed.
+
 ## Atomic saving
 
 A save writes to a temporary file beside the destination, flushes it to disk,

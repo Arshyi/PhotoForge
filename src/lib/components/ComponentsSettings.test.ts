@@ -28,7 +28,9 @@ function snapshot(): ComponentSnapshot {
   };
 }
 
-beforeEach(() => invokeMock.mockReset());
+beforeEach(() => {
+  invokeMock.mockReset();
+});
 
 describe('ComponentsSettings', () => {
   it('shows active and unavailable registered components', async () => {

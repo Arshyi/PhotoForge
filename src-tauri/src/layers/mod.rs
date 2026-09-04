@@ -7,6 +7,7 @@
 mod blend;
 pub mod cache;
 mod composite;
+mod disk_cache;
 mod linear;
 mod model;
 mod project;
@@ -23,7 +24,8 @@ pub use cache::{CacheStats, DocumentFingerprint, TileCache, DEFAULT_CACHE_BYTES}
 pub use composite::{
     render_document, render_layers, PixelSource, RenderOptions, MAX_RENDER_THREADS,
 };
-pub use linear::{render_document_float, render_document_typed};
+pub use disk_cache::{DiskCacheStats, DiskTileCache, MAX_DISK_TILE_BYTES};
+pub use linear::{render_document_float, render_document_typed, render_document_typed_cached};
 pub use model::{
     validate_dimensions, Layer, LayerContent, LayerDocument, LayerKind, LayerMask, LayerMetadata,
     LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS,

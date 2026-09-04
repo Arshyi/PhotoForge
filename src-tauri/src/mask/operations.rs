@@ -425,7 +425,7 @@ fn fill_holes(mask: &MaskBitmap, context: MaskWorkContext<'_>) -> Result<MaskBit
     }
     let mut visited = 0_usize;
     while let Some((x, y)) = queue.pop_front() {
-        if visited % 4_096 == 0 {
+        if visited.is_multiple_of(4_096) {
             // The reachable exterior size is data-dependent, so this phase is
             // deliberately phase-only rather than a fabricated percentage.
             context.report("fill_holes_flood", 0, 0)?;
@@ -496,7 +496,7 @@ fn remove_small_islands(
             let mut queue = VecDeque::from([(x, y)]);
             visited[start] = true;
             while let Some((current_x, current_y)) = queue.pop_front() {
-                if counter % 4_096 == 0 {
+                if counter.is_multiple_of(4_096) {
                     context.check_cancelled()?;
                 }
                 counter += 1;

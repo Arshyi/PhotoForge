@@ -96,7 +96,7 @@ pub(crate) fn select_with_progress(
     visited[seed_y as usize * width + seed_x as usize] = true;
     let mut processed = 0_usize;
     while let Some((x, y)) = queue.pop_front() {
-        if processed % 4_096 == 0 {
+        if processed.is_multiple_of(4_096) {
             context.report("wand_region", 0, 0)?;
         }
         processed += 1;

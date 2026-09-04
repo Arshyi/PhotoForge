@@ -14,6 +14,26 @@ pub fn render_document_typed(
     source: &dyn PixelSource,
     options: RenderOptions<'_>,
 ) -> Result<PixelBuffer, AppError> {
+    render_document_typed_cached(document, source, options, None)
+}
+
+/// Renders a document, reusing unchanged tiles when a cache is supplied.
+///
+/// High-precision documents go through the tiled renderer: it is bounded in
+/// memory and uses every core, where `render_document_float` allocates whole
+/// frames on one thread. That function is still here and still the definition
+/// of a correct render — the tiled path falls back to it whenever a document
+/// contains an operation that cannot be evaluated on a sub-rectangle, and the
+/// equivalence tests compare against it rather than against themselves.
+///
+/// Legacy 8-bit documents are untouched. They were the pre-0.10.0 renderer and
+/// are kept working, not modernised.
+pub fn render_document_typed_cached(
+    document: &LayerDocument,
+    source: &dyn PixelSource,
+    options: RenderOptions<'_>,
+    cache: Option<&super::TileCache>,
+) -> Result<PixelBuffer, AppError> {
     document.validate()?;
     match document.precision {
         DocumentPrecision::LegacySrgb8 => Ok(super::render_layers(
@@ -24,9 +44,16 @@ pub fn render_document_typed(
             options,
         )?
         .into()),
-        DocumentPrecision::LinearSrgbF32 => {
-            Ok(render_document_float(document, source, options)?.into())
-        }
+        DocumentPrecision::LinearSrgbF32 => Ok(super::tiled::render_document_tiled_cached(
+            document,
+            source,
+            options,
+            super::tiles::DEFAULT_TILE_SIZE,
+            0,
+            cache,
+        )?
+        .0
+        .into()),
     }
 }
 

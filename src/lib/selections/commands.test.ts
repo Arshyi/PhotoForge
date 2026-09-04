@@ -30,7 +30,9 @@ const document: MaskFile = {
   metadata: { createdAt: '', modifiedAt: '' }
 };
 
-beforeEach(() => invokeMock.mockReset().mockResolvedValue(undefined));
+beforeEach(() => {
+  invokeMock.mockReset().mockResolvedValue(undefined);
+});
 
 describe('mask file commands', () => {
   it('always includes the owning document and request for JSON import/export', async () => {

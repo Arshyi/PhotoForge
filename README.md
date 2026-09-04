@@ -2,9 +2,26 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through Phase 10 high-precision
-editing. The target version is **0.10.0**. See [Phase 10 results](docs/phase-10-results.md)
-for exact test, artifact, native GUI/DPI, installer and signing status.
+This repository contains the Phase 0 foundation through Phase 11 bounded render
+acceleration. The target version is **0.11.0**. See
+[Phase 11 results](docs/phase-11-results.md) for current verification and release
+limits; Phase 10 remains the precision and colour baseline.
+
+## Bounded rendering performance (Phase 11)
+
+- The linear-float compositor renders bounded tiles across a capped CPU worker
+  pool and falls back to its full-frame reference when an operation cannot be
+  evaluated correctly from a tile plus halo.
+- A bounded in-memory LRU reuses exact rendered tiles in interactive previews.
+  Diagnostics expose real hits, misses, evictions, refusals, entries and bytes;
+  the user can shrink or clear the cache explicitly.
+- GPU support is an optional build feature. When included and available, it can
+  accelerate only sufficiently large, wide Gaussian blurs whose measured cost
+  beats the CPU. CPU remains the correctness reference and automatic fallback.
+- Diagnostics distinguish the selected policy, effective path, adapter state,
+  and actual dispatch counters. They never label the whole compositor GPU.
+
+See [GPU and tiled rendering](docs/gpu-rendering.md).
 
 ## High-precision editing (Phase 10)
 
@@ -95,9 +112,9 @@ See [docs/layers.md](docs/layers.md),
 [docs/compositing.md](docs/compositing.md), and
 [docs/project-format.md](docs/project-format.md).
 
-PhotoForge does not support PSD, GPU rendering, general TIFF import, CMYK,
+PhotoForge does not support PSD, general GPU compositing, general TIFF import, CMYK,
 printer proofing or proprietary RAW formats. Earlier phase reports remain
-historical evidence; [Phase 10 results](docs/phase-10-results.md) records current limits.
+historical evidence; [Phase 11 results](docs/phase-11-results.md) records current limits.
 
 ## What works
 
@@ -227,6 +244,8 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Phase 9 results (historical)](docs/phase-9-results.md)
 - [High-precision architecture](docs/high-precision-rendering.md)
 - [Phase 10 results](docs/phase-10-results.md)
+- [GPU and tiled rendering](docs/gpu-rendering.md)
+- [Phase 11 results](docs/phase-11-results.md)
 
 ## Honest scope
 
@@ -240,10 +259,12 @@ cloud providers, execute plugins, generate missing content, or reconstruct
 factual detail that was never captured. RAW decoding, demosaicing, and
 source-backed RAW projects are implemented for the documented DNG subset.
 Phase 10 adds float compositing, RGB ICC input, sRGB/P3/Adobe RGB output and
-batch RAW. Arbitrary output ICC, printer proofing, PSD, GPU compositing,
+batch RAW. Phase 11 adds bounded CPU tiles, an in-memory render cache, and
+optional Vulkan acceleration for eligible wide Gaussian blur only. Arbitrary
+output ICC, printer proofing, PSD, general GPU compositing,
 semantic selection, OCR, neural restoration, super-resolution, inpainting
 and generative editing remain outside this release. Native/package validation
-limits are listed separately in the Phase 10 report.
+limits are listed separately in the Phase 11 report.
 
 ## License
 

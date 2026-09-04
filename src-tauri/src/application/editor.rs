@@ -1,6 +1,6 @@
 use crate::domain::{BatchStatus, ImageQualityAnalysis, OllamaDiagnostics};
 use crate::infrastructure::LoadedImage;
-use crate::layers::LayerPixelStore;
+use crate::layers::{LayerPixelStore, TileCache};
 use crate::mask::SharedMaskProgress;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
@@ -14,6 +14,13 @@ pub struct EditorSession {
 pub struct AppState {
     pub session: Mutex<Option<EditorSession>>,
     pub layers: Mutex<LayerPixelStore>,
+    /// Rendered tiles, reused across renders of the same document state.
+    ///
+    /// Shared rather than per-request, which is the whole point: an undo, a
+    /// panel toggle or a re-export of an unchanged document costs nothing.
+    /// Tiles are image content. The default cache is memory-only; an explicit
+    /// environment setting may add the disposable, checksummed local disk tier.
+    pub render_cache: Arc<TileCache>,
     pub components: Mutex<ComponentRegistry>,
     pub ollama_diagnostics: Mutex<OllamaDiagnostics>,
     pub latest_open_request: AtomicU64,
@@ -47,6 +54,7 @@ impl Default for AppState {
         Self {
             session: Mutex::new(None),
             layers: Mutex::new(LayerPixelStore::default()),
+            render_cache: Arc::new(TileCache::from_environment()),
             components: Mutex::new(components),
             ollama_diagnostics: Mutex::new(OllamaDiagnostics::default()),
             latest_open_request: AtomicU64::new(0),

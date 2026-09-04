@@ -46,6 +46,18 @@ the bundled third-party notice.
 only for files this build can actually read, and the capability list contains
 only DNG.
 
+## Phase 11 render integration
+
+The developed `FloatImage` remains an immutable source in the layer store. A
+linear high-precision document may sample it through the tiled CPU compositor;
+the source is promoted once per render and is not decoded or converted once per
+tile. Masks, transforms, groups and adjustments are evaluated against the same
+source coordinates as the full-frame oracle. Direct PNG16 export can stream
+the resulting bands, but RAW decode/development itself remains a source-stage
+operation and is not a tile-aware decoder. Cancellation therefore remains
+cooperative between decode/development stages rather than interrupting every
+decoder inner loop.
+
 ## The development graph
 
 The order is fixed in `raw::develop`, not assembled from the order a user

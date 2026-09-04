@@ -96,6 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scenario = args.get(3).ok_or("scenario")?.as_str();
     let mode = args.get(4).ok_or("mode")?.as_str();
     let tile_size: u32 = args.get(5).map_or(Ok(256), |v| v.parse())?;
+    // Blur sigma, so the GPU threshold can be calibrated against a real render
+    // rather than against an operation measured on an otherwise idle process.
+    let sigma: f32 = args.get(6).map_or(Ok(4.0), |v| v.parse())?;
 
     let mut store = LayerPixelStore::default();
     store.reset(w, h)?;
@@ -123,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "blur" => {
             let mut node = layer("blur", "unused", w, h);
             node.content = LayerContent::Adjustment {
-                operation: Box::new(EditOperation::GaussianBlur { radius: 4.0 }),
+                operation: Box::new(EditOperation::GaussianBlur { radius: sigma }),
             };
             doc.layers.push(node);
         }
@@ -192,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // modes agree, and a streamed export never holds the frame to check.
     let mut accumulate = |first_row: u32, band: &photoforge_lib::color::FloatImage| {
         for (index, p) in band.pixels().iter().enumerate() {
-            if (first_row as usize * band.width() as usize + index) % 4099 == 0 {
+            if (first_row as usize * band.width() as usize + index).is_multiple_of(4099) {
                 checksum +=
                     f64::from(p.red) + f64::from(p.green) + f64::from(p.blue) + f64::from(p.alpha);
             }
@@ -287,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "height": h,
             "megapixels": f64::from(w) * f64::from(h) / 1e6,
             "tileSize": tile_size,
+            "sigma": sigma,
             "renderMs": render_ms,
             "tiles": stats.tiles,
             "haloedTiles": stats.haloed_tiles,

@@ -100,3 +100,20 @@ negative camera-transform components; only explicit re-development changes
 old cached source appearance.
 
 See [phase-10-results.md](phase-10-results.md) for tested versus unverified claims.
+
+## Phase 11 render path
+
+Linear documents are composed by the Phase 11 tiled CPU plan at the same
+linear-f32 precision described above. Tile boundaries do not introduce a color
+conversion: each tile samples straight-alpha source values, composes in
+premultiplied linear values, and is converted to the requested display/export
+space only at the output boundary. Neighbourhood operations receive a derived
+halo; global operations use the full-frame reference so their statistics are
+not normalised independently per tile.
+
+An optional Vulkan compute path accelerates only eligible full-frame Gaussian
+blur after the pixels are already in linear-f32 form. It does not replace the
+working-space transform, masks, blend semantics, ICC conversion, or 16-bit
+output conversion. Any unsupported or failed GPU operation falls back to the
+same CPU implementation. The detailed backend scope and tolerances are in
+[gpu-rendering.md](gpu-rendering.md).

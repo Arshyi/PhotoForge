@@ -612,6 +612,56 @@ export interface ColorExportOptions {
   bitDepth: 8 | 16;
   dither: boolean;
 }
+
+export interface RenderCacheStats {
+  hits: number;
+  misses: number;
+  evictions: number;
+  refusals: number;
+  entries: number;
+  bytes: number;
+  capacityBytes: number;
+  diskEntries: number;
+  diskBytes: number;
+  diskCapacityBytes: number;
+}
+
+export interface RenderGpuInfo {
+  backend: string;
+  adapter: string;
+  deviceType: string;
+  driver: string;
+  maxBufferBytes: number;
+  healthy: boolean;
+}
+
+export interface RenderGpuStats {
+  dispatches: number;
+  megapixels: number;
+  declined: number;
+  failures: number;
+}
+
+export interface RenderDiagnostics {
+  tileSize: number;
+  maxThreads: number;
+  cache: RenderCacheStats;
+  gpuCompiled: boolean;
+  gpuAvailable: boolean;
+  gpu: RenderGpuInfo | null;
+  gpuStats: RenderGpuStats | null;
+  gpuNote: string;
+}
+
+export type RenderBackendMode = 'auto' | 'cpu' | 'gpu';
+export interface RenderBackendPolicy {
+  mode: RenderBackendMode;
+  active: boolean;
+  effectiveBackend: 'cpu' | 'gpu';
+  adapterStatus: 'not_probed' | 'available' | 'unavailable' | 'unhealthy';
+  hardDisabled: boolean;
+  fallbackReason?: string | null;
+}
 export interface BatchOptions {
   inputFolder: string;
   outputFolder: string;

@@ -47,7 +47,7 @@ pub(crate) fn inspect_with_progress(
                 bottom = bottom.max(y);
             }
             completed += 1;
-            if completed % IO_PROGRESS_CHUNK_PIXELS == 0 || completed == total {
+            if completed.is_multiple_of(IO_PROGRESS_CHUNK_PIXELS) || completed == total {
                 context.report("inspect_mask_pixels", completed, total)?;
             }
         }

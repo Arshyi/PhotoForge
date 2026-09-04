@@ -84,7 +84,10 @@ This is an admission model, not a Windows working-set cap. WebView2, original
 display copies, allocator overhead and a previous session temporarily retained
 by an in-flight operation are additional process memory. The measured isolated
 benchmarks do not certify every possible active-session overlap on low-RAM PCs.
-No OS-level memory limiter or out-of-core fallback is claimed.
+No OS-level memory limiter is claimed. Phase 11 adds a bounded tiled layer
+compositor and an opt-in disposable disk tile tier, but full-frame output,
+global/document-level operations and the immutable source store still obey the
+budgets below; this is not a promise of arbitrary multi-source 61 MP editing.
 
 At 9504x6336, one float source plus preview costs 990,792,704 store bytes. A
 second independent source (including Undo for full RAW re-development) exceeds
@@ -108,9 +111,15 @@ OperationLocality classifies point operations as tile-local, neighborhood
 filters as halo-dependent, and auto white balance/global statistics as global.
 Geometric operations also need source-coordinate mapping across tile edges.
 PNG export is already row-streamed without a full-frame u16 intermediate.
-Point work is processed in bounded row bands, but the compositor and filter
-intermediates are still budgeted full-frame buffers. A complete tiled/out-of-core
-renderer, halo scheduler and disk cache are deferred, not implied by the enum.
+Phase 11 now uses the locality enum in `layers::tiles` to drive a 256-pixel
+tiled compositor with derived halos and an eight-worker ceiling. Isolated and
+pass-through layer/group intermediates are region-sized, and direct linear PNG
+exports can stream bands. Document-level operations after the composite,
+global reductions, and unsafe neighbourhoods still use the full-frame oracle;
+the non-streaming API still materialises its final output. An optional bounded
+disk tile cache is explicitly enabled through environment configuration and is
+never part of the project format. See [render-graph.md](render-graph.md),
+[tiled-rendering.md](tiled-rendering.md), and [phase-11-results.md](phase-11-results.md).
 
 Same-build repeated renders use the same per-pixel order and are exact in tests.
 Reference color matrices use f64; stored channels and compositor operations are

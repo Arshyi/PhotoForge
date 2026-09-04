@@ -213,7 +213,7 @@ impl LayerWorkflowStep {
             // suggestion the planner can make on its own.
             return false;
         }
-        self.selector().map_or(true, LayerSelector::is_planner_safe)
+        self.selector().is_none_or(LayerSelector::is_planner_safe)
     }
 }
 

@@ -19,6 +19,16 @@ use std::sync::Arc;
 /// threads at once; every implementation is immutable shared data.
 pub trait PixelSource: Sync {
     fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError>;
+    /// Stable digest of the exact immutable buffer resolved for this render.
+    ///
+    /// Tile-cache keys must include pixel content, not just a document's
+    /// `pixel_id`: a new document may legitimately reuse an identifier such as
+    /// `px1`. Sources that already retain a digest can return it here and avoid
+    /// re-reading the whole image. `None` is safe (the cache computes a digest
+    /// from `resolve_linear`), but potentially more expensive.
+    fn cache_fingerprint(&self, _pixel_id: &str) -> Option<[u8; 32]> {
+        None
+    }
     /// The stored size of a source, without decoding or converting it.
     ///
     /// The renderer bounds a layer by the size of the buffer it actually

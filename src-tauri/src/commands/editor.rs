@@ -80,6 +80,11 @@ impl<'a> OpenRequest<'a> {
             document_id: self.request_id,
             analysis: None,
         });
+        // Rendered tiles contain the previous photograph. Source fingerprints
+        // keep a late worker from serving one to this document, while clearing
+        // here also returns the ordinary completed document's cache memory as
+        // soon as the replacement becomes authoritative.
+        self.state.render_cache.clear();
         Ok(true)
     }
 }

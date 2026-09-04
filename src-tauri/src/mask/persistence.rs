@@ -553,7 +553,7 @@ fn decode_rle_with_progress(
     expected: usize,
     context: MaskWorkContext<'_>,
 ) -> Result<Vec<u8>, AppError> {
-    if encoded.is_empty() || encoded.len() % 5 != 0 {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(5) {
         return Err(AppError::InvalidMask(
             "run-length mask data is malformed".into(),
         ));

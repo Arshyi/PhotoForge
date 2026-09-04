@@ -312,7 +312,7 @@ fn choose_raw_ifd(file: &TiffFile) -> Option<usize> {
             continue;
         };
         let area = u64::from(width) * u64::from(height);
-        if best.map_or(true, |(_, best_area)| area > best_area) {
+        if best.is_none_or(|(_, best_area)| area > best_area) {
             best = Some((index, area));
         }
     }

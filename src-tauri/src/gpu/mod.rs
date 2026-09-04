@@ -36,11 +36,13 @@
 //! compiler: the only thing a caller supplies is an image and a sigma.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::color::{FloatImage, FloatRgba};
 use crate::error::AppError;
 
 const GAUSSIAN_WGSL: &str = include_str!("shaders/gaussian.wgsl");
+const GPU_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Smallest frame worth sending to the GPU.
 ///
@@ -53,30 +55,150 @@ pub const MIN_GPU_PIXELS: u64 = 2_000_000;
 
 /// Smallest blur radius worth sending to the GPU, in taps either side.
 ///
-/// Measured at 24 MP on an RTX A5500 over Vulkan. GPU time is nearly flat in
-/// the radius because it is transfer bound, while CPU time grows with it, so
-/// the two cross at about eight taps:
+/// Measured at 24 MP on an RTX A5500 over Vulkan, **inside a document render**
+/// rather than on an otherwise idle process. That distinction turned out to
+/// matter more than the operation itself. Blurring a bare frame, the two cross
+/// at about nine taps:
 ///
-/// | radius | CPU | GPU | gain |
+/// | radius | CPU | GPU | gain, isolated operation |
 /// | --- | --- | --- | --- |
 /// | 3 | 416 ms | 469 ms | 0.89x |
-/// | 6 | 460 ms | 482 ms | 0.96x |
 /// | 9 | 519 ms | 487 ms | 1.07x |
-/// | 18 | 704 ms | 490 ms | 1.44x |
 /// | 36 | 1533 ms | 490 ms | 3.13x |
-/// | 60 | 2676 ms | 513 ms | 5.22x |
 ///
-/// Below this the GPU is measurably slower, so it is not used.
-pub const MIN_GPU_RADIUS: i32 = 8;
+/// Inside a real render the same operation runs while the pixel store, the
+/// composited canvas and the renderer's intermediates are already resident, and
+/// the device path additionally allocates several frame-sized buffers. That
+/// pushes the crossover out to roughly twenty-four taps:
+///
+/// | radius | CPU | GPU | gain, in a render |
+/// | --- | --- | --- | --- |
+/// | 12 | 1211 ms | 1332 ms | 0.91x |
+/// | 24 | 1484 ms | 1361 ms | 1.09x |
+/// | 36 | 1956 ms | 1372 ms | 1.43x |
+/// | 48 | 2304 ms | 1388 ms | 1.66x |
+/// | 60 | 2816 ms | 1391 ms | 2.02x |
+///
+/// The threshold follows the second table, because that is the situation the
+/// application is actually in. Calibrating on the first would have shipped a
+/// default that made a radius-12 blur about nine per cent slower.
+pub const MIN_GPU_RADIUS: i32 = 24;
+/// Domain validation limits Gaussian sigma to 20, hence at most 60 taps each
+/// side. Keep the public GPU entry point equally bounded on its own.
+const MAX_GPU_RADIUS: i32 = 60;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuMode {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+impl GpuMode {
+    const fn encode(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::Cpu => 1,
+            Self::Gpu => 2,
+        }
+    }
+
+    const fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::Cpu,
+            2 => Self::Gpu,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuAdapterStatus {
+    NotProbed,
+    Available,
+    Unavailable,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuPolicy {
+    pub mode: GpuMode,
+    pub active: bool,
+    pub effective_backend: String,
+    pub adapter_status: GpuAdapterStatus,
+    pub hard_disabled: bool,
+    pub fallback_reason: Option<String>,
+}
+
+static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn mode() -> GpuMode {
+    GpuMode::decode(MODE.load(Ordering::Acquire))
+}
+
+/// Changes policy for subsequent operations. In-flight dispatches finish on
+/// their chosen backend; no global context is torn down beneath them.
+pub fn set_mode(value: GpuMode) -> GpuPolicy {
+    MODE.store(value.encode(), Ordering::Release);
+    policy()
+}
+
+pub fn policy() -> GpuPolicy {
+    let requested = mode();
+    let hard_disabled = disabled();
+    let context_state = if hard_disabled {
+        GpuAdapterStatus::NotProbed
+    } else if requested == GpuMode::Cpu {
+        match CONTEXT.get() {
+            None => GpuAdapterStatus::NotProbed,
+            Some(None) => GpuAdapterStatus::Unavailable,
+            Some(Some(_)) if UNHEALTHY.load(Ordering::Acquire) => GpuAdapterStatus::Unhealthy,
+            Some(Some(_)) => GpuAdapterStatus::Available,
+        }
+    } else {
+        match context() {
+            None => GpuAdapterStatus::Unavailable,
+            Some(_) if UNHEALTHY.load(Ordering::Acquire) => GpuAdapterStatus::Unhealthy,
+            Some(_) => GpuAdapterStatus::Available,
+        }
+    };
+    let active =
+        !hard_disabled && requested != GpuMode::Cpu && context_state == GpuAdapterStatus::Available;
+    let fallback_reason = if hard_disabled {
+        Some("disabled_by_environment")
+    } else if requested == GpuMode::Cpu {
+        Some("forced_cpu")
+    } else {
+        match context_state {
+            GpuAdapterStatus::Unavailable => Some("no_usable_adapter"),
+            GpuAdapterStatus::Unhealthy => Some("device_failed"),
+            _ => None,
+        }
+    };
+    GpuPolicy {
+        mode: requested,
+        active,
+        effective_backend: if active { "gpu" } else { "cpu" }.into(),
+        adapter_status: context_state,
+        hard_disabled,
+        fallback_reason: fallback_reason.map(str::to_string),
+    }
+}
 
 /// What the GPU path has actually done, so claims about it can be checked.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuStats {
     /// Operations that ran to completion on the device.
     pub dispatches: u64,
-    /// Megapixels processed on the device, summed over operations.
-    pub megapixels: u64,
+    /// Exact pixels processed on the device, summed over operations.
+    pub pixels: u64,
+    /// The same exact counter expressed in megapixels for diagnostics.
+    pub megapixels: f64,
     /// Operations declined before starting: too small, too large, no device.
     pub declined: u64,
     /// Operations that started on the device and failed, falling back to CPU.
@@ -84,7 +206,7 @@ pub struct GpuStats {
 }
 
 static DISPATCHES: AtomicU64 = AtomicU64::new(0);
-static MEGAPIXELS: AtomicU64 = AtomicU64::new(0);
+static PIXELS: AtomicU64 = AtomicU64::new(0);
 static DECLINED: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 /// Latches once the device has failed, so a broken device is not retried on
@@ -92,9 +214,11 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static UNHEALTHY: AtomicBool = AtomicBool::new(false);
 
 pub fn stats() -> GpuStats {
+    let pixels = PIXELS.load(Ordering::Relaxed);
     GpuStats {
         dispatches: DISPATCHES.load(Ordering::Relaxed),
-        megapixels: MEGAPIXELS.load(Ordering::Relaxed),
+        pixels,
+        megapixels: pixels as f64 / 1_000_000.0,
         declined: DECLINED.load(Ordering::Relaxed),
         failures: FAILURES.load(Ordering::Relaxed),
     }
@@ -119,6 +243,7 @@ struct Context {
     pipeline: wgpu::ComputePipeline,
     info: wgpu::AdapterInfo,
     max_binding_bytes: u64,
+    max_buffer_bytes: u64,
     max_workgroups: u32,
 }
 
@@ -129,7 +254,13 @@ struct Context {
 static CONTEXT: OnceLock<Option<Context>> = OnceLock::new();
 
 fn context() -> Option<&'static Context> {
-    CONTEXT.get_or_init(initialise).as_ref()
+    CONTEXT
+        .get_or_init(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(initialise))
+                .ok()
+                .flatten()
+        })
+        .as_ref()
 }
 
 /// Set once from the environment, so a user, a support request or a benchmark
@@ -188,7 +319,6 @@ fn initialise_backend(backends: wgpu::Backends) -> Option<Context> {
     // An image editor must lose the acceleration, not the user's work.
     device.on_uncaptured_error(std::sync::Arc::new(|error| {
         UNHEALTHY.store(true, Ordering::Release);
-        FAILURES.fetch_add(1, Ordering::Relaxed);
         let _ = error;
     }));
 
@@ -214,17 +344,24 @@ fn initialise_backend(backends: wgpu::Backends) -> Option<Context> {
         pipeline,
         info,
         max_binding_bytes: limits.max_storage_buffer_binding_size,
+        max_buffer_bytes: limits.max_buffer_size,
         max_workgroups: limits.max_compute_workgroups_per_dimension,
     })
 }
 
 /// Whether a usable device was found. Initialises it on the first call.
 pub fn is_available() -> bool {
-    !disabled() && context().is_some() && !UNHEALTHY.load(Ordering::Acquire)
+    policy().active
 }
 
 pub fn info() -> Option<GpuInfo> {
-    let context = context()?;
+    if disabled() {
+        return None;
+    }
+    let context = match mode() {
+        GpuMode::Cpu => CONTEXT.get().and_then(Option::as_ref)?,
+        GpuMode::Auto | GpuMode::Gpu => context()?,
+    };
     Some(GpuInfo {
         backend: format!("{:?}", context.info.backend),
         adapter: context.info.name.clone(),
@@ -246,7 +383,18 @@ pub fn accepts(width: u32, height: u32, radius: i32) -> bool {
         return false;
     }
     let pixels = u64::from(width) * u64::from(height);
-    pixels >= MIN_GPU_PIXELS && radius >= MIN_GPU_RADIUS
+    accepts_for_mode(mode(), pixels, radius)
+}
+
+const fn accepts_for_mode(mode: GpuMode, pixels: u64, radius: i32) -> bool {
+    if radius <= 0 || radius > MAX_GPU_RADIUS || pixels == 0 {
+        return false;
+    }
+    match mode {
+        GpuMode::Cpu => false,
+        GpuMode::Auto => pixels >= MIN_GPU_PIXELS && radius >= MIN_GPU_RADIUS,
+        GpuMode::Gpu => true,
+    }
 }
 
 /// A separable Gaussian blur on the device.
@@ -269,23 +417,40 @@ pub fn gaussian(image: &FloatImage, sigma: f32) -> Option<FloatImage> {
         DECLINED.fetch_add(1, Ordering::Relaxed);
         return None;
     }
-    let context = context()?;
+    let context = match context() {
+        Some(context) => context,
+        None => {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
     let bytes = u64::from(width) * u64::from(height) * 16;
-    if bytes > context.max_binding_bytes {
+    let weight_count = i64::from(radius).checked_mul(2)?.checked_add(1)?;
+    let weight_bytes = u64::try_from(weight_count).ok()?.checked_mul(4)?;
+    if bytes > context.max_binding_bytes
+        || bytes > context.max_buffer_bytes
+        || weight_bytes > context.max_binding_bytes
+        || weight_bytes > context.max_buffer_bytes
+        || width.div_ceil(64) > context.max_workgroups
+        || height > context.max_workgroups
+    {
         DECLINED.fetch_add(1, Ordering::Relaxed);
         return None;
     }
 
-    match dispatch(context, image, radius, sigma, width, height, bytes) {
+    let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        dispatch(context, image, radius, sigma, width, height, bytes)
+    }))
+    .ok()
+    .flatten();
+    match dispatched {
         Some(result) if !UNHEALTHY.load(Ordering::Acquire) => {
             DISPATCHES.fetch_add(1, Ordering::Relaxed);
-            MEGAPIXELS.fetch_add(
-                u64::from(width) * u64::from(height) / 1_000_000,
-                Ordering::Relaxed,
-            );
+            PIXELS.fetch_add(u64::from(width) * u64::from(height), Ordering::Relaxed);
             Some(result)
         }
         _ => {
+            UNHEALTHY.store(true, Ordering::Release);
             FAILURES.fetch_add(1, Ordering::Relaxed);
             None
         }
@@ -327,7 +492,9 @@ fn dispatch(
     let source = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("blur-source"),
         size: bytes,
-        usage: wgpu::BufferUsages::STORAGE,
+        // The vertical pass writes back here and it becomes the readback
+        // source. Reusing it avoids one full-frame device allocation.
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: true,
     });
     // Writing straight into a mapped buffer. On the DX12 backend this measured
@@ -344,12 +511,6 @@ fn dispatch(
         label: Some("blur-intermediate"),
         size: bytes,
         usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let target = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("blur-target"),
-        size: bytes,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -421,7 +582,7 @@ fn dispatch(
         })
     };
     let first = bind(&source, &intermediate, &horizontal_params);
-    let second = bind(&intermediate, &target, &vertical_params);
+    let second = bind(&intermediate, &source, &vertical_params);
 
     let groups_x = width.div_ceil(64);
     if groups_x > context.max_workgroups || height > context.max_workgroups {
@@ -434,8 +595,8 @@ fn dispatch(
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups(groups_x, height, 1);
     }
-    encoder.copy_buffer_to_buffer(&target, 0, &staging, 0, bytes);
-    context.queue.submit([encoder.finish()]);
+    encoder.copy_buffer_to_buffer(&source, 0, &staging, 0, bytes);
+    let submission = context.queue.submit([encoder.finish()]);
 
     let slice = staging.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -444,13 +605,16 @@ fn dispatch(
     });
     if context
         .device
-        .poll(wgpu::PollType::wait_indefinitely())
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(GPU_WAIT_TIMEOUT),
+        })
         .is_err()
     {
         UNHEALTHY.store(true, Ordering::Release);
         return None;
     }
-    receiver.recv().ok()?.ok()?;
+    receiver.recv_timeout(GPU_WAIT_TIMEOUT).ok()?.ok()?;
     let view = slice.get_mapped_range().ok()?;
     let pixels: &[FloatRgba] = bytemuck::cast_slice(&view);
     let mut result = FloatImage::blank(width, height, FloatRgba::TRANSPARENT).ok()?;
@@ -479,6 +643,25 @@ pub(crate) fn try_gaussian(image: &FloatImage, sigma: f32) -> Option<Result<Floa
 mod tests {
     use super::*;
 
+    static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ModeReset(GpuMode);
+
+    impl Drop for ModeReset {
+        fn drop(&mut self) {
+            MODE.store(self.0.encode(), Ordering::Release);
+            force_unhealthy_for_test(false);
+        }
+    }
+
+    fn isolated() -> (std::sync::MutexGuard<'static, ()>, ModeReset) {
+        let guard = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reset = ModeReset(mode());
+        (guard, reset)
+    }
+
     fn frame(width: u32, height: u32) -> FloatImage {
         let mut image = FloatImage::blank(width, height, FloatRgba::TRANSPARENT).unwrap();
         for (index, pixel) in image.pixels_mut().iter_mut().enumerate() {
@@ -493,14 +676,16 @@ mod tests {
     /// directly rather than inferred from whether something got faster.
     #[test]
     fn small_frames_and_small_radii_are_declined() {
+        let (_guard, _reset) = isolated();
+        MODE.store(GpuMode::Auto.encode(), Ordering::Release);
         assert!(!accepts(100, 100, 12), "a tiny frame was accepted");
         assert!(!accepts(8000, 6000, 1), "a one-tap radius was accepted");
-        // Radius 6 measured 0.96x: slower on the device than on the CPU.
+        // Radius 12 measured 0.91x inside a render: slower on the device.
         assert!(
-            !accepts(8000, 6000, 6),
+            !accepts(8000, 6000, 12),
             "a radius the GPU loses at was accepted"
         );
-        assert!(accepts(4000, 3000, 12), "a 12 MP wide blur was declined");
+        assert!(accepts(4000, 3000, 36), "a 12 MP wide blur was declined");
         // The tiled renderer's unit of work must never reach the device.
         assert!(
             !accepts(256, 256, 36),
@@ -513,6 +698,8 @@ mod tests {
     /// image editor loses the acceleration, never the user's work.
     #[test]
     fn a_missing_device_is_not_an_error() {
+        let (_guard, _reset) = isolated();
+        MODE.store(GpuMode::Auto.encode(), Ordering::Release);
         // Whether or not this machine has a GPU, both paths must be safe.
         let image = frame(64, 64);
         assert!(
@@ -525,13 +712,16 @@ mod tests {
     /// asserts the GPU reproduces it, not that two GPU runs agree.
     #[test]
     fn a_gpu_blur_matches_the_cpu_reference() {
+        let (_guard, _reset) = isolated();
+        MODE.store(GpuMode::Auto.encode(), Ordering::Release);
         if !is_available() {
             eprintln!("skipped: no usable GPU on this machine");
             return;
         }
         // Large enough to be accepted, small enough to keep the test quick.
         let image = frame(2000, 1100);
-        for sigma in [3.0f32, 4.0, 9.0] {
+        // Sigma 8 and above, so every case clears MIN_GPU_RADIUS of 24 taps.
+        for sigma in [8.0f32, 12.0, 20.0] {
             let Some(actual) = gaussian(&image, sigma) else {
                 panic!("the device declined a frame the acceptance rule allows");
             };
@@ -566,10 +756,61 @@ mod tests {
     /// still get a correct picture from the CPU.
     #[test]
     fn an_unhealthy_device_declines_instead_of_failing() {
+        let (_guard, _reset) = isolated();
+        MODE.store(GpuMode::Auto.encode(), Ordering::Release);
         let image = frame(2000, 1100);
         force_unhealthy_for_test(true);
         let result = gaussian(&image, 4.0);
         force_unhealthy_for_test(false);
         assert!(result.is_none(), "an unhealthy device returned pixels");
+    }
+
+    #[test]
+    fn runtime_policy_decisions_are_explicit_and_bounded() {
+        assert!(!accepts_for_mode(GpuMode::Cpu, 20_000_000, 20));
+        assert!(!accepts_for_mode(GpuMode::Auto, 100, 20));
+        assert!(accepts_for_mode(
+            GpuMode::Auto,
+            MIN_GPU_PIXELS,
+            MIN_GPU_RADIUS
+        ));
+        assert!(accepts_for_mode(GpuMode::Gpu, 100, 1));
+        for mode in [GpuMode::Auto, GpuMode::Cpu, GpuMode::Gpu] {
+            assert!(!accepts_for_mode(mode, 0, 1));
+            assert!(!accepts_for_mode(mode, 100, 0));
+            assert!(!accepts_for_mode(mode, 100, MAX_GPU_RADIUS + 1));
+        }
+    }
+
+    #[test]
+    fn cpu_policy_switches_without_initialising_or_destroying_a_device() {
+        let (_guard, _reset) = isolated();
+        let before = CONTEXT.get().is_some();
+        let selected = set_mode(GpuMode::Cpu);
+        assert_eq!(mode(), GpuMode::Cpu);
+        assert!(!selected.active);
+        assert_eq!(selected.effective_backend, "cpu");
+        assert_eq!(selected.fallback_reason.as_deref(), Some("forced_cpu"));
+        assert_eq!(CONTEXT.get().is_some(), before);
+        assert!(!accepts(4000, 3000, 36));
+    }
+
+    #[test]
+    fn policy_and_modes_have_stable_json_shapes() {
+        assert_eq!(serde_json::to_value(GpuMode::Auto).unwrap(), "auto");
+        assert_eq!(serde_json::to_value(GpuMode::Cpu).unwrap(), "cpu");
+        assert_eq!(serde_json::to_value(GpuMode::Gpu).unwrap(), "gpu");
+        let value = serde_json::to_value(GpuPolicy {
+            mode: GpuMode::Gpu,
+            active: false,
+            effective_backend: "cpu".into(),
+            adapter_status: GpuAdapterStatus::Unhealthy,
+            hard_disabled: false,
+            fallback_reason: Some("device_failed".into()),
+        })
+        .unwrap();
+        assert_eq!(value["effectiveBackend"], "cpu");
+        assert_eq!(value["adapterStatus"], "unhealthy");
+        assert_eq!(value["fallbackReason"], "device_failed");
     }
 }

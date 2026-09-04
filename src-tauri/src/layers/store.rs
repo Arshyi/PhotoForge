@@ -4,6 +4,7 @@ use crate::color::FloatImage;
 use crate::error::AppError;
 use crate::pixel::PixelBuffer;
 use image::{imageops, RgbaImage};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,6 +21,8 @@ pub const MAX_STORE_BUFFERS: usize = 1_024;
 struct StoredPixels {
     full: PixelBuffer,
     preview: PixelBuffer,
+    full_fingerprint: [u8; 32],
+    preview_fingerprint: [u8; 32],
 }
 
 impl StoredPixels {
@@ -179,9 +182,17 @@ impl LayerPixelStore {
             return Err(AppError::OutOfMemoryRisk);
         }
         let preview = self.scaled_preview(&image)?;
+        let full_fingerprint = fingerprint(&image);
+        let preview_fingerprint = if same_buffer(&image, &preview) {
+            full_fingerprint
+        } else {
+            fingerprint(&preview)
+        };
         let stored = StoredPixels {
             full: image,
             preview,
+            full_fingerprint,
+            preview_fingerprint,
         };
         self.buffers.insert(id.clone(), stored);
         Ok(id)
@@ -243,6 +254,7 @@ impl LayerPixelStore {
     /// session lock before doing any pixel work.
     pub fn resolve(&self, pixel_ids: &[String], preview: bool) -> Result<ResolvedPixels, AppError> {
         let mut resolved = HashMap::with_capacity(pixel_ids.len());
+        let mut fingerprints = HashMap::with_capacity(pixel_ids.len());
         for id in pixel_ids {
             let stored = self
                 .buffers
@@ -253,10 +265,17 @@ impl LayerPixelStore {
             } else {
                 stored.full.clone()
             };
+            let fingerprint = if preview {
+                stored.preview_fingerprint
+            } else {
+                stored.full_fingerprint
+            };
             resolved.insert(id.clone(), buffer);
+            fingerprints.insert(id.clone(), fingerprint);
         }
         Ok(ResolvedPixels {
             buffers: resolved,
+            fingerprints,
             resident_bytes: self.total_bytes(),
         })
     }
@@ -280,6 +299,7 @@ impl LayerPixelStore {
 /// alive without holding the session lock.
 pub struct ResolvedPixels {
     buffers: HashMap<String, PixelBuffer>,
+    fingerprints: HashMap<String, [u8; 32]>,
     resident_bytes: u64,
 }
 
@@ -294,6 +314,10 @@ impl ResolvedPixels {
 }
 
 impl PixelSource for ResolvedPixels {
+    fn cache_fingerprint(&self, pixel_id: &str) -> Option<[u8; 32]> {
+        self.fingerprints.get(pixel_id).copied()
+    }
+
     fn dimensions(&self, pixel_id: &str) -> Option<(u32, u32)> {
         self.buffers.get(pixel_id).map(PixelBuffer::dimensions)
     }
@@ -326,6 +350,41 @@ impl PixelSource for ResolvedPixels {
     fn resident_bytes(&self) -> u64 {
         self.resident_bytes
     }
+}
+
+fn same_buffer(a: &PixelBuffer, b: &PixelBuffer) -> bool {
+    match (a, b) {
+        (PixelBuffer::EncodedSrgba8(a), PixelBuffer::EncodedSrgba8(b)) => Arc::ptr_eq(a, b),
+        (PixelBuffer::LinearRgbaF32(a), PixelBuffer::LinearRgbaF32(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Hashes the stored representation once, when an immutable buffer enters the
+/// store. Different representations may deliberately get different digests;
+/// equality must imply equal rendered content, while extra misses are safe.
+fn fingerprint(buffer: &PixelBuffer) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let (width, height) = buffer.dimensions();
+    hasher.update(b"photoforge.pixel.v1");
+    hasher.update(width.to_le_bytes());
+    hasher.update(height.to_le_bytes());
+    match buffer {
+        PixelBuffer::EncodedSrgba8(image) => {
+            hasher.update([0]);
+            hasher.update(image.as_raw());
+        }
+        PixelBuffer::LinearRgbaF32(image) => {
+            hasher.update([1]);
+            for pixel in image.pixels() {
+                hasher.update(pixel.red.to_bits().to_le_bytes());
+                hasher.update(pixel.green.to_bits().to_le_bytes());
+                hasher.update(pixel.blue.to_bits().to_le_bytes());
+                hasher.update(pixel.alpha.to_bits().to_le_bytes());
+            }
+        }
+    }
+    hasher.finalize().into()
 }
 
 #[cfg(test)]

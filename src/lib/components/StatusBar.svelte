@@ -4,9 +4,18 @@
   export let operationCount = 0;
   export let processingTime = 0;
   export let isCurrent = true;
+  export let rendering = false;
+  export let refining = false;
+  export let exporting = false;
+  export let opening = false;
+
+  $: activity = exporting ? 'Export in progress' : refining ? 'Refining selection' :
+    opening ? 'Opening image' : rendering ? 'Rendering preview' :
+      isCurrent ? 'Preview current' : 'Preview queued';
+  $: busy = exporting || refining || opening || rendering || !isCurrent;
 </script>
 
-<footer aria-live="polite" aria-atomic="true">
+<footer aria-live="polite" aria-atomic="true" aria-busy={busy}>
   <span>{dimensions}</span>
   <i></i>
   <span>{zoom}%</span>
@@ -15,7 +24,7 @@
   <span class="spacer"></span>
   <span>{processingTime.toFixed(0)} ms</span>
   <i></i>
-  <span class:current={isCurrent} class="state"><b></b>{isCurrent ? 'Preview current' : 'Updating preview'}</span>
+  <span class:current={!busy} class="state"><b></b>{activity}</span>
 </footer>
 
 <style>

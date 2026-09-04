@@ -23,14 +23,16 @@
 //! reports what actually happened, including refusals.
 //!
 //! Cached tiles are rendered image content and are treated as private user
-//! data: this cache is in memory only, is never written to disk, and is dropped
-//! with the session.
+//! data. The default cache is memory-only; an explicit environment setting or
+//! constructor may add the disposable, checksummed disk tier in
+//! [`super::disk_cache`].
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
 
 use super::composite::render_transform;
+use super::disk_cache::DiskTileCache;
 use super::tiles::Region;
 use super::{Layer, LayerContent, LayerDocument};
 use crate::color::FloatImage;
@@ -56,6 +58,10 @@ pub struct CacheStats {
     pub entries: u64,
     pub bytes: u64,
     pub capacity_bytes: u64,
+    /// Entries spilled to the optional local disk cache.
+    pub disk_entries: u64,
+    pub disk_bytes: u64,
+    pub disk_capacity_bytes: u64,
 }
 
 impl CacheStats {
@@ -93,6 +99,7 @@ struct Inner {
 /// A bounded, least-recently-used cache of rendered tiles.
 pub struct TileCache {
     inner: Mutex<Inner>,
+    disk: Option<Arc<DiskTileCache>>,
 }
 
 impl Default for TileCache {
@@ -108,7 +115,58 @@ impl TileCache {
                 capacity: capacity_bytes,
                 ..Inner::default()
             }),
+            disk: None,
         }
+    }
+
+    /// Creates a cache with an explicitly supplied disposable disk tier.
+    /// Disk-cache construction is fallible so callers can disable it without
+    /// making opening an image fail; the normal application constructor uses
+    /// [`Self::from_environment`] for that reason.
+    pub fn with_disk_capacity(
+        capacity_bytes: u64,
+        directory: impl AsRef<std::path::Path>,
+        disk_capacity_bytes: u64,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                capacity: capacity_bytes,
+                ..Inner::default()
+            }),
+            disk: Some(Arc::new(DiskTileCache::open(
+                directory,
+                disk_capacity_bytes,
+            )?)),
+        })
+    }
+
+    /// Enables the disk tier only when explicitly requested. This keeps the
+    /// default build local and quiet while still providing a supported
+    /// out-of-core spill path for large-document deployments and benchmarks.
+    pub fn from_environment() -> Self {
+        let directory = std::env::var_os("PHOTOFORGE_RENDER_CACHE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let enabled = std::env::var_os("PHOTOFORGE_ENABLE_DISK_CACHE")
+                    .map(|value| value != "0" && !value.is_empty())
+                    .unwrap_or(false);
+                if enabled {
+                    std::env::var_os("LOCALAPPDATA")
+                        .map(std::path::PathBuf::from)
+                        .map(|path| path.join("PhotoForge").join("render-cache"))
+                } else {
+                    None
+                }
+            });
+        let Some(directory) = directory else {
+            return Self::with_capacity(DEFAULT_CACHE_BYTES);
+        };
+        let disk_capacity = std::env::var("PHOTOFORGE_RENDER_CACHE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_CACHE_BYTES);
+        Self::with_disk_capacity(DEFAULT_CACHE_BYTES, directory, disk_capacity)
+            .unwrap_or_else(|_| Self::with_capacity(DEFAULT_CACHE_BYTES))
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -118,20 +176,35 @@ impl TileCache {
     }
 
     pub fn get(&self, key: &TileKey) -> Option<Arc<FloatImage>> {
-        let mut inner = self.lock();
-        inner.clock += 1;
-        let clock = inner.clock;
-        let Some(entry) = inner.entries.get_mut(key) else {
-            inner.misses += 1;
-            return None;
-        };
-        let previous = entry.used;
-        entry.used = clock;
-        let image = Arc::clone(&entry.image);
-        inner.order.remove(&previous);
-        inner.order.insert(clock, *key);
-        inner.hits += 1;
-        Some(image)
+        {
+            let mut inner = self.lock();
+            inner.clock += 1;
+            let clock = inner.clock;
+            if let Some(entry) = inner.entries.get_mut(key) {
+                let previous = entry.used;
+                entry.used = clock;
+                let image = Arc::clone(&entry.image);
+                inner.order.remove(&previous);
+                inner.order.insert(clock, *key);
+                inner.hits += 1;
+                return Some(image);
+            }
+        }
+
+        // A disk hit is still a cache hit to the caller. Promote it to memory
+        // so the next request avoids disk I/O, while keeping the memory tier's
+        // byte budget authoritative.
+        if let Some(disk) = &self.disk {
+            if let Some(image) = disk.get(key) {
+                let image = Arc::new(image);
+                let mut inner = self.lock();
+                insert_memory(&mut inner, *key, Arc::clone(&image));
+                inner.hits += 1;
+                return Some(image);
+            }
+        }
+        self.lock().misses += 1;
+        None
     }
 
     /// Stores a tile, evicting least-recently-used entries to stay in budget.
@@ -141,21 +214,17 @@ impl TileCache {
     /// would be worse than one that is merely slower.
     pub fn insert(&self, key: TileKey, image: Arc<FloatImage>) {
         let bytes = u64::from(image.width()) * u64::from(image.height()) * 16;
-        let mut inner = self.lock();
-        if bytes > inner.capacity {
-            inner.refusals += 1;
-            return;
+        {
+            let mut inner = self.lock();
+            if bytes > inner.capacity {
+                inner.refusals += 1;
+            } else {
+                insert_memory(&mut inner, key, Arc::clone(&image));
+            }
         }
-        if let Some(existing) = inner.entries.remove(&key) {
-            inner.order.remove(&existing.used);
-            inner.bytes -= existing.bytes;
+        if let Some(disk) = &self.disk {
+            disk.insert(key, &image);
         }
-        inner.evict_until(bytes);
-        inner.clock += 1;
-        let used = inner.clock;
-        inner.bytes += bytes;
-        inner.entries.insert(key, Entry { image, bytes, used });
-        inner.order.insert(used, key);
     }
 
     /// Drops everything. Used when a document closes, and by the interface's
@@ -165,6 +234,10 @@ impl TileCache {
         inner.entries.clear();
         inner.order.clear();
         inner.bytes = 0;
+        drop(inner);
+        if let Some(disk) = &self.disk {
+            disk.clear();
+        }
     }
 
     /// Changes the budget, evicting immediately if the new one is smaller.
@@ -176,6 +249,14 @@ impl TileCache {
 
     pub fn stats(&self) -> CacheStats {
         let inner = self.lock();
+        let (disk_entries, disk_bytes, disk_capacity_bytes) = self
+            .disk
+            .as_ref()
+            .map(|disk| {
+                let stats = disk.stats();
+                (stats.entries, stats.bytes, stats.capacity_bytes)
+            })
+            .unwrap_or_default();
         CacheStats {
             hits: inner.hits,
             misses: inner.misses,
@@ -184,8 +265,29 @@ impl TileCache {
             entries: inner.entries.len() as u64,
             bytes: inner.bytes,
             capacity_bytes: inner.capacity,
+            disk_entries,
+            disk_bytes,
+            disk_capacity_bytes,
         }
     }
+}
+
+fn insert_memory(inner: &mut Inner, key: TileKey, image: Arc<FloatImage>) {
+    let bytes = u64::from(image.width()) * u64::from(image.height()) * 16;
+    if bytes > inner.capacity {
+        inner.refusals += 1;
+        return;
+    }
+    if let Some(existing) = inner.entries.remove(&key) {
+        inner.order.remove(&existing.used);
+        inner.bytes -= existing.bytes;
+    }
+    inner.evict_until(bytes);
+    inner.clock += 1;
+    let used = inner.clock;
+    inner.bytes += bytes;
+    inner.entries.insert(key, Entry { image, bytes, used });
+    inner.order.insert(used, key);
 }
 
 impl Inner {
@@ -258,7 +360,7 @@ impl DocumentFingerprint {
         let canvas = Region::whole(canvas_width, canvas_height);
         let mut base = Sha256::new();
         // Everything that changes what a tile means, rather than what is in it.
-        base.update(b"photoforge.tile.v1");
+        base.update(b"photoforge.tile.v2");
         base.update(canvas_width.to_le_bytes());
         base.update(canvas_height.to_le_bytes());
         base.update(scale.to_bits().to_le_bytes());
@@ -272,7 +374,7 @@ impl DocumentFingerprint {
             .iter()
             .map(|layer| {
                 Ok(LayerPrint {
-                    digest: digest_layer(layer)?,
+                    digest: digest_layer(layer, source)?,
                     influence: influence_of(layer, source, scale, halo, &canvas),
                 })
             })
@@ -309,11 +411,68 @@ impl DocumentFingerprint {
 ///
 /// Serialisation is the whole layer, not a hand-picked field list, so a new
 /// field added to `Layer` later cannot be silently left out of the key.
-fn digest_layer(layer: &Layer) -> Result<TileKey, AppError> {
+pub(crate) fn digest_layer(
+    layer: &Layer,
+    source: &dyn super::PixelSource,
+) -> Result<TileKey, AppError> {
     let encoded = serde_json::to_vec(layer)
         .map_err(|_| AppError::InvalidLayerDocument("a layer could not be digested".into()))?;
     let mut hasher = Sha256::new();
     hasher.update(&encoded);
+    digest_visible_sources(layer, source, &mut hasher)?;
+    Ok(hasher.finalize().into())
+}
+
+/// Adds the immutable content behind every visible pixel reference. Layer
+/// identifiers are document-local and can be reused after a store reset, so
+/// hashing JSON alone is not sufficient to prevent cross-document stale hits.
+fn digest_visible_sources(
+    layer: &Layer,
+    source: &dyn super::PixelSource,
+    hasher: &mut Sha256,
+) -> Result<(), AppError> {
+    if !layer.visible || layer.opacity <= 0.0 {
+        return Ok(());
+    }
+    match &layer.content {
+        LayerContent::Pixel { pixel_id, .. } => {
+            hasher.update(b"pixel-source");
+            hasher.update((pixel_id.len() as u64).to_le_bytes());
+            hasher.update(pixel_id.as_bytes());
+            let digest = match source.cache_fingerprint(pixel_id) {
+                Some(digest) => digest,
+                None => fingerprint_resolved_source(source, pixel_id)?,
+            };
+            hasher.update(digest);
+        }
+        LayerContent::Group { children, .. } => {
+            for child in children {
+                digest_visible_sources(child, source, hasher)?;
+            }
+        }
+        LayerContent::Adjustment { .. } => {}
+    }
+    Ok(())
+}
+
+/// Safe fallback for custom `PixelSource` implementations. Production
+/// `ResolvedPixels` supplies a digest computed once at registration time; a
+/// source that does not can still use the cache without weakening its key.
+fn fingerprint_resolved_source(
+    source: &dyn super::PixelSource,
+    pixel_id: &str,
+) -> Result<TileKey, AppError> {
+    let image = source.resolve_linear(pixel_id)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"photoforge.resolved-pixel.v1");
+    hasher.update(image.width().to_le_bytes());
+    hasher.update(image.height().to_le_bytes());
+    for pixel in image.pixels() {
+        hasher.update(pixel.red.to_bits().to_le_bytes());
+        hasher.update(pixel.green.to_bits().to_le_bytes());
+        hasher.update(pixel.blue.to_bits().to_le_bytes());
+        hasher.update(pixel.alpha.to_bits().to_le_bytes());
+    }
     Ok(hasher.finalize().into())
 }
 

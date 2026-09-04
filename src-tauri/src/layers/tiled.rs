@@ -551,6 +551,10 @@ impl<'a> MemoSource<'a> {
 }
 
 impl PixelSource for MemoSource<'_> {
+    fn cache_fingerprint(&self, pixel_id: &str) -> Option<[u8; 32]> {
+        self.inner.cache_fingerprint(pixel_id)
+    }
+
     fn dimensions(&self, pixel_id: &str) -> Option<(u32, u32)> {
         self.inner.dimensions(pixel_id)
     }
@@ -1020,7 +1024,7 @@ mod tests {
                     f(y, 11) * 0.9 + 0.05,
                     f(x.wrapping_add(y), 13) * 0.9 + 0.05,
                     // Varying alpha, including fully transparent runs.
-                    if (x / 17 + y / 19) % 11 == 0 {
+                    if (x / 17 + y / 19).is_multiple_of(11) {
                         0.0
                     } else {
                         0.25 + f(x.wrapping_add(y.wrapping_mul(3)), 5) * 0.75
@@ -1524,6 +1528,32 @@ mod tests {
         assert!(
             difference < 2e-3,
             "a blur differed by {difference} between the tiled and full-frame renderers"
+        );
+    }
+
+    /// Neighbourhood dependencies compose through sequential adjustments. A
+    /// plan that takes only the largest individual halo computes the outer
+    /// pixels of the first blur with incomplete input, then feeds those wrong
+    /// pixels into the second blur at every tile boundary.
+    #[test]
+    fn sequential_blurs_match_the_full_frame_reference() {
+        let store = store_with(&[("a", source_image(W, H, 1313))]);
+        let blur = |id: &str| Layer {
+            content: LayerContent::Adjustment {
+                operation: Box::new(EditOperation::GaussianBlur { radius: 2.0 }),
+            },
+            ..pixel_layer(id, "unused")
+        };
+        let document = document(vec![
+            pixel_layer("base", "a"),
+            blur("blur-1"),
+            blur("blur-2"),
+        ]);
+        assert_eq!(document_tiling(&document, 1.0).halo, 14);
+        let difference = compare(&document, &store, 64);
+        assert!(
+            difference < 2e-3,
+            "sequential blurs differed by {difference} between tiled and full-frame renders"
         );
     }
 
@@ -2211,6 +2241,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Pixel identifiers are local to one store. Opening a new document resets
+    /// generated names back to `px1`, so content has to participate in the key
+    /// or the first preview of the new document can show the previous photo.
+    #[test]
+    fn a_reused_pixel_identifier_cannot_serve_a_previous_documents_tiles() {
+        let first_store = store_with(&[("px1", source_image(W, H, 901))]);
+        let second_store = store_with(&[("px1", source_image(W, H, 902))]);
+        let document = document(vec![pixel_layer("base", "px1")]);
+        let cache = TileCache::default();
+
+        let _ = cached(&document, &first_store, 64, &cache);
+        let expected = uncached(&document, &second_store, 64);
+        let (actual, stats) = cached(&document, &second_store, 64, &cache);
+
+        assert_eq!(
+            stats.cached_tiles, 0,
+            "new source content reused stale tiles"
+        );
+        assert_eq!(expected.pixels(), actual.pixels());
     }
 
     /// The staleness test. A cache that reuses a tile it should have dropped
