@@ -25,8 +25,8 @@ RAW support lives in `src-tauri/src/raw.rs` and its submodules:
 | `raw::develop` | The ordered development graph and the preview/full decision |
 | `commands::raw` | The IPC surface: inspect, open, develop, verify, relink, export |
 
-No third-party RAW decoder is linked and no native library is packaged, which
-is a licensing decision recorded in [raw-development.md](raw-development.md).
+No third-party RAW decoder is linked and no separate RAW-decoder DLL is
+packaged. The dependency decision is recorded in [raw-development.md](raw-development.md).
 
 A RAW layer carries `Layer.raw`: the source reference, its hash, the development
 parameters, and the camera metadata. The developed raster in a project is a

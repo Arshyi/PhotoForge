@@ -65,9 +65,8 @@ but limits immutable source+history storage to 1 GiB. Independent large sources
 and full RAW re-development with retained 61 MP Undo data can exceed it.
 See [high-precision-rendering.md](high-precision-rendering.md) for exact boundaries.
 
-Packaging, final artifact hashes, native GUI/DPI and installer lifecycle checks
-are pending in this source commit. No production signing or zero-process-tree
-networking claim is made. Previous phases are historical evidence only.
+The final artifact and native-validation results below supersede the initial
+source-commit packaging status. Previous phases remain historical evidence only.
 
 ## Measured CPU performance and memory
 
@@ -134,3 +133,95 @@ that size took 13.7 seconds in this run. The adjustment case peaked near 2.72 Gi
 These numbers motivate future tiled/filter optimization; no GPU-speed claim is
 made. Reproduce with `cargo build --release --example precision_benchmark` and
 `scripts/benchmark-precision.ps1`.
+
+## Final artifacts and installer audit
+
+Implementation: `5fa058feae0b7a9b4c034688b587346a82f68449`.
+Final executable source (ICC determinism fix):
+`fb50462e3fff2c361e84e02db396f8b84f5ac1ca`.
+Subsequent changes are validation documentation only. The final release source
+passed the real-camera layered IPC test again in 28.30 seconds and all six
+real-file tests in 4.54 seconds with the fixtures actually present.
+
+The installed Tauri CLI was used through `npm run tauri -- build -- --offline`
+(`cargo-tauri` is not installed as a separate executable). Frontend build,
+release Rust build, makensis, candle and light completed successfully.
+Artifacts are in the gitignored `release/0.10.0` folder; earlier artifacts were
+preserved. No fixture binaries, build output, private keys or local test logs
+are committed. The acquisition and benchmark scripts are committed.
+
+| Final file | Bytes | SHA-256 |
+| --- | ---: | --- |
+| PhotoForge-portable.exe | 18,346,496 | a358142f2dd629e82741de9dae9c61ab4f46d662bb3ce931c4cfaa5a31d70a55 |
+| PhotoForge_0.10.0_x64-setup.exe | 4,186,256 | 237fde69d523b2d48b5b3a1e59dbc73adaeb9b78beb502ebed233cc84522b63b |
+| PhotoForge_0.10.0_x64_en-US.msi | 6,119,424 | 1960d6a87d9d022535b8e2532ca9ad79dec9d888e6a7918238d8cbbb6dd0c617 |
+
+SHA256SUMS.txt verifies all three final files. All are **NotSigned**. No usable
+code-signing identity was found in CurrentUser/My or LocalMachine/My, and no
+production signing service was supplied. No self-signed substitute was made.
+The bundled moxcms BSD notice is 1,978 bytes, SHA-256
+`52d01e01773b15bf07e55dbacde09295564d016da68b6cb964aa20ec4ff5c987`.
+
+NSIS: exact final setup installed silently per-user into a fresh validation
+directory, exit 0. Registry version was 0.10.0. The installed executable was
+18,346,496 bytes with SHA-256
+`674e8858934f366b506a736de60089bc53928833786047e683936e57d1368fec`.
+Tauri patches bundle-type metadata, so installed and portable hashes differ.
+The installation included the matching third-party notice and uninstaller.
+Uninstall returned 0; the validation directory, per-user registration and
+shortcut were absent afterward. No PhotoForge process remained. Pre-existing
+WebView user data was preserved, not counted as new installer residue.
+
+**NSIS launch/basic-operation acceptance is not complete.** The Computer Use
+skill launched its normal app-approval flow for the installed executable; the
+tool returned exactly `Computer Use app approval timed out`, before a process
+or targetable PhotoForge window was available. No CLI/UI-automation bypass was
+used. Installation plus cleanup is not presented as a full lifecycle pass.
+
+MSI: the final database reports ProductVersion 0.10.0, ALLUSERS=1 and ProductCode
+`{88212484-A6DC-4544-AA96-F3216FBA2327}`; generated WiX uses perMachine scope.
+Sandboxed administrative extraction first returned 1603 with installer service
+errors 2502/2503. Repeating the same extraction under the normal Windows account
+succeeded, exit 0. This is **not an installed all-users lifecycle**.
+The image contains photoforge.exe (18,346,496 bytes, SHA-256
+`b7f0a67b6631ce428a282195aa29a679783eefa7bbec6ea64e27e256d56adac0`),
+the notice, and Tauri's generated PhotoForge Rust library photoforge_lib.dll
+(137,216 bytes, SHA-256
+`946d0e08a1158e1edee675208b155323bd424fa2d1de6ff5d48e580027fc58a2`).
+Both PE files are NotSigned. The DLL is the project's own generated library,
+not a separately introduced CMS backend. No third-party CMS DLL is required.
+
+## Still incomplete / unverified
+
+- Actual packaged real-DNG edit/save/reopen/PNG16 workflow and packaged
+  greater-than-8-bit proof: blocked by the Computer Use app-approval timeout.
+  Mock IPC, source inspection and artifacts are not substitutes for this.
+- Native Windows 100%/125%/150%/200% DPI matrix: not performed. Browser zoom was
+  not used as a substitute, and system scaling was not changed.
+- NSIS launch/basic-operation portion and elevated MSI install/launch/uninstall:
+  unverified. No legitimate UAC consent was obtained for an all-users install
+  in this run; no UAC bypass or elevated-install success is claimed.
+- Production Authenticode signing: unavailable; all shipped PE/installers are unsigned.
+- Final-binary runtime-network observation: not performed because launch was
+  not authorized through Computer Use. Existing network-boundary tests pass;
+  no zero-socket claim is made for PhotoForge or its WebView2 process tree.
+- Arbitrary ICC profiles are not exhaustively validated; controlled RGB profiles
+  and malformed-profile cases are tested. No complete OS/monitor color control.
+- Tiled DNG/monochrome LinearRaw are synthetic tests only. Other RAW formats,
+  three-channel LinearRaw, additional DNG codecs/predictors and general TIFF
+  import are unsupported. Unprofiled RAW is not calibrated camera color.
+- Large independent-source stacks and 61 MP full-source Undo/re-development can
+  exceed the 1 GiB store budget. Low-RAM active-session overlap is not certified;
+  per-job estimates are not an OS process-memory cap. RAW decode cancellation
+  waits until existing decode/development stages return.
+- CPU float rendering is slower than legacy; full-frame filter/compositor
+  intermediates remain. Cross-CPU/toolchain bitwise determinism is not promised.
+- Remote CI is not claimed; no CI workflow is configured in this checkout.
+
+## Deferred to Phase 11+
+
+Complete tiled/out-of-core rendering, halo scheduling and disk-backed caches;
+arbitrary output ICC, calibrated monitor/proof workflows, CMYK and HDR display;
+additional RAW libraries only after distribution and fixture decisions; GPU,
+PSD, text/vector layers, semantic/neural/generative editing, cloud services,
+accounts, collaboration, scripting/plugins and video. None was added to Phase 10.

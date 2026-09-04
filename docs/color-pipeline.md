@@ -85,6 +85,12 @@ complete display chain. No printer soft proofing, CMYK editing, arbitrary
 user-selected output ICC, HDR display pipeline or general TIFF import is
 implemented. TIFF is parsed only inside the supported DNG subset.
 
+A DNG without a supported camera matrix is uncalibrated camera RGB assigned to
+the working interpretation, not a verified camera-to-sRGB conversion. The RAW
+command reports colorManaged=false. Monochrome LinearRaw uses neutral white
+balance. Broad real-camera color accuracy beyond the tested Canon fixture is
+not certified; a supported file format does not guarantee a calibrated source.
+
 The standalone compatibility command export_raw_layer_png16 still exists,
 but document export uses the actual layered compositor. Reopening a project
 restores its exact typed developed buffers; RAW source hashes/parameters are
