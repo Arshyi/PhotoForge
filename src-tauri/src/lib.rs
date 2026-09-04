@@ -12,6 +12,9 @@ pub mod error;
 pub mod gpu;
 mod image_processing;
 pub use image_processing::high_precision;
+/// Fixtures and metrics are public so benchmarks and integration tests can
+/// score restoration against known-clean images rather than against opinion.
+pub use image_processing::{fixtures, metrics};
 pub mod infrastructure;
 pub mod layers;
 pub mod mask;
