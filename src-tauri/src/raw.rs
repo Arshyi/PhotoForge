@@ -7,6 +7,12 @@
 //! future decoder can implement the same bounded metadata contract without
 //! changing the project/layer model.
 
+pub mod demosaic;
+pub mod develop;
+pub mod dng;
+pub mod ljpeg;
+pub mod tiff;
+
 use crate::color::DevelopmentParameters;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -279,6 +285,11 @@ pub enum RawError {
     Malformed(String),
     #[error("RAW metadata is invalid: {0}")]
     InvalidMetadata(String),
+    /// The file was read successfully but describes something this build does
+    /// not implement. Kept separate from `Malformed` so the interface can say
+    /// "PhotoForge cannot develop this yet" rather than "your file is broken".
+    #[error("this RAW file is not supported: {0}")]
+    Unsupported(String),
 }
 
 impl From<io::Error> for RawError {
