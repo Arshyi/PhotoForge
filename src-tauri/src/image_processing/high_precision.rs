@@ -461,28 +461,31 @@ fn gaussian(
     for weight in &mut kernel {
         *weight /= sum;
     }
+    let (width, height) = (image.width(), image.height());
     let mut current = image.clone();
     for horizontal in [true, false] {
-        let mut out = FloatImage::blank(image.width(), image.height(), FloatRgba::TRANSPARENT)?;
-        for y in 0..image.height() {
-            check_cancel(cancel)?;
-            for x in 0..image.width() {
+        let mut out = FloatImage::blank(width, height, FloatRgba::TRANSPARENT)?;
+        // Every output row reads only the previous pass, so rows can be split
+        // across workers without changing a single sum: the arithmetic each
+        // pixel performs is identical whichever thread performs it.
+        let source = &current;
+        rows_in_parallel(&mut out, width, height, cancel, |y, row| {
+            for (x, pixel) in row.iter_mut().enumerate() {
                 let mut sums = [0.0_f32; 4];
                 for (k, w) in kernel.iter().enumerate() {
                     let offset = k as i64 - radius;
-                    let sx = (i64::from(x) + if horizontal { offset } else { 0 })
-                        .clamp(0, i64::from(image.width()) - 1) as u32;
+                    let sx = (x as i64 + if horizontal { offset } else { 0 })
+                        .clamp(0, i64::from(width) - 1) as u32;
                     let sy = (i64::from(y) + if horizontal { 0 } else { offset })
-                        .clamp(0, i64::from(image.height()) - 1)
-                        as u32;
-                    let p = current.get(sx, sy).unwrap();
+                        .clamp(0, i64::from(height) - 1) as u32;
+                    let p = source.get(sx, sy).unwrap();
                     let weight = w * p.alpha;
                     sums[0] += p.red * weight;
                     sums[1] += p.green * weight;
                     sums[2] += p.blue * weight;
                     sums[3] += weight;
                 }
-                out.pixels_mut()[(y * image.width() + x) as usize] = if sums[3] > 0.0 {
+                *pixel = if sums[3] > 0.0 {
                     FloatRgba::new(
                         sums[0] / sums[3],
                         sums[1] / sums[3],
@@ -493,10 +496,59 @@ fn gaussian(
                     FloatRgba::TRANSPARENT
                 };
             }
-        }
+            Ok(())
+        })?;
         current = out;
     }
     Ok(current)
+}
+
+/// Fills `out` row by row across a bounded worker pool.
+///
+/// Each worker owns a contiguous band of rows and no two ever write the same
+/// pixel, so the result does not depend on how the work was divided. Threads
+/// are capped and suppressed entirely when this is already running inside an
+/// outer parallel render, for the same reason as `mapped`.
+fn rows_in_parallel(
+    out: &mut FloatImage,
+    width: u32,
+    height: u32,
+    cancel: Option<&AtomicBool>,
+    row: impl Fn(u32, &mut [FloatRgba]) -> Result<(), AppError> + Sync,
+) -> Result<(), AppError> {
+    let pixels = (width as usize) * (height as usize);
+    let workers = if nested() || pixels < 262_144 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(8)
+    };
+    let rows_per_worker = (height as usize).div_ceil(workers.max(1));
+    let width = width as usize;
+    std::thread::scope(|scope| -> Result<(), AppError> {
+        let mut jobs = Vec::with_capacity(workers);
+        for (index, band) in out
+            .pixels_mut()
+            .chunks_mut(width * rows_per_worker)
+            .enumerate()
+        {
+            let row = &row;
+            jobs.push(scope.spawn(move || -> Result<(), AppError> {
+                let first = (index * rows_per_worker) as u32;
+                for (offset, line) in band.chunks_mut(width).enumerate() {
+                    check_cancel(cancel)?;
+                    row(first + offset as u32, line)?;
+                }
+                Ok(())
+            }));
+        }
+        for job in jobs {
+            job.join()
+                .map_err(|_| AppError::ProcessingFailure("a blur worker stopped".into()))??;
+        }
+        Ok(())
+    })
 }
 
 fn sharpen(
