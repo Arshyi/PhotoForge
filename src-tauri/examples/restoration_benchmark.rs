@@ -40,6 +40,10 @@ fn score(case: &Case) -> serde_json::Value {
         "flatNoiseAfter": round(metrics::flat_area_noise(&case.clean, &restored)),
         "edgesBefore": round(metrics::edge_retention(&case.clean, &case.degraded)),
         "edgesAfter": round(metrics::edge_retention(&case.clean, &restored)),
+        // The 8-pixel grid, which PSNR barely notices.
+        "gridBefore": round(metrics::blocking_energy(&case.degraded)),
+        "gridAfter": round(metrics::blocking_energy(&restored)),
+        "gridClean": round(metrics::blocking_energy(&case.clean)),
     })
 }
 

@@ -269,6 +269,9 @@ pub fn behavior(operation: &EditOperation, _scale: f64) -> TileBehavior {
     let radius: u64 = match operation {
         EditOperation::Masked { operation, .. } => return behavior(operation, _scale),
         // Origin-anchored, therefore not reproducible on a sub-rectangle.
+        // Still global, and for the same reason as before: the 8-pixel grid is
+        // anchored to the image origin, so a tile that does not start on a
+        // multiple of eight would filter the wrong columns.
         EditOperation::Deblock { .. } => return TileBehavior::Global,
         EditOperation::GaussianBlur { radius } => from_sigma(*radius),
         // `sharpen` blurs with a fixed sigma of 1.2 before subtracting.

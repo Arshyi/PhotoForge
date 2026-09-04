@@ -188,6 +188,56 @@ pub fn flat_area_noise(reference: &FloatImage, actual: &FloatImage) -> f64 {
     }
 }
 
+/// How much stronger the gradients on an 8-pixel grid are than elsewhere.
+///
+/// PSNR is a poor judge of blocking. A block artifact is mostly a small DC
+/// offset between neighbouring blocks, which costs little error but is glaringly
+/// visible because the eye finds the straight discontinuity. This measures the
+/// thing that is actually wrong: the mean absolute step across boundaries that
+/// lie on the 8-pixel grid, divided by the mean step everywhere else.
+///
+/// One means the grid is indistinguishable from the rest of the image, which is
+/// what a de-blocker should be aiming at. Above one means the grid is visible.
+/// Well below one would mean the filter has smoothed the grid into the picture,
+/// which is its own kind of damage.
+pub fn blocking_energy(image: &FloatImage) -> f64 {
+    let (width, height) = image.dimensions();
+    if width < 24 || height < 24 {
+        return f64::NAN;
+    }
+    let luma = |x: u32, y: u32| f64::from(image.get(x, y).map_or(0.0, FloatRgba::luminance));
+    let (mut on_grid, mut on_grid_count) = (0.0f64, 0u64);
+    let (mut off_grid, mut off_grid_count) = (0.0f64, 0u64);
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let step = (luma(x, y) - luma(x - 1, y)).abs();
+            if x.is_multiple_of(8) {
+                on_grid += step;
+                on_grid_count += 1;
+            } else {
+                off_grid += step;
+                off_grid_count += 1;
+            }
+            let step = (luma(x, y) - luma(x, y - 1)).abs();
+            if y.is_multiple_of(8) {
+                on_grid += step;
+                on_grid_count += 1;
+            } else {
+                off_grid += step;
+                off_grid_count += 1;
+            }
+        }
+    }
+    if on_grid_count == 0 || off_grid_count == 0 {
+        return f64::NAN;
+    }
+    let off = off_grid / off_grid_count as f64;
+    if off <= 0.0 {
+        return f64::NAN;
+    }
+    (on_grid / on_grid_count as f64) / off
+}
+
 /// A small deterministic generator, so every fixture is reproducible from a
 /// seed and a failure can be re-created exactly.
 pub struct Noise(u64);
@@ -318,6 +368,20 @@ mod tests {
         assert!(
             (0.02..0.09).contains(&measured),
             "injected sigma 0.05 measured as {measured}"
+        );
+    }
+
+    /// The blocking metric must see a grid that is there and not one that is
+    /// not, or a de-blocker tuned against it would be tuned against noise.
+    #[test]
+    fn blocking_energy_sees_a_grid_only_when_there_is_one() {
+        let clean = super::super::fixtures::scene(96, 96);
+        let blocked = super::super::fixtures::block_artifacts(&clean, 0.8);
+        let before = blocking_energy(&clean);
+        let after = blocking_energy(&blocked);
+        assert!(
+            after > before * 1.5,
+            "block artifacts moved the grid metric only {before} -> {after}"
         );
     }
 

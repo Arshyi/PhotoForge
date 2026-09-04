@@ -567,3 +567,47 @@ fn a_short_deconvolution_tiles_seamlessly() {
         .fold(0.0f32, f32::max);
     assert!(worst < 1e-5, "the tiled deconvolution seamed by {worst}");
 }
+
+/// De-blocking is judged on the grid it exists to remove, not on PSNR: a block
+/// artifact is a small offset that costs little error and is glaringly visible.
+#[test]
+fn deblocking_removes_the_grid_without_damaging_the_picture() {
+    let clean = fixtures::scene(192, 192);
+    let blocked = fixtures::block_artifacts(&clean, 0.8);
+    let restored = apply(&blocked, &EditOperation::Deblock { strength: 0.8 });
+
+    let clean_grid = metrics::blocking_energy(&clean);
+    let blocked_grid = metrics::blocking_energy(&blocked);
+    let restored_grid = metrics::blocking_energy(&restored);
+    let excess = blocked_grid - clean_grid;
+    assert!(excess > 0.0, "the fixture added no grid energy to remove");
+    let removed = (blocked_grid - restored_grid) / excess;
+    assert!(
+        removed > 0.5,
+        "de-blocking removed only {:.0}% of the added grid energy",
+        removed * 100.0
+    );
+
+    // It must not pay for that by flattening the image. The implementation it
+    // replaced lost 0.84 dB and 5% of the edge energy doing exactly that.
+    assert!(
+        metrics::psnr(&clean, &restored) > metrics::psnr(&clean, &blocked) - 0.2,
+        "de-blocking made the image measurably worse"
+    );
+    assert!(
+        metrics::edge_retention(&clean, &restored) > 0.98,
+        "de-blocking erased edge energy"
+    );
+}
+
+/// A clean image has no grid to remove, so the filter must leave it alone.
+#[test]
+fn deblocking_a_clean_image_barely_changes_it() {
+    let clean = fixtures::scene(192, 192);
+    let processed = apply(&clean, &EditOperation::Deblock { strength: 1.0 });
+    let psnr = metrics::psnr(&clean, &processed);
+    assert!(
+        psnr > 40.0,
+        "de-blocking an unblocked image cost {psnr:.2} dB"
+    );
+}
