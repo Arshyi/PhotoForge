@@ -368,6 +368,10 @@
               </svg>
             </button>
           {/if}
+          <!-- The transform box is supplied by the host so the stage stays
+               unaware of layers; it sits above the mask overlay and below the
+               grid so a composition guide is never hidden by a handle. -->
+          <slot name="overlay" />
           {#if gridOverlay}<div class="editing-grid" aria-label="Composition grid overlay"></div>{/if}
           {#if crosshair}<div class="crosshair" aria-label="Pixel inspector crosshair"><i></i><b></b></div>{/if}
         </div>

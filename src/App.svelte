@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import ImageStage from './lib/components/ImageStage.svelte';
   import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
@@ -10,10 +11,8 @@
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
   import ProfessionalWorkspace from './lib/components/ProfessionalWorkspace.svelte';
-  import RefineSelectionDialog, {
-    REFINE_SELECTION_DEFAULTS,
-    type RefineSelectionParameters
-  } from './lib/components/RefineSelectionDialog.svelte';
+  import RefineSelectionDialog from './lib/components/RefineSelectionDialog.svelte';
+  import { REFINE_SELECTION_DEFAULTS, type RefineSelectionParameters } from './lib/components/refineSelectionDefaults';
   import SelectionWorkspace from './lib/components/SelectionWorkspace.svelte';
   import RestorationPanel from './lib/components/RestorationPanel.svelte';
   import SliderControl from './lib/components/SliderControl.svelte';
@@ -23,11 +22,15 @@
   import { EditHistory } from './lib/stores/history';
   import {
     retainedHistorySuffix,
+    historyEventStacks,
+    historyEventForChanges,
     selectionPanelHistoryAvailability,
     type HistoryEvent
   } from './lib/stores/historyTimeline';
   import type {
     EditOperation,
+    EditPlan,
+    Workflow,
     AnalysisResult,
     ExportResult,
     GuidedSettings,
@@ -57,7 +60,7 @@
     replaceOperation,
     valueFor
   } from './lib/utils/operations';
-  import { loadShortcuts, normalizeShortcut } from './lib/utils/workspace';
+  import { loadShortcuts } from './lib/utils/workspace';
   import {
     cancelMaskOperation,
     colorRangeSelection,
@@ -78,6 +81,7 @@
   import { MaskProgressTracker, type MaskProgressView } from './lib/selections/progress';
   import {
     extractGeometryOperations,
+    computeStageDimensions,
     geometryFingerprint,
     geometryOperationsToEditOperations
   } from './lib/selections/geometry';
@@ -133,8 +137,22 @@
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
   import LayersPanel from './lib/components/LayersPanel.svelte';
+  import TransformOverlay from './lib/components/TransformOverlay.svelte';
+  import TransformPanel from './lib/components/TransformPanel.svelte';
+  import {
+    flipTransform,
+    nudgeTransform,
+    resetTransform,
+    sanitizeTransform,
+    NUDGE_STEP,
+    NUDGE_STEP_LARGE
+  } from './lib/layers/transformTool';
+  import { resolveShortcut, type ShortcutIntent } from './lib/utils/shortcuts';
   import AdjustmentLayerDialog from './lib/components/AdjustmentLayerDialog.svelte';
   import { LayerHistory } from './lib/layers/history';
+  import { executeLayerWorkflow } from './lib/layers/workflowExecution';
+  import { mergeSafetyProblem } from './lib/layers/mergeSafety';
+  import type { LayerWorkflowStep } from './lib/layers/workflow';
   import { ThumbnailCache, thumbnailKey } from './lib/layers/thumbnails';
   import { adjustmentDefinitions, definitionFor } from './lib/layers/adjustments';
   import {
@@ -177,6 +195,7 @@
     renderLayerComposite,
     renderLayerThumbnail,
     retainLayerPixels,
+    planLayerWorkflowSteps,
     saveLayerProject,
     selectionFromLayerMask
   } from './lib/layers/commands';
@@ -186,7 +205,8 @@
     EditTarget,
     Layer,
     LayerDocument,
-    LayerPanelAction
+    LayerPanelAction,
+    LayerTransform
   } from './lib/layers/types';
 
   const history = new EditHistory();
@@ -279,17 +299,53 @@
   let recoveryBusy = false;
   /** Layers selected alongside the active one, for grouping several at once. */
   let selectedLayerIds: string[] = [];
+  /** Whether the on-canvas transform box is showing. */
+  let transformActive = false;
+  let transformAspectLocked = true;
+  /**
+   * The transform a drag is currently proposing.
+   *
+   * Pointer moves only update this, so the canvas follows the drag while the
+   * undo stack stays untouched; the gesture is committed once on release.
+   */
+  let transformPreview: { layerId: string; transform: LayerTransform } | null = null;
+  /**
+   * Bumped by every committed layer change, so an asynchronous layer command
+   * can tell that the document moved on beneath it and refuse to apply a result
+   * computed against a document that no longer exists.
+   */
+  let layerRevision = 0;
+  let originalPixelId: string | null = null;
+  let recoveryPaths = new Set<string>();
 
   $: comparisonUsesSplitView = comparison && (comparisonMode === 'split' || valueFor(operations, 'rotate', 0) % 360 !== 0);
   $: selectionCanvasWidth = selectionState.canvasWidth || metadata?.width || 0;
   $: selectionCanvasHeight = selectionState.canvasHeight || metadata?.height || 0;
   $: selectionPanelHistory = selectionPanelHistoryAvailability(historyEvents, redoEvents);
   $: geometryMutationBusy = geometryTransactionRunning || Boolean(pendingGeometryCommit);
+  $: fileMutationBusy = opening || exporting || layerBusy || recoveryBusy;
   // A document that is still one plain full-canvas layer keeps using the
   // original render and export path, so ordinary photo editing behaves exactly
   // as it did before layers existed.
-  $: layeredDocument = Boolean(layerDocument) && !isSimpleDocument(layerDocument as LayerDocument);
   $: selectedLayer = layerDocument ? activeLayerOf(layerDocument) : null;
+  // Only unlocked pixel layers can be transformed: a group owns no pixels and an
+  // adjustment layer already covers the whole canvas.
+  $: transformableLayer =
+    selectedLayer && selectedLayer.content.type === 'pixel' && !selectedLayer.locked
+      ? selectedLayer
+      : null;
+  // The box follows a drag from the preview; everything else reads the committed
+  // transform, so a cancelled gesture leaves nothing behind.
+  $: displayedTransform =
+    transformPreview && transformableLayer && transformPreview.layerId === transformableLayer.id
+      ? transformPreview.transform
+      : (transformableLayer?.transform ?? null);
+  // Closing the box whenever its layer stops being transformable keeps handles
+  // from lingering over a group, a locked layer, or a closed document.
+  $: if (transformActive && !transformableLayer) {
+    transformActive = false;
+    transformPreview = null;
+  }
   $: hasActiveSelection = Boolean(selectionState.activeMask);
   $: documentTitle = projectPath
     ? projectPath.split(/[\\/]/).pop() ?? 'Project'
@@ -302,7 +358,22 @@
     startRecoveryTimer();
     exportProfile = (localStorage.getItem('photoforge.lastExportProfile') as ExportProfile | null) ?? 'lossless';
     let unlisten: (() => void) | undefined;
-    const persistBeforeClose = () => persistSelectionState();
+    let unlistenClose: (() => void) | undefined;
+    const persistBeforeClose = (event: BeforeUnloadEvent) => {
+      persistSelectionState();
+      if (projectDirty || layerBusy || recoveryBusy || exporting) {
+        event.preventDefault();
+        event.returnValue = '';
+      }
+    };
+    getCurrentWindow().onCloseRequested((event) => {
+      if (layerBusy || recoveryBusy || exporting || opening) {
+        event.preventDefault();
+        notify('Wait for the current file or layer operation before closing.', 'error');
+      } else if (!confirmDiscardChanges()) {
+        event.preventDefault();
+      }
+    }).then((cleanup) => (unlistenClose = cleanup)).catch(() => undefined);
     getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === 'drop' && event.payload.paths[0]) {
@@ -313,132 +384,38 @@
       .catch(() => undefined);
 
     const handleKeys = (event: KeyboardEvent) => {
-      if (refineOriginalMask) return;
-      if (event.key === 'Escape' && settingsOpen) {
-        event.preventDefault();
-        closeSettings();
-        return;
-      }
-      const target = event.target as HTMLElement | null;
-      const textFocused = Boolean(
-        target?.matches('input, textarea, select, [contenteditable="true"]')
+      const intent = resolveShortcut(
+        {
+          key: event.key,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          target: event.target
+        },
+        {
+          hasImage: Boolean(metadata),
+          hasLayers: Boolean(layerDocument),
+          hasActiveLayer: Boolean(layerDocument?.activeLayerId),
+          transformActive,
+          selectionBusy,
+          selectionTool: selectionState.tool,
+          settingsOpen,
+          // The Refine Selection dialog owns the keyboard while it is open.
+          modalOpen: Boolean(refineOriginalMask),
+          bindings: shortcuts
+        }
       );
-      if (!textFocused && metadata) {
-        const command = event.ctrlKey || event.metaKey;
-        const key = event.key.toLowerCase();
-        // Layer shortcuts. These use combinations Phase 1-7.1 left unassigned;
-        // Ctrl+Z/Y, Ctrl+O/S, and the single-letter tool keys are untouched.
-        if (layerDocument && command && event.shiftKey && key === 'n') {
-          event.preventDefault();
-          void createLayer('pixel');
-          return;
-        }
-        if (layerDocument && command && !event.shiftKey && key === 'j') {
-          event.preventDefault();
-          void handleLayerAction('duplicate');
-          return;
-        }
-        if (layerDocument && command && !event.shiftKey && key === 'g') {
-          event.preventDefault();
-          void handleLayerAction('group');
-          return;
-        }
-        if (layerDocument && command && event.shiftKey && key === 'g') {
-          event.preventDefault();
-          void handleLayerAction('ungroup');
-          return;
-        }
-        if (
-          layerDocument &&
-          !command &&
-          !event.altKey &&
-          event.key === 'Delete' &&
-          layerDocument.activeLayerId
-        ) {
-          event.preventDefault();
-          void handleLayerAction('delete');
-          return;
-        }
-        if (command && key === 'a') {
-          event.preventDefault();
-          void applyMaskOperation({ type: 'select_all' });
-          return;
-        }
-        if (command && !event.shiftKey && key === 'd') {
-          event.preventDefault();
-          void applyMaskOperation({ type: 'deselect' });
-          return;
-        }
-        if (command && event.shiftKey && key === 'i') {
-          event.preventDefault();
-          void applyMaskOperation({ type: 'invert' });
-          return;
-        }
-        if (!command && !event.altKey && key === 'q') {
-          event.preventDefault();
-          commitSelectionState({
-            ...selectionState,
-            overlay: { ...selectionState.overlay, visible: !selectionState.overlay.visible }
-          });
-          return;
-        }
-        if (!command && !event.altKey && key === 'm') {
-          event.preventDefault();
-          setSelectionTool(selectionState.tool === 'rectangle' ? 'ellipse' : 'rectangle');
-          return;
-        }
-        if (!command && !event.altKey && key === 'l') {
-          event.preventDefault();
-          setSelectionTool(selectionState.tool === 'freehand' ? 'polygon' : 'freehand');
-          return;
-        }
-        const toolShortcuts: Partial<Record<string, SelectionTool>> = {
-          w: 'magic_wand',
-          c: 'color_range',
-          b: 'brush',
-          e: 'eraser'
-        };
-        if (!command && !event.altKey && toolShortcuts[key]) {
-          event.preventDefault();
-          setSelectionTool(toolShortcuts[key] as SelectionTool);
-          return;
-        }
-        if (event.key === 'Escape' && selectionBusy) {
-          event.preventDefault();
-          void cancelCurrentMaskOperation();
-          return;
-        }
-      }
-      const action = shortcutAction(event);
-      if (action === 'Open image') {
-        event.preventDefault();
-        void chooseImage();
-      } else if (action === 'Export image') {
-        event.preventDefault();
-        void exportImage();
-      } else if (action === 'Undo') {
-        event.preventDefault();
-        undo();
-      } else if (action === 'Redo') {
-        event.preventDefault();
-        redo();
-      } else if (action === 'Compare') {
-        event.preventDefault(); comparison = !comparison;
-      } else if (action === 'Zoom in') {
-        event.preventDefault(); zoom = Math.min(1600, zoom + (zoom >= 400 ? 100 : 25));
-      } else if (action === 'Zoom out') {
-        event.preventDefault(); zoom = Math.max(25, zoom - (zoom > 400 ? 100 : 25));
-      } else if (action === 'Pixel inspector') {
-        event.preventDefault(); crosshair = !crosshair;
-      } else if (action === 'Crop' || action === 'Straighten') {
-        event.preventDefault(); gridOverlay = true;
-      }
+      if (!intent) return;
+      event.preventDefault();
+      runShortcut(intent);
     };
     window.addEventListener('keydown', handleKeys);
     window.addEventListener('beforeunload', persistBeforeClose);
 
     return () => {
       unlisten?.();
+      unlistenClose?.();
       window.removeEventListener('keydown', handleKeys);
       window.removeEventListener('beforeunload', persistBeforeClose);
       if (renderTimer) clearTimeout(renderTimer);
@@ -453,15 +430,83 @@
     };
   });
 
-  function shortcutAction(event: KeyboardEvent): string | undefined {
-    const parts: string[] = [];
-    if (event.ctrlKey || event.metaKey) parts.push('ctrl');
-    if (event.altKey) parts.push('alt');
-    if (event.shiftKey) parts.push('shift');
-    const key = event.key === ' ' ? 'space' : event.key.toLowerCase();
-    if (!['control', 'meta', 'alt', 'shift'].includes(key)) parts.push(key);
-    const normalized = normalizeShortcut(parts.join('+'));
-    return shortcuts.find((binding) => normalizeShortcut(binding.keys) === normalized)?.action;
+  /**
+   * Carries out one resolved shortcut.
+   *
+   * Split out from the listener so the decision (which key means what, and when
+   * a key belongs to a text field instead) is testable on its own in
+   * `utils/shortcuts`, and this function only has to do as it is told.
+   */
+  function runShortcut(intent: ShortcutIntent) {
+    switch (intent.type) {
+      case 'close_settings':
+        closeSettings();
+        return;
+      case 'layer':
+        if (intent.action === 'new') void createLayer('pixel');
+        else void handleLayerAction(intent.action);
+        return;
+      case 'transform':
+        if (intent.action === 'toggle') toggleTransformMode();
+        else if (intent.action === 'reset') void handleLayerAction('reset_transform');
+        else void handleLayerAction(intent.action);
+        return;
+      case 'transform_nudge': {
+        const step = intent.large ? NUDGE_STEP_LARGE : NUDGE_STEP;
+        const deltas = {
+          left: [-step, 0],
+          right: [step, 0],
+          up: [0, -step],
+          down: [0, step]
+        } as const;
+        const [dx, dy] = deltas[intent.direction];
+        nudgeActiveLayer(dx, dy);
+        return;
+      }
+      case 'transform_cancel':
+        cancelTransformGesture();
+        transformActive = false;
+        return;
+      case 'transform_commit':
+        transformActive = false;
+        return;
+      case 'mask':
+        void applyMaskOperation(
+          intent.action === 'select_all'
+            ? { type: 'select_all' }
+            : intent.action === 'deselect'
+              ? { type: 'deselect' }
+              : { type: 'invert' }
+        );
+        return;
+      case 'overlay_visibility':
+        commitSelectionState({
+          ...selectionState,
+          overlay: { ...selectionState.overlay, visible: !selectionState.overlay.visible }
+        });
+        return;
+      case 'tool':
+        setSelectionTool(intent.tool);
+        return;
+      case 'cancel_mask_operation':
+        void cancelCurrentMaskOperation();
+        return;
+      case 'binding':
+        runBinding(intent.action);
+        return;
+    }
+  }
+
+  function runBinding(action: string) {
+    if (action === 'Open image') void chooseImage();
+    else if (action === 'Export image') void exportImage();
+    else if (action === 'Undo') undo();
+    else if (action === 'Redo') redo();
+    else if (action === 'Compare') comparison = !comparison;
+    else if (action === 'Zoom in') zoom = Math.min(1600, zoom + (zoom >= 400 ? 100 : 25));
+    else if (action === 'Zoom out') zoom = Math.max(25, zoom - (zoom > 400 ? 100 : 25));
+    else if (action === 'Pixel inspector') crosshair = !crosshair;
+    else if (action === 'Crop' || action === 'Straighten') gridOverlay = true;
   }
 
   function notify(message: string, kind: 'error' | 'success' = 'success') {
@@ -472,7 +517,10 @@
   }
 
   async function chooseImage() {
-    if (opening || exporting) return;
+    if (!allowWorkspaceMutation()) return;
+    cancelTransformGesture();
+    let chosen: string | null = null;
+    opening = true;
     try {
       const path = await open({
         multiple: false,
@@ -480,17 +528,18 @@
         title: 'Open a photo',
         filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
       });
-      if (typeof path === 'string') await loadPath(path);
+      if (typeof path === 'string') chosen = path;
     } catch (error) {
       notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
     }
+    if (chosen) await loadPath(chosen);
   }
 
   async function loadPath(path: string) {
-    if (exporting) {
-      notify('Wait for the current export to finish before opening another image.', 'error');
-      return;
-    }
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
     persistSelectionState();
     closeRefineState();
     invalidateGeometryCommits();
@@ -518,6 +567,7 @@
       documentId = result.documentId;
       analysis = null;
       originalUrl = result.originalPreviewDataUrl;
+      originalPixelId = result.backgroundPixelId;
       previewUrl = result.previewDataUrl;
       processingTime = result.processingTimeMs;
       zoom = 100;
@@ -583,16 +633,20 @@
 
   async function requestAnalysis(ownDocument: number) {
     const ownRequest = ++analysisRequestId;
+    const ownRevision = layerRevision;
     analyzing = true;
     try {
       const result = await invoke<AnalysisResult>('analyze_image', {
         documentId: ownDocument,
+        layerDocument,
+        operations: cloneOperations(operations),
         requestId: ownRequest
       });
       if (
         result.isCurrent &&
         result.requestId === analysisRequestId &&
         result.documentId === documentId &&
+        ownRevision === layerRevision &&
         result.analysis
       ) {
         analysis = result.analysis;
@@ -608,15 +662,17 @@
 
   function schedulePreview() {
     if (!metadata) return;
+    analysis = null;
     requestId += 1;
     previewCurrent = false;
     previewQueued = true;
     if (renderTimer) clearTimeout(renderTimer);
-    if (operations.length === 0) {
+    if (operations.length === 0 && !compositeDocument()) {
       previewQueued = false;
       previewUrl = originalUrl;
       processingTime = 0;
       previewCurrent = true;
+      void requestAnalysis(documentId);
       return;
     }
     renderTimer = setTimeout(() => void drainPreviewQueue(), 120);
@@ -631,7 +687,7 @@
         const ownRequest = requestId;
         const ownDocument = documentId;
         const pipeline = cloneOperations(operations);
-        const composite = layerDocument && layeredDocument ? layerDocument : null;
+        const composite = compositeDocument();
         processing = true;
         try {
           // A layered document renders through the compositor; a plain
@@ -651,6 +707,7 @@
             previewUrl = result.previewDataUrl;
             processingTime = result.processingTimeMs;
             previewCurrent = true;
+            if (!transformPreview) void requestAnalysis(ownDocument);
           }
         } catch (error) {
           if (ownRequest === requestId && ownDocument === documentId) {
@@ -955,6 +1012,10 @@
   }
 
   function recordHistoryMutation(kind: HistoryEvent, createdEntry: boolean) {
+    if (kind !== 'selection') {
+      layerRevision += 1;
+      projectDirty = Boolean(layerDocument);
+    }
     if (createdEntry) historyEvents = [...historyEvents, kind];
     redoEvents = [];
     history.clearRedo();
@@ -985,6 +1046,10 @@
   }
 
   function allowWorkspaceMutation(allowGeometryCoalescing = false): boolean {
+    if (opening || exporting || layerBusy || recoveryBusy) {
+      notify('Wait for the current file or layer operation to finish.', 'error');
+      return false;
+    }
     const selectionBlocks = selectionBusy && !allowGeometryCoalescing;
     const geometryBlocks = (geometryTransactionRunning || Boolean(pendingGeometryCommit)) &&
       !allowGeometryCoalescing;
@@ -1006,6 +1071,10 @@
 
   /** Binds the session to a new layer document and clears layer-side caches. */
   function startLayerDocument(next: LayerDocument, path: string | null, createdAt = timestamp()) {
+    layerRevision += 1;
+    recoveryPaths = new Set();
+    transformPreview = null;
+    transformActive = false;
     layerDocument = layerHistory.replace(next, 'Open');
     thumbnailCache.clear();
     layerThumbnails = {};
@@ -1051,7 +1120,7 @@
    */
   async function releaseUnreferencedPixels() {
     try {
-      await retainLayerPixels(layerHistory.reachablePixelIds());
+      await retainLayerPixels(layerHistory.reachablePixelIds(), documentId);
     } catch {
       // Reclaiming memory is best effort; a failure never blocks editing.
     }
@@ -1097,11 +1166,26 @@
   }
 
   function requireLayerDocument(): LayerDocument | null {
+    if (!allowWorkspaceMutation()) return null;
     if (!layerDocument) {
       notify('Open an image before editing layers.', 'error');
       return null;
     }
     return layerDocument;
+  }
+
+  // A replacement pixel buffer (flatten, rasterize, direct edit or project
+  // load) is not the image session's original even when its tree is simple.
+  function compositeDocument(): LayerDocument | null {
+    if (!layerDocument) return null;
+    const document = transformPreview
+      ? updateLayer(layerDocument, transformPreview.layerId, (layer) => ({
+          ...layer, transform: transformPreview!.transform
+        }))
+      : layerDocument;
+    const first = document.layers[0];
+    return isSimpleDocument(document) && first?.content.type === 'pixel' &&
+      first.content.pixelId === originalPixelId ? null : document;
   }
 
   function selectLayer(id: string, additive = false) {
@@ -1282,20 +1366,22 @@
         commitLayers(
           updateLayer(document, layerId as string, (entry) => ({
             ...entry,
-            transform: {
-              translateX: 0,
-              translateY: 0,
-              scaleX: 1,
-              scaleY: 1,
-              rotationDegrees: 0,
-              flipHorizontal: false,
-              flipVertical: false
-            }
+            transform: resetTransform(entry.transform.interpolation)
           })),
           'Reset transform'
         );
         return;
       }
+      case 'flip_horizontal':
+      case 'flip_vertical':
+        flipActiveLayer(
+          action === 'flip_horizontal' ? 'horizontal' : 'vertical',
+          layerId as string
+        );
+        return;
+      case 'transform_mode':
+        toggleTransformMode();
+        return;
       case 'toggle_pass_through': {
         if (layer?.content.type !== 'group') return;
         const nextIsolated = !layer.content.isolated;
@@ -1331,7 +1417,8 @@
     layerId: string
   ) {
     const layer = findLayer(document, layerId);
-    if (!layer) return;
+    if (!layer || !allowWorkspaceMutation()) return;
+    layerBusy = true;
     try {
       switch (action) {
         case 'mask_white':
@@ -1355,7 +1442,7 @@
           const created = await layerMaskFromSelection(
             document,
             layerId,
-            selectionState.activeMask
+            (await stageWorkflowGeometry([], operations, selectionState)).selection.activeMask!
           );
           commitLayers(
             updateLayer(document, layerId, (entry) => ({
@@ -1369,14 +1456,18 @@
         }
         case 'mask_load_selection': {
           const loaded = await selectionFromLayerMask(document, layerId);
-          const diagnostics = await inspectSelectionMask(loaded.snapshot).catch(() => null);
+          const mapped = await stageWorkflowGeometry(operations, [], {
+            ...createSelectionState('', document.canvasWidth, document.canvasHeight), activeMask: loaded.snapshot
+          });
+          const snapshot = mapped.selection.activeMask!;
+          const diagnostics = await inspectSelectionMask(snapshot).catch(() => null);
           commitSelectionState({
             ...selectionState,
-            activeMask: loaded.snapshot,
+            activeMask: snapshot,
             activeDiagnostics: diagnostics,
-            canvasWidth: loaded.width,
-            canvasHeight: loaded.height
-          });
+            canvasWidth: snapshot.width,
+            canvasHeight: snapshot.height
+          }, undefined, true);
           notify('The layer mask is now the active selection.');
           return;
         }
@@ -1422,15 +1513,7 @@
             updateLayer(document, layerId, (entry) => ({
               ...entry,
               mask: null,
-              transform: {
-                translateX: 0,
-                translateY: 0,
-                scaleX: 1,
-                scaleY: 1,
-                rotationDegrees: 0,
-                flipHorizontal: false,
-                flipVertical: false
-              },
+              transform: resetTransform(entry.transform.interpolation),
               content: {
                 type: 'pixel',
                 pixelId: baked.pixelId,
@@ -1453,6 +1536,92 @@
     }
   }
 
+  /**
+   * The pixel layer the transform box acts on, or null when the selection
+   * cannot be transformed.
+   *
+   * Groups and adjustment layers are excluded: a group has no pixels of its
+   * own, and an adjustment layer covers the whole canvas by definition.
+   */
+  function transformTarget(): Layer | null {
+    const layer = selectedLayer;
+    if (!layer || layer.content.type !== 'pixel' || layer.locked) return null;
+    return layer;
+  }
+
+  function toggleTransformMode() {
+    if (!allowWorkspaceMutation()) return;
+    if (extractGeometryOperations(operations).length) {
+      notify('Reset document geometry before using the on-canvas layer transform handles.', 'error');
+      return;
+    }
+    if (!transformActive && !transformTarget()) {
+      notify('Select an unlocked pixel layer to transform it.', 'error');
+      return;
+    }
+    cancelTransformGesture();
+    transformActive = !transformActive;
+  }
+
+  /** Discards an in-flight drag preview without touching history. */
+  function cancelTransformGesture() {
+    const hadPreview = Boolean(transformPreview);
+    transformPreview = null;
+    if (hadPreview) schedulePreview();
+  }
+
+  /** Follows a drag on the canvas without adding an undo entry. */
+  function previewTransform(layerId: string, transform: LayerTransform) {
+    if (!allowWorkspaceMutation() || layerDocument?.activeLayerId !== layerId) return;
+    transformPreview = { layerId, transform: sanitizeTransform(transform) };
+    schedulePreview();
+  }
+
+  /**
+   * Records a finished transform gesture as one undo step.
+   *
+   * The coalescing key is the layer, so a drag that emits several commits — a
+   * pointer release immediately followed by an arrow-key nudge, say — folds
+   * into one entry, exactly as an opacity drag already does.
+   */
+  function commitTransform(layerId: string, transform: LayerTransform, label: string) {
+    const document = requireLayerDocument();
+    if (!document) return;
+    transformPreview = null;
+    const next = sanitizeTransform(transform);
+    const layer = findLayer(document, layerId);
+    if (!layer) return;
+    if (JSON.stringify(layer.transform) === JSON.stringify(next)) return;
+    commitLayers(
+      updateLayer(document, layerId, (entry) => ({ ...entry, transform: next })),
+      label,
+      `layer-transform:${layerId}`
+    );
+  }
+
+  function nudgeActiveLayer(dx: number, dy: number) {
+    const layer = transformTarget();
+    if (!layer) return;
+    commitTransform(layer.id, nudgeTransform(layer.transform, dx, dy), 'Move layer');
+  }
+
+  function flipActiveLayer(axis: 'horizontal' | 'vertical', layerId: string) {
+    const document = requireLayerDocument();
+    const layer = document ? findLayer(document, layerId) : null;
+    if (!document || !layer) return;
+    if (layer.content.type !== 'pixel') {
+      notify('Only pixel layers can be flipped.', 'error');
+      return;
+    }
+    commitLayers(
+      updateLayer(document, layerId, (entry) => ({
+        ...entry,
+        transform: flipTransform(entry.transform, axis)
+      })),
+      axis === 'horizontal' ? 'Flip layer horizontally' : 'Flip layer vertically'
+    );
+  }
+
   async function mergeDown(document: LayerDocument, layerId: string) {
     const path = pathTo(document, layerId);
     if (!path || path[path.length - 1] === 0) {
@@ -1466,10 +1635,17 @@
     const index = path[path.length - 1];
     const below = siblings[index - 1];
     if (!below) return;
+    const mergeProblem = mergeSafetyProblem(document, [below.id, layerId]);
+    if (mergeProblem) {
+      notify(mergeProblem, 'error');
+      return;
+    }
 
     layerBusy = true;
+    const revision = layerRevision;
     try {
       const merged = await mergeLayerPixels(document, [below.id, layerId]);
+      if (revision !== layerRevision) return;
       const replacement = createPixelLayer(
         below.name,
         merged.pixelId,
@@ -1490,8 +1666,10 @@
   async function flattenDocument(document: LayerDocument) {
     if (document.layers.length === 0) return;
     layerBusy = true;
+    const revision = layerRevision;
     try {
       const flattened = await flattenLayerDocument(document);
+      if (revision !== layerRevision) return;
       const replacement = createPixelLayer(
         'Background',
         flattened.pixelId,
@@ -1511,20 +1689,22 @@
 
   async function rasterizeTransform(document: LayerDocument, layerId: string) {
     layerBusy = true;
+    // A rasterize renders on a worker thread. If the document changed while it
+    // ran, the buffer it produced describes a document that no longer exists,
+    // so applying it would silently undo whatever happened in between.
+    const revision = layerRevision;
     try {
       const baked = await rasterizeLayerTransform(document, layerId);
+      if (revision !== layerRevision) {
+        notify('The document changed while that rasterized, so it was not applied.', 'error');
+        return;
+      }
       commitLayers(
         updateLayer(document, layerId, (entry) => ({
           ...entry,
-          transform: {
-            translateX: 0,
-            translateY: 0,
-            scaleX: 1,
-            scaleY: 1,
-            rotationDegrees: 0,
-            flipHorizontal: false,
-            flipVertical: false
-          },
+          // Bake transform + mask only; retain opacity and blend mode so they
+          // combine with the surrounding stack exactly once.
+          transform: resetTransform(entry.transform.interpolation),
           mask: null,
           content: {
             type: 'pixel',
@@ -1546,6 +1726,7 @@
     layerId: string | null,
     operation: import('./lib/types/editor').BaseEditOperation
   ) {
+    if (!allowWorkspaceMutation()) return;
     adjustmentLayerId = layerId;
     adjustmentMode = layerId ? 'edit' : 'create';
     adjustmentDraft = operation;
@@ -1565,6 +1746,7 @@
     operation: import('./lib/types/editor').BaseEditOperation,
     coalesceKey?: string
   ) {
+    if (!allowWorkspaceMutation()) return;
     adjustmentDraft = operation;
     const document = layerDocument;
     if (!document || !adjustmentLayerId) return;
@@ -1580,6 +1762,7 @@
   }
 
   function confirmAdjustment(operation: import('./lib/types/editor').BaseEditOperation) {
+    if (!allowWorkspaceMutation()) return;
     const document = layerDocument;
     if (!document) {
       closeAdjustmentEditor();
@@ -1606,6 +1789,7 @@
    * `document` preserves the pre-Phase-8 behaviour exactly and stays the default.
    */
   function routeAdjustment(operation: EditOperation, applyToDocument: () => boolean): boolean {
+    if (!allowWorkspaceMutation()) return false;
     if (adjustmentTarget === 'document' || !layerDocument) return applyToDocument();
     const base = operation.type === 'masked' ? operation.operation : operation;
     if (adjustmentTarget === 'adjustmentLayer') {
@@ -1626,6 +1810,7 @@
   async function applyOperationsDestructively(
     operation: import('./lib/types/editor').BaseEditOperation
   ) {
+    if (!allowWorkspaceMutation()) return;
     const document = layerDocument;
     const layerId = document?.activeLayerId;
     if (!document || !layerId) return;
@@ -1658,18 +1843,21 @@
 
   async function saveProject(saveAs: boolean) {
     const document = layerDocument;
-    if (!document) return;
-    let target = projectPath;
-    if (saveAs || !target) {
-      const chosen = await save({
-        defaultPath: `${(metadata?.filename ?? 'project').replace(/\.[^.]+$/, '')}.photoforge`,
-        filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
-      });
-      if (typeof chosen !== 'string') return;
-      target = chosen;
-    }
+    if (!document || !allowWorkspaceMutation()) return;
+    cancelTransformGesture();
+    const ownDocument = documentId;
+    const revision = layerRevision;
     layerBusy = true;
     try {
+      let target = projectPath;
+      if (saveAs || !target) {
+        const chosen = await save({
+          defaultPath: `${(metadata?.filename ?? 'project').replace(/\.[^.]+$/, '')}.photoforge`,
+          filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
+        });
+        if (typeof chosen !== 'string') return;
+        target = chosen;
+      }
       const result = await saveLayerProject(
         target,
         document,
@@ -1677,6 +1865,10 @@
         projectCreatedAt || timestamp(),
         timestamp()
       );
+      if (documentId !== ownDocument || layerRevision !== revision) {
+        notify('The saved snapshot is older than the current document; current edits remain unsaved.', 'error');
+        return;
+      }
       projectPath = result.outputPath;
       projectDirty = false;
       await clearRecoverySnapshots();
@@ -1689,51 +1881,66 @@
   }
 
   async function openProject() {
-    if (!confirmDiscardChanges()) return;
-    const chosen = await open({
-      multiple: false,
-      filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
-    });
-    if (typeof chosen !== 'string') return;
-    layerBusy = true;
+    if (!allowWorkspaceMutation()) return;
+    cancelTransformGesture();
+    opening = true;
     try {
-      const result = await loadLayerProject(chosen);
-      documentId += 1;
-      metadata = {
-        filename: chosen.split(/[\\/]/).pop() ?? 'project.photoforge',
-        width: result.canvasWidth,
-        height: result.canvasHeight,
-        format: 'PhotoForge',
-        fileSize: 0,
-        colorSpace: 'sRGB',
-        bitDepth: 8,
-        hasAlpha: true,
-        createdAt: result.createdAt || null,
-        modifiedAt: result.modifiedAt || null,
-        cameraModel: null,
-        exifAvailable: false
-      };
-      operations = history.replace(result.operations);
-      selectionState = selectionHistory.replace(createSelectionState());
-      historyEvents = [];
-      redoEvents = [];
-      analysis = null;
-      startLayerDocument(result.document, chosen, result.createdAt);
-      syncHistoryActions();
-      schedulePreview();
+      const chosen = await open({
+        multiple: false,
+        filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
+      });
+      if (typeof chosen !== 'string' || !confirmDiscardChanges()) return;
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await loadLayerProject(chosen, ownRequest);
+      if (!result.isCurrent || activeOpenRequest !== ownRequest) return;
+      installProject(result, chosen);
       notify(`Project opened (${result.document.layers.length} top-level layers)`);
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
-      layerBusy = false;
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
     }
+  }
+
+  function installProject(result: import('./lib/layers/types').ProjectLoadResult, path: string | null) {
+    persistSelectionState();
+    invalidateGeometryCommits();
+    closeRefineState();
+    maskRequestId += 1;
+    analysisRequestId += 1;
+    analyzing = false;
+    stopMaskProgress();
+    documentId = result.documentId;
+    metadata = result.metadata;
+    originalPixelId = null;
+    originalUrl = result.originalPreviewDataUrl;
+    previewUrl = result.previewDataUrl;
+    operations = history.replace(result.operations);
+    const geometry = extractGeometryOperations(operations);
+    const dimensions = computeStageDimensions(result.canvasWidth, result.canvasHeight, geometry);
+    selectionState = selectionHistory.replace({
+      ...createSelectionState('', dimensions.width, dimensions.height),
+      geometryOperations: geometry,
+      geometryFingerprint: geometryFingerprint(geometry)
+    });
+    historyEvents = [];
+    redoEvents = [];
+    analysis = null;
+    comparison = false;
+    zoom = 100;
+    startLayerDocument(result.document, path, result.createdAt);
+    syncHistoryActions();
+    schedulePreview();
+    void requestAnalysis(result.documentId);
   }
 
   /** Returns false when the user chooses to keep unsaved layer work. */
   function confirmDiscardChanges(): boolean {
     if (!projectDirty) return true;
     return window.confirm(
-      'This document has unsaved layer changes. Continue and discard them?'
+      'This document has unsaved changes. Continue and discard them?'
     );
   }
 
@@ -1752,16 +1959,18 @@
    * the user's project file is never written to, and nothing leaves the machine.
    */
   async function captureRecoverySnapshot() {
-    if (!layerDocument || !projectDirty || recoveryBusy || exporting || layerBusy) return;
+    if (!layerDocument || !projectDirty || recoveryBusy || exporting || layerBusy || opening ||
+      selectionBusy || geometryMutationBusy || refineOriginalMask || transformPreview) return;
     recoveryBusy = true;
     try {
-      await writeRecoverySnapshot(
+      const snapshot = await writeRecoverySnapshot(
         layerDocument,
         cloneOperations(operations),
         projectPath,
         documentTitle || metadata?.filename || 'Untitled',
         timestamp()
       );
+      recoveryPaths.add(snapshot.snapshotPath);
     } catch {
       // Recovery is best effort and must never interrupt editing.
     } finally {
@@ -1771,10 +1980,14 @@
 
   /** Drops recovery snapshots once the work they protected has been saved. */
   async function clearRecoverySnapshots() {
-    try {
-      await discardRecoverySnapshot(null);
-    } catch {
-      // Nothing to clean up, or the folder is unavailable.
+    for (const path of [...recoveryPaths]) {
+      try {
+        await discardRecoverySnapshot(path);
+        recoveryPaths.delete(path);
+      } catch {
+        // Keep the saved document's path for a later cleanup attempt. Other
+        // documents' recovery snapshots must never be deleted by this save.
+      }
     }
   }
 
@@ -1790,47 +2003,32 @@
 
   async function acceptRecovery() {
     const offer = recoveryOffer;
-    if (!offer) return;
-    recoveryOffer = null;
-    layerBusy = true;
+    if (!offer || !allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    opening = true;
     try {
-      const result = await restoreRecoverySnapshot(offer.snapshotPath);
-      documentId += 1;
-      metadata = {
-        filename: offer.documentName,
-        width: result.canvasWidth,
-        height: result.canvasHeight,
-        format: 'PhotoForge',
-        fileSize: 0,
-        colorSpace: 'sRGB',
-        bitDepth: 8,
-        hasAlpha: true,
-        createdAt: result.createdAt || null,
-        modifiedAt: result.modifiedAt || null,
-        cameraModel: null,
-        exifAvailable: false
-      };
-      operations = history.replace(result.operations);
-      selectionState = selectionHistory.replace(createSelectionState());
-      historyEvents = [];
-      redoEvents = [];
-      analysis = null;
-      startLayerDocument(result.document, offer.projectPath, result.createdAt);
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await restoreRecoverySnapshot(offer.snapshotPath, ownRequest);
+      if (!result.isCurrent || activeOpenRequest !== ownRequest) return;
+      installProject(result, offer.projectPath);
+      recoveryOffer = null;
+      recoveryPaths.add(offer.snapshotPath);
       // Recovered work has not been saved anywhere the user chose, so it stays
       // marked unsaved until they save it themselves.
       projectDirty = true;
       syncHistoryActions();
       schedulePreview();
-      await discardRecoverySnapshot(offer.snapshotPath);
       notify(`Recovered ${offer.documentName}. Save it to keep the recovered work.`);
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
-      layerBusy = false;
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
     }
   }
 
   async function dismissRecovery() {
+    if (opening || layerBusy || recoveryBusy) return;
     const offer = recoveryOffer;
     recoveryOffer = null;
     if (!offer) return;
@@ -1895,11 +2093,10 @@
     if (!allowWorkspaceMutation()) return;
     const kind = historyEvents.at(-1);
     if (!kind) return;
-    const paired = kind === 'geometry' || kind === 'compound';
-    if ((paired && (!history.canUndo || !selectionHistory.canUndo)) ||
-      (kind === 'edit' && !history.canUndo) ||
-      (kind === 'selection' && !selectionHistory.canUndo) ||
-      (kind === 'layer' && !layerHistory.canUndo)) {
+    const stacks = historyEventStacks(kind);
+    if ((stacks.edit && !history.canUndo) ||
+      (stacks.selection && !selectionHistory.canUndo) ||
+      (stacks.layer && !layerHistory.canUndo)) {
       resetHistoryAtCurrentState();
       syncHistoryActions();
       notify('History was reset because its paired snapshots were unavailable.', 'error');
@@ -1909,23 +2106,10 @@
     history.endCoalescing();
     selectionHistory.endCoalescing();
     layerHistory.endCoalescing();
-    if (paired) {
-      operations = history.undo();
-      selectionState = selectionHistory.undo();
-      persistSelectionState();
-      schedulePreview();
-    } else if (kind === 'edit') {
-      operations = history.undo();
-      schedulePreview();
-    } else if (kind === 'layer') {
-      layerDocument = layerHistory.undo();
-      projectDirty = true;
-      schedulePreview();
-      void refreshThumbnails();
-    } else {
-      selectionState = selectionHistory.undo();
-      persistSelectionState();
-    }
+    if (stacks.edit) operations = history.undo();
+    if (stacks.selection) selectionState = selectionHistory.undo();
+    if (stacks.layer) layerDocument = layerHistory.undo();
+    afterHistoryNavigation(stacks);
     redoEvents = [...redoEvents, kind];
     syncHistoryActions();
   }
@@ -1934,11 +2118,10 @@
     if (!allowWorkspaceMutation()) return;
     const kind = redoEvents.at(-1);
     if (!kind) return;
-    const paired = kind === 'geometry' || kind === 'compound';
-    if ((paired && (!history.canRedo || !selectionHistory.canRedo)) ||
-      (kind === 'edit' && !history.canRedo) ||
-      (kind === 'selection' && !selectionHistory.canRedo) ||
-      (kind === 'layer' && !layerHistory.canRedo)) {
+    const stacks = historyEventStacks(kind);
+    if ((stacks.edit && !history.canRedo) ||
+      (stacks.selection && !selectionHistory.canRedo) ||
+      (stacks.layer && !layerHistory.canRedo)) {
       resetHistoryAtCurrentState();
       syncHistoryActions();
       notify('Redo history was reset because its paired snapshots were unavailable.', 'error');
@@ -1948,26 +2131,28 @@
     history.endCoalescing();
     selectionHistory.endCoalescing();
     layerHistory.endCoalescing();
-    if (paired) {
-      operations = history.redo();
-      selectionState = selectionHistory.redo();
-      persistSelectionState();
-      schedulePreview();
-    } else if (kind === 'edit') {
-      operations = history.redo();
-      schedulePreview();
-    } else if (kind === 'layer') {
-      layerDocument = layerHistory.redo();
-      projectDirty = true;
-      schedulePreview();
-      void refreshThumbnails();
-    } else {
-      selectionState = selectionHistory.redo();
-      persistSelectionState();
-    }
+    if (stacks.edit) operations = history.redo();
+    if (stacks.selection) selectionState = selectionHistory.redo();
+    if (stacks.layer) layerDocument = layerHistory.redo();
+    afterHistoryNavigation(stacks);
     historyEvents = [...historyEvents, kind];
     reconcileHistoryRetention();
     syncHistoryActions();
+  }
+
+  function afterHistoryNavigation(stacks: ReturnType<typeof historyEventStacks>) {
+    transformPreview = null;
+    if (stacks.selection) persistSelectionState();
+    if (stacks.edit || stacks.layer) {
+      layerRevision += 1;
+      projectDirty = Boolean(layerDocument);
+      schedulePreview();
+    }
+    if (stacks.layer) {
+      selectedLayerIds = selectedLayerIds.filter((id) => layerDocument && findLayer(layerDocument, id));
+      void refreshThumbnails();
+    }
+    void releaseUnreferencedPixels();
   }
 
   function undoSelectionOnly() {
@@ -1990,8 +2175,100 @@
     commit(presetOperations);
   }
 
-  function applyGuidedPlan(planOperations: EditOperation[]): boolean {
-    return commitGlobal(planOperations);
+  function applyGuidedPlan(plan: EditPlan): boolean | Promise<boolean> {
+    return applyLayerPlan(plan.operations, plan.layerSteps ?? []);
+  }
+
+  function applyWorkflow(workflow: Workflow): boolean | Promise<boolean> {
+    return applyLayerPlan(workflow.operations, workflow.layerSteps ?? []);
+  }
+
+  async function stageWorkflowGeometry(next: EditOperation[], before: EditOperation[], selection: SelectionState) {
+    if (!metadata) throw new Error('Open a document first.');
+    if (geometryFingerprint(extractGeometryOperations(next)) === geometryFingerprint(extractGeometryOperations(before))) {
+      return { operations: cloneOperations(next), selection: structuredClone(selection) };
+    }
+    const plan = planGeometryRemap(metadata.width, metadata.height, before, next, selection);
+    for (const embedded of plan.newEmbeddedMasks) await validateMaskSnapshot(embedded.mask);
+    const ownRequest = ++maskRequestId;
+    const result = await remapSelectionMasks({
+      oldGeometry: plan.oldGeometry, newGeometry: plan.newGeometry, items: plan.items,
+      documentId, requestId: ownRequest
+    });
+    return applyGeometryRemap(plan, next, selection,
+      validateGeometryRemapResult(plan, result, documentId, ownRequest));
+  }
+
+  async function applyLayerPlan(nextOperations: EditOperation[], steps: LayerWorkflowStep[]): Promise<boolean> {
+    if (!steps.length) return commitGlobal(nextOperations);
+    const document = layerDocument;
+    if (!document || !allowWorkspaceMutation()) return false;
+    cancelTransformGesture();
+    const ownDocument = documentId;
+    const revision = layerRevision;
+    const selectionBefore = structuredClone(selectionState);
+    const operationsBefore = cloneOperations(operations);
+    const profile = exportProfile;
+    layerBusy = true;
+    try {
+      let outputPath: string | null = null;
+      if (steps.some((step) => step.type === 'export_composite')) {
+        outputPath = await save({
+          title: 'Workflow composite export',
+          defaultPath: `${(metadata?.filename ?? 'image').replace(/\.[^.]+$/, '')}-workflow.png`,
+          filters: [{ name: 'PNG image', extensions: ['png'] }, { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
+            { name: 'WebP image', extensions: ['webp'] }]
+        });
+        if (!outputPath) return false;
+      }
+      // Layer masks live before the document geometry pipeline. Map the
+      // selection back to that canvas, independently of the new global edits.
+      const layerSelection = steps.some((step) => step.type === 'create_mask_from_selection')
+        ? (await stageWorkflowGeometry([], operationsBefore, selectionBefore)).selection.activeMask
+        : selectionBefore.activeMask;
+      const staged = await stageWorkflowGeometry(nextOperations, operationsBefore, selectionBefore);
+      const next = await executeLayerWorkflow(document, steps, layerSelection, {
+        validate: planLayerWorkflowSteps,
+        apply: applyOperationsToLayer,
+        mask: layerMaskFromSelection,
+        merge: mergeLayerPixels,
+        flatten: flattenLayerDocument,
+        export: (current) => exportLayerComposite(outputPath!, current, staged.operations, profile)
+      });
+      if (documentId !== ownDocument || layerRevision !== revision ||
+        JSON.stringify(selectionState) !== JSON.stringify(selectionBefore) ||
+        JSON.stringify(operations) !== JSON.stringify(operationsBefore)) {
+        throw new Error('The document changed during workflow replay; no edits were committed.');
+      }
+      history.endCoalescing();
+      selectionHistory.endCoalescing();
+      layerHistory.endCoalescing();
+      const editChanged = JSON.stringify(operations) !== JSON.stringify(staged.operations);
+      const selectionChanged = JSON.stringify(selectionState) !== JSON.stringify(staged.selection);
+      const layerChanged = JSON.stringify(document) !== JSON.stringify(next);
+      operations = history.commit(staged.operations);
+      selectionState = selectionHistory.commit(staged.selection);
+      if (layerChanged) layerDocument = layerHistory.commit(next, 'Apply layer workflow');
+      const event = historyEventForChanges(editChanged, selectionChanged, layerChanged);
+      if (editChanged !== history.lastCommitCreatedEntry || selectionChanged !== selectionHistory.lastCommitCreatedEntry) {
+        resetHistoryAtCurrentState();
+        layerRevision += 1;
+        projectDirty = true;
+      } else if (event) recordHistoryMutation(event, true);
+      selectedLayerIds = layerDocument?.activeLayerId ? [layerDocument.activeLayerId] : [];
+      persistSelectionState();
+      syncHistoryActions();
+      schedulePreview();
+      void refreshThumbnails();
+      return true;
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+      return false;
+    } finally {
+      // Also releases any immutable worker outputs from an aborted replay.
+      await releaseUnreferencedPixels();
+      layerBusy = false;
+    }
   }
 
   function persistSelectionState() {
@@ -2032,7 +2309,11 @@
   }
 
   async function handleSelectionGesture(gesture: SelectionGesture) {
-    if (!metadata || selectionBusy || geometryMutationBusy) return;
+    if (!metadata || !allowWorkspaceMutation()) return;
+    if (editTarget === 'mask') {
+      await paintLayerMask(gesture);
+      return;
+    }
     const mutationGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     const configuredMode = operationModeFromModifiers(
       selectionState.mode,
@@ -2057,6 +2338,7 @@
           mode,
           base: selectionState.activeMask,
           sampleMerged: selectionState.settings.sampleMerged,
+          layerDocument,
           operations: cloneOperations(operations),
           documentId,
           requestId: ownRequest
@@ -2073,6 +2355,7 @@
           mode,
           base: selectionState.activeMask,
           sampleMerged: selectionState.settings.sampleMerged,
+          layerDocument,
           operations: cloneOperations(operations),
           documentId,
           requestId: ownRequest
@@ -2131,8 +2414,78 @@
     return null;
   }
 
+  /** Paint new coverage into local mask space without resampling its existing pixels. */
+  async function paintLayerMask(gesture: SelectionGesture) {
+    const document = layerDocument;
+    const layerId = document?.activeLayerId;
+    const layer = document && layerId ? findLayer(document, layerId) : null;
+    if (!document || !layerId || !layer?.mask || !allowWorkspaceMutation()) return;
+    for (let ancestor: string | null = layerId; ancestor; ancestor = parentOf(document, ancestor)) {
+      if (findLayer(document, ancestor)?.locked) {
+        notify('Unlock the layer and its groups before painting its mask.', 'error');
+        return;
+      }
+    }
+    const shape = selectionShape(gesture);
+    if (!shape) {
+      notify('Use a shape or brush on the mask. For color sampling, make a Selection and use Mask from selection.', 'error');
+      return;
+    }
+    const ownDocument = documentId;
+    const revision = layerRevision;
+    const ownRequest = ++maskRequestId;
+    const current = (result: MaskResult) => {
+      if (!result.isCurrent || result.documentId !== ownDocument || result.requestId !== ownRequest ||
+        documentId !== ownDocument || layerRevision !== revision) {
+        throw new Error('The mask stroke became stale; nothing was changed.');
+      }
+      return result.mask;
+    };
+    layerBusy = true;
+    try {
+      let stroke = current(await rasterizeSelection({
+        width: selectionCanvasWidth, height: selectionCanvasHeight, shape,
+        mode: 'replace', base: null, documentId: ownDocument, requestId: ownRequest
+      }));
+      const geometry = extractGeometryOperations(operations);
+      if (geometry.length) {
+        const remapped = await remapSelectionMasks({
+          oldGeometry: geometry, newGeometry: [],
+          items: [{ key: 'stroke', mask: stroke, oldStage: geometry.length, newStage: 0 }],
+          documentId: ownDocument, requestId: ownRequest
+        });
+        if (!remapped.isCurrent || remapped.documentId !== ownDocument ||
+          remapped.requestId !== ownRequest || remapped.masks.length !== 1 ||
+          remapped.masks[0].key !== 'stroke') throw new Error('Mask stroke geometry could not be mapped.');
+        stroke = remapped.masks[0].mask;
+      }
+      // Map only this new stroke through the layer transform. Repeated strokes
+      // never resample the existing mask, including its off-canvas coverage.
+      const incoming = await layerMaskFromSelection(document, layerId, stroke);
+      let base = layer.mask.snapshot;
+      if (layer.mask.inverted) base = current(await transformSelection({
+        mask: base, operation: { type: 'invert' }, documentId: ownDocument, requestId: ownRequest
+      }));
+      const mode = gesture.tool === 'eraser' ? 'subtract' : gesture.tool === 'brush' ? 'add' :
+        operationModeFromModifiers(selectionState.mode, gesture.shiftKey, gesture.altKey);
+      let snapshot = current(await composeSelectionMasks({
+        base, incoming: incoming.snapshot, mode, documentId: ownDocument, requestId: ownRequest
+      }));
+      if (layer.mask.inverted) snapshot = current(await transformSelection({
+        mask: snapshot, operation: { type: 'invert' }, documentId: ownDocument, requestId: ownRequest
+      }));
+      commitLayers(updateLayer(document, layerId, (entry) => ({
+        ...entry, mask: { ...layer.mask!, snapshot }
+      })), gesture.tool === 'eraser' ? 'Erase layer mask' : 'Paint layer mask');
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
   function openRefineSelection() {
-    if (!selectionState.activeMask || selectionBusy || geometryMutationBusy) return;
+    if (!selectionState.activeMask || !allowWorkspaceMutation()) return;
     refineSourceGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     refineOriginalMask = structuredClone(selectionState.activeMask);
     refinePreviewMask = null;
@@ -2183,6 +2536,7 @@
         },
         edgeStrength: 0.7,
         sampleMerged: selectionState.settings.sampleMerged,
+        layerDocument,
         operations: cloneOperations(operations),
         documentId: ownDocument,
         requestId: ownRequest
@@ -2264,7 +2618,7 @@
   }
 
   async function applyMaskOperation(operation: MaskOperation) {
-    if (!metadata || selectionBusy || geometryMutationBusy) return;
+    if (!metadata || !allowWorkspaceMutation()) return;
     if (operation.type === 'deselect') {
       commitSelectionState({
         ...setActiveMask(selectionState, null, null),
@@ -2294,6 +2648,7 @@
           operation,
           edgeStrength: 0.7,
           sampleMerged: selectionState.settings.sampleMerged,
+          layerDocument,
           operations: cloneOperations(operations),
           documentId,
           requestId: ownRequest
@@ -2397,7 +2752,7 @@
 
   async function combineNamedMask(id: string) {
     const named = selectionState.namedMasks.find((mask) => mask.id === id);
-    if (!named || !selectionState.activeMask || selectionBusy || geometryMutationBusy) return;
+    if (!named || !selectionState.activeMask || !allowWorkspaceMutation()) return;
     const mutationGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
     const sourceMode = selectionState.mode;
     const ownRequest = ++maskRequestId;
@@ -2645,9 +3000,12 @@
   }
 
   async function exportImage() {
-    if (!metadata || exporting || opening || selectionBusy || geometryMutationBusy || refineOriginalMask) return;
+    if (!metadata || !allowWorkspaceMutation()) return;
+    cancelTransformGesture();
+    exporting = true;
     try {
       const dialogDocument = documentId;
+      const dialogRevision = layerRevision;
       const dialogGuard = createWorkspaceMutationGuard(documentId, operations, selectionState);
       const selectedProfile = exportProfile;
       const stem = metadata.filename.replace(/\.[^.]+$/, '');
@@ -2667,7 +3025,7 @@
       });
       if (!outputPath) return;
       if (!metadata || opening || selectionBusy || geometryMutationBusy || refineOriginalMask ||
-        dialogDocument !== documentId ||
+        dialogDocument !== documentId || dialogRevision !== layerRevision ||
         !isWorkspaceMutationGuardCurrent(dialogGuard, documentId, operations, selectionState)) {
         notify('The document or edit pipeline changed while the export dialog was open; nothing was exported.', 'error');
         return;
@@ -2677,7 +3035,7 @@
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
       // Exporting renders the visible composite. The editable document is never
       // flattened just because a flattened image was written.
-      const composite = layerDocument && layeredDocument ? layerDocument : null;
+      const composite = compositeDocument();
       const result = composite
         ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile)
         : await invoke<ExportResult>('export_with_profile', {
@@ -2759,11 +3117,11 @@
     </div>
 
     <nav class="primary-actions" aria-label="File actions">
-      <ToolButton label="Open" icon="＋" primary disabled={opening || exporting} onclick={chooseImage} />
+      <ToolButton label="Open" icon="＋" primary disabled={fileMutationBusy} onclick={chooseImage} />
       <ToolButton
         label={exporting ? 'Exporting' : 'Export'}
         icon="⇩"
-        disabled={!metadata || exporting || opening || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
+        disabled={!metadata || fileMutationBusy || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
         onclick={exportImage}
       />
       <select aria-label="Export profile" bind:value={exportProfile} title="Remembered export profile">
@@ -2777,14 +3135,14 @@
       <ToolButton
         label="Open project"
         icon="▤"
-        disabled={opening || exporting || layerBusy}
+        disabled={fileMutationBusy}
         title="Open a PhotoForge project"
         onclick={openProject}
       />
       <ToolButton
         label={projectDirty ? 'Save project •' : 'Save project'}
         icon="⌸"
-        disabled={!layerDocument || opening || exporting || layerBusy}
+        disabled={!layerDocument || fileMutationBusy}
         title={projectPath ? `Save ${documentTitle}` : 'Save this document as an editable project'}
         onclick={() => saveProject(false)}
       />
@@ -2819,7 +3177,9 @@
       oncomparisonchange={(value) => (comparisonPosition = value)}
       imageWidth={selectionCanvasWidth}
       imageHeight={selectionCanvasHeight}
-      selectionTool={comparisonUsesSplitView || geometryMutationBusy ? 'none' : selectionState.tool}
+      selectionTool={comparisonUsesSplitView || fileMutationBusy || geometryMutationBusy || transformActive
+        ? 'none'
+        : selectionState.tool}
       activeMask={selectionState.activeMask}
       visibleMasks={selectionState.namedMasks.filter((mask) => mask.visible).map((mask) => mask.mask)}
       overlaySettings={selectionState.overlay}
@@ -2834,7 +3194,25 @@
       fromCenter={selectionState.settings.fromCenter}
       onselectiongesture={handleSelectionGesture}
       onselectioncancel={() => undefined}
-    />
+    >
+      <div slot="overlay" class="transform-slot">
+        {#if transformActive && transformableLayer && displayedTransform && transformableLayer.content.type === 'pixel' && !comparisonUsesSplitView}
+          <TransformOverlay
+            transform={displayedTransform}
+            layerWidth={transformableLayer.content.width}
+            layerHeight={transformableLayer.content.height}
+            canvasWidth={layerDocument?.canvasWidth ?? selectionCanvasWidth}
+            canvasHeight={layerDocument?.canvasHeight ?? selectionCanvasHeight}
+            aspectLocked={transformAspectLocked}
+            layerName={transformableLayer.name}
+            disabled={fileMutationBusy || geometryMutationBusy || selectionBusy}
+            onpreview={(next) => previewTransform(transformableLayer.id, next)}
+            oncommit={(next) => commitTransform(transformableLayer.id, next, 'Transform layer')}
+            oncancel={cancelTransformGesture}
+          />
+        {/if}
+      </div>
+    </ImageStage>
 
     <aside aria-label="Editing controls">
       <div class="inspector-title">
@@ -2857,9 +3235,9 @@
 
       <div
         class="scroll-panel"
-        class:disabled={!metadata || opening}
-        inert={!metadata || opening}
-        aria-disabled={!metadata || opening}
+        class:disabled={!metadata || fileMutationBusy}
+        inert={!metadata || fileMutationBusy}
+        aria-disabled={!metadata || fileMutationBusy}
       >
         {#if layerDocument}
           <LayersPanel
@@ -2882,11 +3260,31 @@
             ontargetchange={(target) => (editTarget = target)}
             onadjustmenttargetchange={(target) => (adjustmentTarget = target)}
           />
+          {#if transformableLayer && transformableLayer.content.type === 'pixel'}
+            <TransformPanel
+              transform={displayedTransform ?? transformableLayer.transform}
+              layerWidth={transformableLayer.content.width}
+              layerHeight={transformableLayer.content.height}
+              canvasWidth={layerDocument.canvasWidth}
+              canvasHeight={layerDocument.canvasHeight}
+              layerName={transformableLayer.name}
+              active={transformActive}
+              disabled={!metadata || opening || exporting || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
+              busy={layerBusy}
+              aspectLocked={transformAspectLocked}
+              onchange={(next, label) => commitTransform(transformableLayer.id, next, label)}
+              onaspectchange={(locked) => (transformAspectLocked = locked)}
+              ontoggle={toggleTransformMode}
+              onreset={() => handleLayerAction('reset_transform', transformableLayer.id)}
+              onrasterize={() => handleLayerAction('rasterize_transform', transformableLayer.id)}
+              onflip={(axis) => flipActiveLayer(axis, transformableLayer.id)}
+            />
+          {/if}
         {/if}
 
         <SelectionWorkspace
           state={selectionState}
-          disabled={!metadata || opening || geometryMutationBusy}
+          disabled={!metadata || fileMutationBusy || geometryMutationBusy}
           busy={selectionBusy}
           progress={maskProgress}
           canUndo={selectionPanelHistory.canUndo}
@@ -2903,8 +3301,9 @@
 
         <GuidedEditPanel
           {documentId}
-          ready={Boolean(metadata && analysis)}
-          disabled={opening || exporting || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
+          documentRevision={layerRevision}
+          ready={Boolean(metadata && analysis && previewCurrent && !analyzing)}
+          disabled={fileMutationBusy || selectionBusy || geometryMutationBusy || Boolean(refineOriginalMask)}
           settings={guidedSettings}
           configurationRevision={componentConfigurationRevision}
           onapply={applyGuidedPlan}
@@ -2913,9 +3312,12 @@
 
         <ProfessionalWorkspace
           {documentId}
+          {layerDocument}
+          {layerRevision}
           {metadata}
           {operations}
           oncommit={commit}
+          onworkflow={applyWorkflow}
           onmessage={notify}
           onviewchange={updateProfessionalView}
         />

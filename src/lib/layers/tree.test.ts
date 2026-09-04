@@ -373,6 +373,55 @@ describe('the simple-document fast path', () => {
       isSimpleDocument(documentWith([pixel('Background', 'px1', 8, 8)], 16, 16))
     ).toBe(false);
   });
+
+  /**
+   * An ordinary photo opened in 0.8.2 must take exactly the render path it took
+   * before layers existed. A transform gained an optional sampling mode in this
+   * release, and picking one on a layer that is not being resampled changes no
+   * pixels, so it must not push the document onto the layered path either.
+   */
+  it('stays simple for a document written before the sampling mode existed', () => {
+    const background = pixel('Background', 'px1', 16, 16);
+    const legacy = {
+      ...background,
+      transform: {
+        translateX: 0,
+        translateY: 0,
+        scaleX: 1,
+        scaleY: 1,
+        rotationDegrees: 0,
+        flipHorizontal: false,
+        flipVertical: false
+      } as unknown as typeof background.transform
+    };
+    expect(isSimpleDocument(documentWith([legacy]))).toBe(true);
+  });
+
+  it('stays simple when only the sampling mode differs', () => {
+    const background = pixel('Background', 'px1', 16, 16);
+    const nearest = {
+      ...background,
+      transform: { ...background.transform, interpolation: 'nearest' as const }
+    };
+    expect(isSimpleDocument(documentWith([nearest]))).toBe(true);
+  });
+
+  it('leaves the fast path as soon as the placement actually moves', () => {
+    const background = pixel('Background', 'px1', 16, 16);
+    for (const patch of [
+      { flipHorizontal: true },
+      { flipVertical: true },
+      { scaleY: 1.01 },
+      { rotationDegrees: 0.5 },
+      { translateY: -1 }
+    ]) {
+      expect(
+        isSimpleDocument(
+          documentWith([{ ...background, transform: { ...background.transform, ...patch } }])
+        )
+      ).toBe(false);
+    }
+  });
 });
 
 describe('validation', () => {

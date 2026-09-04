@@ -21,6 +21,7 @@ use tauri::State;
 #[tauri::command]
 pub async fn generate_histogram(
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     request_id: u64,
     state: State<'_, AppState>,
@@ -32,25 +33,16 @@ pub async fn generate_histogram(
         .latest_histogram_request
         .store(request_id, Ordering::Release);
     let _permit = state.histogram_gate.lock().await;
-    if state.latest_histogram_request.load(Ordering::Acquire) != request_id {
+    if state.latest_histogram_request.load(Ordering::Acquire) != request_id
+        || !super::sampling::is_current(&state, document_id)?
+    {
         return Ok(stale_histogram(document_id, request_id));
     }
-    let (source, full_source_dimensions) = {
-        let session = state
-            .session
-            .lock()
-            .map_err(|_| AppError::HistogramGeneration("editor state is unavailable".into()))?;
-        let session = session.as_ref().ok_or(AppError::NoImageOpen)?;
-        if session.document_id != document_id {
-            return Ok(stale_histogram(document_id, request_id));
-        }
-        (
-            session.source.preview.clone(),
-            session.source.original.dimensions(),
-        )
-    };
+    let source = super::sampling::capture(&state, document_id, layer_document, true)?;
+    let full_source_dimensions = source.full_dimensions;
     let started = Instant::now();
     let (before, after) = tauri::async_runtime::spawn_blocking(move || {
+        let source = source.render()?;
         let before = calculate_histogram(source.as_ref());
         let processed =
             apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
@@ -59,7 +51,8 @@ pub async fn generate_histogram(
     })
     .await
     .map_err(|_| AppError::HistogramGeneration("histogram worker stopped".into()))??;
-    let is_current = state.latest_histogram_request.load(Ordering::Acquire) == request_id;
+    let is_current = state.latest_histogram_request.load(Ordering::Acquire) == request_id
+        && super::sampling::is_current(&state, document_id)?;
     Ok(HistogramResult {
         before,
         after,
@@ -87,31 +80,25 @@ pub async fn inspect_image_pixel(
     x: u32,
     y: u32,
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     state: State<'_, AppState>,
 ) -> Result<PixelInspection, AppError> {
-    let (source, full_source_dimensions) = {
-        let session = state
-            .session
-            .lock()
-            .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
-        let session = session.as_ref().ok_or(AppError::NoImageOpen)?;
-        if session.document_id != document_id {
-            return Err(AppError::NoImageOpen);
-        }
-        (
-            session.source.preview.clone(),
-            session.source.original.dimensions(),
-        )
-    };
-    tauri::async_runtime::spawn_blocking(move || {
+    let source = super::sampling::capture(&state, document_id, layer_document, true)?;
+    let full_source_dimensions = source.full_dimensions;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let source = source.render()?;
         let processed =
             apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
         inspect_pixel(&processed, x, y)
             .ok_or_else(|| AppError::CropBounds("pixel coordinates are outside the image".into()))
     })
     .await
-    .map_err(|_| AppError::ProcessingFailure("pixel inspector worker stopped".into()))?
+    .map_err(|_| AppError::ProcessingFailure("pixel inspector worker stopped".into()))??;
+    if !super::sampling::is_current(&state, document_id)? {
+        return Err(AppError::NoImageOpen);
+    }
+    Ok(result)
 }
 
 fn apply_preview_pipeline(
@@ -130,10 +117,11 @@ pub async fn create_point_operation(
     y: u32,
     white: bool,
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     state: State<'_, AppState>,
 ) -> Result<EditOperation, AppError> {
-    let sample = inspect_image_pixel(x, y, operations, document_id, state).await?;
+    let sample = inspect_image_pixel(x, y, operations, layer_document, document_id, state).await?;
     if white && (sample.red == 0 || sample.green == 0 || sample.blue == 0) {
         return Err(AppError::InvalidOperation(
             "a zero-valued channel cannot establish a white point".into(),

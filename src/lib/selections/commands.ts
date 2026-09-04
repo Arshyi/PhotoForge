@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { EditOperation } from '../types/editor';
+import type { LayerDocument } from '../layers/types';
 import type {
   ColorRangeOptions,
   CompositionMode,
@@ -115,6 +116,7 @@ export async function refineSelection(input: {
   edgeStrength: number;
   sampleMerged: boolean;
   operations: EditOperation[];
+  layerDocument?: LayerDocument | null;
   documentId: number;
   requestId: number;
 }): Promise<MaskResult> {
@@ -133,6 +135,7 @@ export async function magicWandSelection(input: {
   base: MaskSnapshot | null;
   sampleMerged: boolean;
   operations: EditOperation[];
+  layerDocument?: LayerDocument | null;
   documentId: number;
   requestId: number;
 }): Promise<MaskResult> {
@@ -146,6 +149,7 @@ export async function colorRangeSelection(input: {
   base: MaskSnapshot | null;
   sampleMerged: boolean;
   operations: EditOperation[];
+  layerDocument?: LayerDocument | null;
   documentId: number;
   requestId: number;
 }): Promise<MaskResult> {

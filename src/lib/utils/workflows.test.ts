@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EditOperation, Workflow } from '../types/editor';
+import type { LayerWorkflowStep } from '../layers/workflow';
 import {
   createWorkflow,
   duplicateOperationAt,
@@ -15,6 +16,7 @@ import {
   toggleFavorite,
   upsertWorkflow,
   validateEditOperation,
+  validateLayerWorkflowSteps,
   validateWorkflow,
   workflowDocument
 } from './workflows';
@@ -78,7 +80,7 @@ describe('workflow system', () => {
   });
 
   it('wraps workflow in versioned schema', () => {
-    expect(workflowDocument(workflow()).schemaVersion).toBe(1);
+    expect(workflowDocument(workflow()).schemaVersion).toBe(2);
   });
 
   it('round trips workflow JSON', () => {
@@ -133,7 +135,7 @@ describe('workflow system', () => {
     expect(validateEditOperation({ ...maskedOperation, mask })).toMatch(message);
   });
 
-  it.each([0, 2, 99, -1])('rejects unsupported schema version %s', (schemaVersion) => {
+  it.each([0, 3, 99, -1])('rejects unsupported schema version %s', (schemaVersion) => {
     expect(() => parseWorkflowDocument(JSON.stringify({ schemaVersion, workflow: workflow() }))).toThrow(/Unsupported/);
   });
 
@@ -142,7 +144,7 @@ describe('workflow system', () => {
   });
 
   it('reports empty workflows', () => {
-    expect(validateWorkflow({ ...workflow(), operations: [] })).toContain('Add at least one operation.');
+    expect(validateWorkflow({ ...workflow(), operations: [] })).toContain('Add at least one operation or layer step.');
   });
 
   it('inserts and replaces by id', () => {
@@ -236,5 +238,64 @@ describe('workflow system', () => {
 
   it.each(['', '{', 'false', '{}'])('recovers safely from invalid storage %s', (stored) => {
     expect(loadWorkflows({ getItem: () => stored })).toEqual([]);
+  });
+
+  it('migrates version 1 to version 2 with explicitly empty layer steps', () => {
+    const { layerSteps: _steps, ...legacy } = workflow();
+    const parsed = parseWorkflowDocument(JSON.stringify({ schemaVersion: 1, workflow: legacy }));
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.workflow.layerSteps).toEqual([]);
+  });
+
+  it('retains every layer step through serialization, storage, duplicate, and operation editing', () => {
+    const layerSteps: LayerWorkflowStep[] = [
+      { type: 'create_adjustment_layer', name: 'Tone', operation: { type: 'brightness', amount: 0.2 } },
+      { type: 'select_layer', selector: { type: 'last_created' } },
+      { type: 'set_opacity', selector: { type: 'active' }, opacity: 0.4 },
+      { type: 'set_visibility', selector: { type: 'top' }, visible: true },
+      { type: 'set_blend_mode', selector: { type: 'name', name: 'Tone' }, blendMode: 'multiply' },
+      { type: 'apply_to_layer', selector: { type: 'bottom' }, operations: [{ type: 'grayscale' }] },
+      { type: 'create_mask_from_selection', selector: { type: 'active' } },
+      { type: 'merge_down', selector: { type: 'id', id: 'layer-2' } },
+      { type: 'flatten' }, { type: 'export_composite' }
+    ];
+    const value = createWorkflow('Layers', [], '', new Date(), layerSteps);
+    expect(validateWorkflow(value)).toEqual([]);
+    expect(parseWorkflowDocument(JSON.stringify(workflowDocument(value))).workflow).toEqual(value);
+    let stored = '';
+    saveWorkflows([value], { setItem: (_key, json) => { stored = json; } });
+    expect(loadWorkflows({ getItem: () => stored })).toEqual([value]);
+    const duplicate = duplicateWorkflow([value], value.id)[0];
+    expect(duplicate.layerSteps).toEqual(value.layerSteps);
+    expect(duplicate.layerSteps[0]).not.toBe(value.layerSteps[0]);
+    expect(upsertWorkflow([value], { ...value, operations })[0].layerSteps).toEqual(layerSteps);
+  });
+
+  it('refuses to hide layer steps inside a version 1 document', () => {
+    expect(() => parseWorkflowDocument(JSON.stringify({ schemaVersion: 1, workflow: {
+      ...workflow(), layerSteps: [{ type: 'flatten' }]
+    } }))).toThrow(/version 1 cannot contain layer steps/);
+  });
+
+  it.each([
+    null,
+    {},
+    [{ type: 'future_action' }],
+    [{ type: 'flatten', unexpected: true }],
+    [{ type: 'set_opacity', selector: { type: 'active' }, opacity: 2 }],
+    [{ type: 'set_visibility', selector: { type: 'active' }, visible: 'yes' }],
+    [{ type: 'set_blend_mode', selector: { type: 'active' }, blendMode: 'future' }],
+    [{ type: 'select_layer', selector: { type: 'id', id: '' } }],
+    [{ type: 'select_layer', selector: { type: 'active', id: 'invented' } }],
+    [{ type: 'select_layer', selector: { type: 'last_created' } }],
+    [{ type: 'create_adjustment_layer', operation: { type: 'rotate', degrees: 90 } }],
+    [{ type: 'create_adjustment_layer', operation: { type: 'brightness', amount: 3 } }],
+    [{ type: 'create_adjustment_layer', name: ' ', operation: { type: 'grayscale' } }],
+    [{ type: 'apply_to_layer', selector: { type: 'bottom' }, operations: [] }],
+    [{ type: 'apply_to_layer', selector: { type: 'bottom' }, operations: [maskedOperation] }],
+    Array.from({ length: 101 }, () => ({ type: 'flatten' }))
+  ])('rejects malformed layer instructions without dropping them %#', (layerSteps) => {
+    expect(validateLayerWorkflowSteps(layerSteps).length).toBeGreaterThan(0);
+    expect(() => parseWorkflowDocument(JSON.stringify({ schemaVersion: 2, workflow: { ...workflow(), layerSteps } }))).toThrow();
   });
 });

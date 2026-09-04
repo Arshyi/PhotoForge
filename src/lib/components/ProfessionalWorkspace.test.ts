@@ -1,9 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import ProfessionalWorkspace from './ProfessionalWorkspace.svelte';
-import type { EditOperation, HistogramChannels, ImageMetadata } from '../types/editor';
+import type { EditOperation, HistogramChannels, ImageMetadata, Workflow } from '../types/editor';
 import { createWorkflow, saveWorkflows } from '../utils/workflows';
+import { createDocument, createPixelLayer } from '../layers/tree';
+import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -14,13 +17,15 @@ const metadata: ImageMetadata = { filename: 'photo.png', width: 100, height: 80,
 function setup(
   oncommit = vi.fn(),
   onmessage = vi.fn(),
-  operations: EditOperation[] = [{ type: 'brightness', amount: 0.1 }]
+  operations: EditOperation[] = [{ type: 'brightness', amount: 0.1 }],
+  onworkflow: (workflow: Workflow) => boolean | Promise<boolean> = vi.fn(() => true)
 ) {
   return render(ProfessionalWorkspace, {
     documentId: 1,
     metadata,
     operations,
     oncommit,
+    onworkflow,
     onmessage,
     onviewchange: vi.fn()
   });
@@ -29,8 +34,10 @@ function setup(
 describe('ProfessionalWorkspace', () => {
   beforeEach(() => {
     localStorage.clear();
-    vi.mocked(invoke).mockReset().mockImplementation(async (command) => {
-      if (command === 'generate_histogram') return { before: bins(), after: bins(), documentId: 1, requestId: 1, processingTimeMs: 1, isCurrent: true };
+    vi.mocked(open).mockReset();
+    vi.mocked(save).mockReset();
+    vi.mocked(invoke).mockReset().mockImplementation(async (command, args) => {
+      if (command === 'generate_histogram') return { before: bins(), after: bins(), documentId: (args as { documentId: number }).documentId, requestId: (args as { requestId: number }).requestId, processingTimeMs: 1, isCurrent: true };
       if (command === 'inspect_image_pixel') return { x: 1, y: 2, red: 3, green: 4, blue: 5, alpha: 255, hue: 210, saturation: .4, value: .5 };
       return {};
     });
@@ -140,6 +147,84 @@ describe('ProfessionalWorkspace', () => {
     expect(screen.getByText('Shadow clipping')).toBeTruthy();
   });
 
+  it('includes the current layer tree when requesting histogram, pixel, and point samples', async () => {
+    const layerDocument = createDocument(100, 80, [createPixelLayer('Image', 'image', 100, 80)]);
+    const view = setup(); await view.rerender({ layerDocument, layerRevision: 2 });
+    await fireEvent.click(screen.getByRole('tab', { name: 'Scopes' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(invoke).toHaveBeenCalledWith('generate_histogram', expect.objectContaining({ layerDocument, documentId: 1 }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Inspect' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Inspect pixel' }));
+    expect(invoke).toHaveBeenCalledWith('inspect_image_pixel', expect.objectContaining({ layerDocument, documentId: 1 }));
+    await fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    await fireEvent.click(screen.getByText('White & black point'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Pick white' }));
+    expect(invoke).toHaveBeenCalledWith('create_point_operation', expect.objectContaining({ layerDocument, documentId: 1 }));
+  });
+
+  it('invalidates a displayed histogram and ignores pending results after a layer revision change', async () => {
+    const layerDocument = createDocument(100, 80, [createPixelLayer('Image', 'image', 100, 80)]);
+    const view = setup(); await view.rerender({ layerDocument, layerRevision: 1 });
+    await fireEvent.click(screen.getByRole('tab', { name: 'Scopes' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: /after RGB/ })).toBeTruthy());
+    let resolveHistogram: (value: unknown) => void = () => undefined;
+    let requestId = 0;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === 'generate_histogram') {
+        requestId = (args as { requestId: number }).requestId;
+        return new Promise((resolve) => { resolveHistogram = resolve; });
+      }
+      return {};
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await view.rerender({ layerRevision: 2 });
+    expect(screen.queryByRole('img', { name: /after RGB/ })).toBeNull();
+    resolveHistogram({ before: bins(), after: bins(), documentId: 1, requestId, processingTimeMs: 1, isCurrent: true });
+    await tick(); await tick();
+    expect(screen.queryByRole('img', { name: /after RGB/ })).toBeNull();
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  });
+
+  it('clears pixel inspection and rejects an old sample when layer content changes', async () => {
+    const view = setup();
+    await fireEvent.click(screen.getByRole('tab', { name: 'Inspect' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Inspect pixel' }));
+    await waitFor(() => expect(screen.getByText(/RGB 3, 4, 5/)).toBeTruthy());
+    let resolveSample: (value: unknown) => void = () => undefined;
+    vi.mocked(invoke).mockImplementation(async (command) => command === 'inspect_image_pixel'
+      ? new Promise((resolve) => { resolveSample = resolve; }) : {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Inspect pixel' }));
+    await view.rerender({ layerRevision: 1 });
+    expect(screen.queryByText(/RGB 3, 4, 5/)).toBeNull();
+    resolveSample({ x: 1, y: 2, red: 3, green: 4, blue: 5, alpha: 255, hue: 210, saturation: .4, value: .5 });
+    await tick(); await tick();
+    expect(screen.queryByText(/RGB 3, 4, 5/)).toBeNull();
+  });
+
+  it('never commits a white-point sample from an older layer revision', async () => {
+    let resolvePoint: (value: unknown) => void = () => undefined;
+    vi.mocked(invoke).mockImplementation(async (command) => command === 'create_point_operation'
+      ? new Promise((resolve) => { resolvePoint = resolve; }) : {});
+    const commit = vi.fn(); const message = vi.fn(); const view = setup(commit, message);
+    await fireEvent.click(screen.getByText('White & black point'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Pick white' }));
+    await view.rerender({ layerRevision: 1 });
+    resolvePoint({ type: 'white_point', red: 200, green: 210, blue: 220 });
+    await tick(); await tick();
+    expect(commit).not.toHaveBeenCalled();
+    expect(message).not.toHaveBeenCalled();
+  });
+
+  it('awaits a point edit and does not announce an asynchronously rejected commit', async () => {
+    vi.mocked(invoke).mockResolvedValue({ type: 'white_point', red: 200, green: 210, blue: 220 });
+    const commit = vi.fn(async () => false); const message = vi.fn(); setup(commit, message);
+    await fireEvent.click(screen.getByText('White & black point'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Pick white' }));
+    await waitFor(() => expect(commit).toHaveBeenCalled());
+    expect(message).not.toHaveBeenCalled();
+  });
+
   it.each(['swipe', 'split', 'blink', 'difference'])('offers %s comparison', async (mode) => {
     setup(); await fireEvent.click(screen.getByRole('tab', { name: 'Scopes' }));
     expect(screen.getByRole('button', { name: mode })).toBeTruthy();
@@ -164,10 +249,10 @@ describe('ProfessionalWorkspace', () => {
     const commit = vi.fn(() => new Promise<boolean>((resolve) => { resolveCommit = resolve; }));
     const message = vi.fn();
     saveWorkflows([createWorkflow('Async Flow', [{ type: 'brightness', amount: 0.2 }])]);
-    setup(commit, message);
+    setup(vi.fn(), message, [], commit);
     await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
-    expect(commit).toHaveBeenCalledWith([{ type: 'brightness', amount: 0.2 }]);
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ operations: [{ type: 'brightness', amount: 0.2 }], layerSteps: [] }));
     expect(message).not.toHaveBeenCalled();
     resolveCommit?.(true);
     await waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
@@ -178,10 +263,24 @@ describe('ProfessionalWorkspace', () => {
     const commit = vi.fn(async () => { throw new Error('geometry reconciliation failed'); });
     const message = vi.fn();
     saveWorkflows([createWorkflow('Failing Flow', [{ type: 'brightness', amount: 0.2 }])]);
-    setup(commit, message);
+    setup(vi.fn(), message, [], commit);
     await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
     await waitFor(() => expect(message).toHaveBeenCalledWith('geometry reconciliation failed', 'error'));
+  });
+
+  it('ignores an obsolete workflow completion after the layer revision changes', async () => {
+    let rejectReplay: (reason: unknown) => void = () => undefined;
+    const replay = vi.fn(() => new Promise<boolean>((_resolve, reject) => { rejectReplay = reject; }));
+    const message = vi.fn();
+    saveWorkflows([createWorkflow('Old Flow', [{ type: 'grayscale' }])]);
+    const view = setup(vi.fn(), message, [], replay);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
+    await view.rerender({ layerRevision: 1 });
+    rejectReplay(new Error('obsolete replay error'));
+    await tick(); await tick();
+    expect(message).not.toHaveBeenCalled();
   });
 
   it('rejects malformed typed operation JSON without changing storage', async () => {
@@ -195,6 +294,65 @@ describe('ProfessionalWorkspace', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Validate & update' }));
     expect(message).toHaveBeenCalledWith(expect.stringMatching(/Operation 1/), 'error');
     expect(localStorage.getItem('photoforge.workflows.v1')).toBe(before);
+  });
+
+  it('replays the full layer-only workflow without falling back to operation commits', async () => {
+    const value = createWorkflow('Layer Flow', [], '', new Date(), [
+      { type: 'set_opacity', selector: { type: 'active' }, opacity: 0.3 }
+    ]);
+    saveWorkflows([value]);
+    const commit = vi.fn(); const replay = vi.fn(() => true);
+    setup(commit, vi.fn(), [], replay);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByText('Layer Flow'));
+    expect(screen.getByRole('list', { name: 'Workflow layer steps' }).textContent).toContain('Layer opacity');
+    await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
+    expect(replay).toHaveBeenCalledWith(value);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('preserves layer steps when editing operations and exporting version 2', async () => {
+    const value = createWorkflow('Mixed Flow', [{ type: 'grayscale' }], '', new Date(), [
+      { type: 'set_visibility', selector: { type: 'active' }, visible: true }
+    ]);
+    saveWorkflows([value]); setup();
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByText('Mixed Flow'));
+    await fireEvent.input(screen.getByLabelText('Typed operation JSON'), { target: { value: '[]' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Validate & update' }));
+    vi.mocked(save).mockResolvedValueOnce('C:\\test\\workflow.json');
+    await fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('export_workflow', {
+      path: 'C:\\test\\workflow.json', document: {
+        schemaVersion: 2, workflow: expect.objectContaining({ operations: [], layerSteps: value.layerSteps })
+      }
+    }));
+  });
+
+  it('imports a layer-only version 2 workflow', async () => {
+    const value = createWorkflow('Imported Layers', [], '', new Date(), [{ type: 'flatten' }]);
+    vi.mocked(open).mockResolvedValueOnce('C:\\test\\workflow.json');
+    vi.mocked(invoke).mockImplementation(async (command) => command === 'import_workflow' ? { schemaVersion: 2, workflow: value } : {});
+    setup();
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Import JSON' }));
+    await waitFor(() => expect(screen.getByText('Imported Layers')).toBeTruthy());
+    expect(screen.getByRole('list', { name: 'Workflow layer steps' }).textContent).toContain('Flatten image');
+  });
+
+  it('validates layer-step JSON before updating the saved workflow', async () => {
+    saveWorkflows([createWorkflow('Editable Layer Flow', [{ type: 'grayscale' }])]);
+    const message = vi.fn(); setup(vi.fn(), message);
+    await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
+    await fireEvent.click(screen.getByText('Editable Layer Flow'));
+    const original = localStorage.getItem('photoforge.workflows.v1');
+    await fireEvent.input(screen.getByLabelText('Typed layer-step JSON'), { target: { value: '[{"type":"future"}]' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Validate & update layer steps' }));
+    expect(message).toHaveBeenCalledWith(expect.stringMatching(/unsupported layer step/), 'error');
+    expect(localStorage.getItem('photoforge.workflows.v1')).toBe(original);
+    await fireEvent.input(screen.getByLabelText('Typed layer-step JSON'), { target: { value: '[{"type":"flatten"}]' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Validate & update layer steps' }));
+    expect(JSON.parse(localStorage.getItem('photoforge.workflows.v1')!)[0].layerSteps).toEqual([{ type: 'flatten' }]);
   });
 
   it.each(['Input folder', 'Output folder', 'Workflow', 'Filename template', 'Export profile', 'Bounded workers'])('exposes batch field %s', async (label) => {

@@ -33,6 +33,7 @@ function planned(): EditPlan {
     summary: 'Reduce noise before applying restrained edge clarity.',
     confidence: 0.81,
     warnings: ['Sharpening may amplify noise.'],
+    layerSteps: [],
     operations: [
       { type: 'denoise', strength: 0.3, preserve_edges: 0.84 },
       { type: 'edge_aware_sharpen', strength: 0.25, radius: 1, threshold: 0.04 }
@@ -169,9 +170,101 @@ describe('GuidedEditPanel', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
     await waitFor(() => expect(view.getByRole('button', { name: 'Apply' })).toBeTruthy());
     await fireEvent.click(view.getByRole('button', { name: 'Apply' }));
-    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned()));
     expect(invokeMock.mock.calls.some(([command]) => command === 'validate_guided_plan')).toBe(true);
     await waitFor(() => expect(view.queryByLabelText('Guided edit plan')).toBeNull());
+  });
+
+  it('reviews and awaits a layer-only plan without discarding its steps', async () => {
+    const layerPlan: EditPlan = {
+      ...planned(), operations: [], operationExplanations: [],
+      layerSteps: [{ type: 'set_opacity', selector: { type: 'active' }, opacity: 0.5 }]
+    };
+    let resolveApply: (value: boolean) => void = () => undefined;
+    const apply = vi.fn(() => new Promise<boolean>((resolve) => { resolveApply = resolve; }));
+    const message = vi.fn();
+    enqueue('generate_edit_plan', { plan: layerPlan, documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', layerPlan);
+    const view = renderPanel({ onapply: apply, onmessage: message });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Adjust selected layer opacity' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    const applyButton = await view.findByRole('button', { name: 'Apply' });
+    expect(view.getByRole('list', { name: 'Planned layer steps' }).textContent).toContain('Layer opacity');
+    expect((applyButton as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(applyButton);
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(layerPlan));
+    expect(view.getByLabelText('Guided edit plan')).toBeTruthy();
+    expect(message).not.toHaveBeenCalledWith(expect.stringMatching(/^Applied /));
+    resolveApply(true);
+    await waitFor(() => expect(view.queryByLabelText('Guided edit plan')).toBeNull());
+    expect(message).toHaveBeenCalledWith('Applied 0 reviewed guided edits and 1 layer steps.');
+  });
+
+  it('does not apply a plan if its document changed during validation', async () => {
+    let resolveValidation: (value: unknown) => void = () => undefined;
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueuePromise('validate_guided_plan', new Promise((resolve) => { resolveValidation = resolve; }));
+    const apply = vi.fn(); const view = renderPanel({ onapply: apply });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'Apply' }));
+    await view.rerender({ documentId: 8 });
+    resolveValidation(planned());
+    await waitFor(() => expect(view.queryByLabelText('Guided edit plan')).toBeNull());
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('clears a plan and ignores pending validation when the layer revision changes', async () => {
+    let resolveValidation: (value: unknown) => void = () => undefined;
+    enqueue('generate_edit_plan', { plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueuePromise('validate_guided_plan', new Promise((resolve) => { resolveValidation = resolve; }));
+    const apply = vi.fn(); const view = renderPanel({ onapply: apply, documentRevision: 1 });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByRole('button', { name: 'Apply' }));
+    await view.rerender({ documentRevision: 2 });
+    resolveValidation(planned());
+    await waitFor(() => expect(view.queryByLabelText('Guided edit plan')).toBeNull());
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending planner result when layer content changes', async () => {
+    let resolvePlan: (value: unknown) => void = () => undefined;
+    enqueuePromise('generate_edit_plan', new Promise((resolve) => { resolvePlan = resolve; }));
+    const view = renderPanel({ documentRevision: 1 });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await view.rerender({ documentRevision: 2 });
+    resolvePlan({ plan: planned(), documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    await waitFor(() => expect(view.getByRole('button', { name: 'Generate Plan' })).toBeTruthy());
+    expect(view.queryByLabelText('Guided edit plan')).toBeNull();
+  });
+
+  it('preserves layer steps while editing the operation inspector', async () => {
+    const layerPlan: EditPlan = {
+      ...planned(), layerSteps: [{ type: 'set_visibility', selector: { type: 'active' }, visible: true }]
+    };
+    enqueue('generate_edit_plan', { plan: layerPlan, documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    enqueue('validate_guided_plan', { ...layerPlan, operations: [], operationExplanations: [] });
+    const apply = vi.fn(() => true); const view = renderPanel({ onapply: apply });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await fireEvent.click(await view.findByLabelText('Delete Denoise'));
+    await fireEvent.click(view.getByLabelText('Delete Edge-Aware Sharpen'));
+    await fireEvent.click(view.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('validate_guided_plan', {
+      plan: { ...layerPlan, operations: [], operationExplanations: [] }
+    }));
+    expect(apply).toHaveBeenCalledWith({ ...layerPlan, operations: [], operationExplanations: [] });
+  });
+
+  it('rejects malformed layer steps instead of displaying an incomplete plan', async () => {
+    enqueue('generate_edit_plan', { plan: { ...planned(), layerSteps: [{ type: 'future_action' }] }, documentId: 7, requestId: 1, processingTimeMs: 1, isCurrent: true });
+    const message = vi.fn(); const view = renderPanel({ onmessage: message });
+    await fireEvent.input(view.getByLabelText('Editing request'), { target: { value: 'Reduce noise' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
+    await waitFor(() => expect(message).toHaveBeenCalledWith(expect.stringMatching(/unsupported layer step/), 'error'));
+    expect(view.queryByLabelText('Guided edit plan')).toBeNull();
   });
 
   it('retains a reviewed plan and reports an error when the workspace rejects it', async () => {
@@ -184,7 +277,7 @@ describe('GuidedEditPanel', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Generate Plan' }));
     await fireEvent.click(await view.findByRole('button', { name: 'Apply' }));
 
-    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned()));
     expect(view.getByLabelText('Guided edit plan')).toBeTruthy();
     expect(message).toHaveBeenCalledWith(
       'The reviewed guided edits were not applied because the workspace is busy.',
@@ -230,7 +323,7 @@ describe('GuidedEditPanel', () => {
     await fireEvent.keyDown(input, { key: 'Enter' });
     await waitFor(() => expect(view.getByRole('button', { name: 'Apply' })).toBeTruthy());
     await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
-    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned().operations));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(planned()));
   });
 
   it('cancels a plan with Escape', async () => {

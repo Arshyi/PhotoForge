@@ -22,15 +22,19 @@
     WorkflowDocument
   } from '../types/editor';
   import { errorMessage, formatBytes } from '../utils/format';
-  import { baseOperation, cloneOperations, operationLabels, operationType, replaceOperation } from '../utils/operations';
+  import { baseOperation, operationLabels, operationType, replaceOperation } from '../utils/operations';
+  import { describeLayerSteps } from '../layers/workflow';
+  import type { LayerDocument } from '../layers/types';
   import {
     createWorkflow,
+    cloneWorkflow,
     duplicateOperationAt,
     duplicateWorkflow,
     loadWorkflows,
     MAX_WORKFLOW_JSON_CHARACTERS,
     MAX_WORKFLOW_OPERATIONS,
     moveOperation,
+    parseWorkflowDocument,
     removeOperationAt,
     removeWorkflow,
     saveWorkflows,
@@ -38,6 +42,7 @@
     toggleFavorite,
     upsertWorkflow,
     validateEditOperation,
+    validateLayerWorkflowSteps,
     validateWorkflow,
     workflowDocument
   } from '../utils/workflows';
@@ -45,7 +50,10 @@
   export let documentId = 0;
   export let metadata: ImageMetadata | null = null;
   export let operations: EditOperation[] = [];
+  export let layerDocument: LayerDocument | null = null;
+  export let layerRevision = 0;
   export let oncommit: (operations: EditOperation[], coalesceKey?: string) => void | boolean | Promise<void | boolean>;
+  export let onworkflow: (workflow: Workflow) => boolean | Promise<boolean> = () => false;
   export let onmessage: (message: string, kind?: 'error' | 'success') => void;
   export let onviewchange: (view: { grid?: boolean; crosshair?: boolean; comparisonMode?: ComparisonMode; zoom?: number }) => void;
 
@@ -57,6 +65,9 @@
   let histogramRequest = 0;
   let histogramTimer: ReturnType<typeof setTimeout> | undefined;
   let lastHistogramKey = '';
+  let sampleRequest = 0;
+  let workflowRequest = 0;
+  let disposed = false;
   let curves: CurveSet = identityCurves();
   let inputBlack = 0;
   let inputWhite = 255;
@@ -102,6 +113,7 @@
   let workflowSearch = '';
   let selectedWorkflowId = '';
   let workflowJson = '';
+  let layerWorkflowJson = '';
   let inputFolder = '';
   let outputFolder = '';
   let batchWorkflowId = '';
@@ -115,10 +127,14 @@
   let batchRunning = false;
   let statusTimer: ReturnType<typeof setInterval> | undefined;
 
-  $: histogramKey = `${documentId}:${JSON.stringify(operations)}`;
-  $: if (documentId && histogramKey !== lastHistogramKey) {
+  $: histogramKey = `${documentId}:${layerRevision}:${Boolean(layerDocument)}:${JSON.stringify(operations)}`;
+  $: if (histogramKey !== lastHistogramKey) {
     lastHistogramKey = histogramKey;
-    scheduleHistogram();
+    histogramRequest += 1;
+    sampleRequest += 1;
+    histogram = null;
+    pixel = null;
+    if (documentId) scheduleHistogram();
   }
   $: visibleWorkflows = searchWorkflows(workflows, workflowSearch);
   $: selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ?? null;
@@ -128,11 +144,12 @@
 
   onMount(() => {
     workflows = loadWorkflows();
-    selectedWorkflowId = workflows[0]?.id ?? '';
+    if (workflows[0]) selectWorkflow(workflows[0]);
     batchWorkflowId = workflows[0]?.id ?? '';
   });
 
   onDestroy(() => {
+    disposed = true;
     if (histogramTimer) clearTimeout(histogramTimer);
     if (statusTimer) clearInterval(statusTimer);
   });
@@ -159,11 +176,15 @@
   async function refreshHistogram() {
     if (!documentId) return;
     const requestId = ++histogramRequest;
+    const source = sampleSource();
     try {
-      const result = await invoke<HistogramResult>('generate_histogram', { operations, documentId, requestId });
-      if (result.isCurrent && requestId === histogramRequest) histogram = result;
+      const result = await invoke<HistogramResult>('generate_histogram', {
+        operations, documentId, requestId, ...(layerDocument ? { layerDocument } : {})
+      });
+      if (result.isCurrent && result.documentId === source.documentId && result.requestId === requestId &&
+        requestId === histogramRequest && sameSampleSource(source)) histogram = result;
     } catch (error) {
-      onmessage(errorMessage(error), 'error');
+      if (requestId === histogramRequest && sameSampleSource(source)) onmessage(errorMessage(error), 'error');
     }
   }
 
@@ -302,17 +323,45 @@
   function applySelective() { setOperation({ type: 'selective_color', target_hue: selectiveHue, width: selectiveWidth, adjustment: { cyan: selectiveCyan, magenta: selectiveMagenta, yellow: selectiveYellow, black: selectiveBlack } }, Math.abs(selectiveCyan) + Math.abs(selectiveMagenta) + Math.abs(selectiveYellow) + Math.abs(selectiveBlack) > 0.0001); }
 
   async function inspect() {
+    const source = sampleSource();
+    const requestId = ++sampleRequest;
     try {
-      pixel = await invoke<PixelInspection>('inspect_image_pixel', { x: pointX, y: pointY, operations, documentId });
-    } catch (error) { onmessage(errorMessage(error), 'error'); }
+      const result = await invoke<PixelInspection>('inspect_image_pixel', {
+        x: pointX, y: pointY, operations, documentId, ...(layerDocument ? { layerDocument } : {})
+      });
+      if (requestId === sampleRequest && sameSampleSource(source)) pixel = result;
+    } catch (error) {
+      if (requestId === sampleRequest && sameSampleSource(source)) onmessage(errorMessage(error), 'error');
+    }
   }
 
   async function pickPoint(white: boolean) {
+    const source = sampleSource();
+    const requestId = ++sampleRequest;
+    const x = pointX; const y = pointY;
     try {
-      const operation = await invoke<EditOperation>('create_point_operation', { x: pointX, y: pointY, white, operations, documentId });
-      setOperation(operation);
-      onmessage(`${white ? 'White' : 'Black'} point sampled at ${pointX}, ${pointY}`);
-    } catch (error) { onmessage(errorMessage(error), 'error'); }
+      const operation = await invoke<EditOperation>('create_point_operation', {
+        x, y, white, operations, documentId, ...(layerDocument ? { layerDocument } : {})
+      });
+      if (requestId !== sampleRequest || !sameSampleSource(source)) return;
+      const accepted = await setOperation(operation);
+      // The accepted edit itself changes the source/revision; only suppress
+      // completion after a document switch, cancellation, or rejected commit.
+      if (!disposed && source.documentId === documentId && accepted !== false) {
+        onmessage(`${white ? 'White' : 'Black'} point sampled at ${x}, ${y}`);
+      }
+    } catch (error) {
+      if (requestId === sampleRequest && sameSampleSource(source)) onmessage(errorMessage(error), 'error');
+    }
+  }
+
+  function sampleSource() {
+    return { documentId, layerRevision, layerDocument, operationsKey: JSON.stringify(operations) };
+  }
+
+  function sameSampleSource(source: ReturnType<typeof sampleSource>) {
+    return !disposed && source.documentId === documentId && source.layerRevision === layerRevision &&
+      source.layerDocument === layerDocument && source.operationsKey === JSON.stringify(operations);
   }
 
   function persistWorkflows(next: Workflow[]) {
@@ -330,28 +379,38 @@
       onmessage(errors.join(' '), 'error'); return;
     }
     persistWorkflows(upsertWorkflow(workflows, value));
-    selectedWorkflowId = value.id; batchWorkflowId = value.id; workflowName = '';
+    selectWorkflow(value); batchWorkflowId = value.id; workflowName = '';
     onmessage('Workflow saved locally');
   }
 
   function updateSelected(update: (workflow: Workflow) => Workflow) {
-    if (!selectedWorkflow) return;
+    if (!selectedWorkflow) return false;
     const next = update(structuredClone(selectedWorkflow));
     next.updatedAt = new Date().toISOString();
+    const errors = validateWorkflow(next);
+    if (errors.length) { onmessage(errors.join(' '), 'error'); return false; }
     persistWorkflows(upsertWorkflow(workflows, next));
+    return true;
   }
 
   function selectWorkflow(workflow: Workflow) {
     selectedWorkflowId = workflow.id;
     workflowJson = JSON.stringify(workflow.operations, null, 2);
+    layerWorkflowJson = JSON.stringify(workflow.layerSteps, null, 2);
   }
 
   async function applyWorkflow(workflow: Workflow) {
+    const source = sampleSource();
+    const requestId = ++workflowRequest;
     try {
-      const accepted = await oncommit(cloneOperations(workflow.operations));
-      if (accepted === false) onmessage(`${workflow.name} was not applied.`, 'error');
+      const errors = validateWorkflow(workflow);
+      if (errors.length) throw new Error(errors.join(' '));
+      const accepted = await onworkflow(cloneWorkflow(workflow));
+      if (accepted === false && requestId === workflowRequest && sameSampleSource(source)) {
+        onmessage(`${workflow.name} was not applied.`, 'error');
+      }
     } catch (error) {
-      onmessage(errorMessage(error), 'error');
+      if (requestId === workflowRequest && sameSampleSource(source)) onmessage(errorMessage(error), 'error');
     }
   }
 
@@ -359,14 +418,27 @@
     try {
       if (workflowJson.length > MAX_WORKFLOW_JSON_CHARACTERS) throw new Error('Operation JSON exceeds the bounded limit.');
       const parsed: unknown = JSON.parse(workflowJson);
-      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Operation JSON must be a non-empty array.');
+      if (!Array.isArray(parsed)) throw new Error('Operation JSON must be an array.');
       if (parsed.length > MAX_WORKFLOW_OPERATIONS) throw new Error('Operation JSON has too many operations.');
       parsed.forEach((operation, index) => {
         const error = validateEditOperation(operation);
         if (error) throw new Error(`Operation ${index + 1}: ${error}`);
       });
-      updateSelected((workflow) => ({ ...workflow, operations: structuredClone(parsed) as EditOperation[] }));
-      onmessage('Workflow definition updated locally');
+      if (updateSelected((workflow) => ({ ...workflow, operations: structuredClone(parsed) as EditOperation[] }))) {
+        onmessage('Workflow definition updated locally');
+      }
+    } catch (error) { onmessage(errorMessage(error), 'error'); }
+  }
+
+  function applyLayerWorkflowJson() {
+    try {
+      if (layerWorkflowJson.length > MAX_WORKFLOW_JSON_CHARACTERS) throw new Error('Layer step JSON exceeds the bounded limit.');
+      const parsed: unknown = JSON.parse(layerWorkflowJson);
+      const errors = validateLayerWorkflowSteps(parsed);
+      if (errors.length) throw new Error(errors.join(' '));
+      if (updateSelected((workflow) => ({ ...workflow, layerSteps: structuredClone(parsed) as Workflow['layerSteps'] }))) {
+        onmessage('Workflow layer steps updated locally');
+      }
     } catch (error) { onmessage(errorMessage(error), 'error'); }
   }
 
@@ -374,12 +446,10 @@
     const path = await open({ multiple: false, directory: false, filters: [{ name: 'PhotoForge workflow', extensions: ['json'] }] });
     if (typeof path !== 'string') return;
     try {
-      const document = await invoke<WorkflowDocument>('import_workflow', { path });
-      if (!document || document.schemaVersion !== 1) throw new Error('Unsupported workflow schema version.');
-      const errors = validateWorkflow(document.workflow);
-      if (errors.length) throw new Error(errors.join(' '));
+      const imported = await invoke<WorkflowDocument>('import_workflow', { path });
+      const document = parseWorkflowDocument(JSON.stringify(imported));
       persistWorkflows(upsertWorkflow(workflows, document.workflow));
-      selectedWorkflowId = document.workflow.id;
+      selectWorkflow(document.workflow);
       onmessage('Workflow imported and validated');
     } catch (error) { onmessage(errorMessage(error), 'error'); }
   }
@@ -548,11 +618,12 @@
   {:else if tab === 'workflows'}
     <div class="professional-panel workflow-panel">
       <div class="record-card"><strong>Record current pipeline</strong><input aria-label="Workflow name" placeholder="Workflow name" bind:value={workflowName} /><input aria-label="Workflow folder" placeholder="Folder (optional)" bind:value={workflowFolder} /><button class="primary" type="button" disabled={!operations.length} on:click={recordWorkflow}>Save workflow · {operations.length} edits</button></div>
+      <p class="empty-copy">Recording captures document operations only. Add layer steps through imported version 2 JSON or the layer-step editor below.</p>
       <div class="workflow-toolbar"><input aria-label="Search workflows" placeholder="Search workflows" bind:value={workflowSearch} /><button on:click={importWorkflowFile}>Import JSON</button><button disabled={!selectedWorkflow} on:click={exportSelectedWorkflow}>Export JSON</button></div>
       <div class="workflow-list">
         {#each visibleWorkflows as workflow}
           <article class:selected={workflow.id === selectedWorkflowId}>
-            <button class="workflow-main" type="button" on:click={() => selectWorkflow(workflow)}><span><strong>{workflow.name}</strong><small>{workflow.folder || 'Unfiled'} · {workflow.operations.length} operations</small></span></button>
+            <button class="workflow-main" type="button" on:click={() => selectWorkflow(workflow)}><span><strong>{workflow.name}</strong><small>{workflow.folder || 'Unfiled'} · {workflow.operations.length} operations · {workflow.layerSteps.length} layer steps</small></span></button>
             <div><button aria-label={`Favorite ${workflow.name}`} on:click={() => persistWorkflows(toggleFavorite(workflows, workflow.id))}>{workflow.favorite ? '★' : '☆'}</button><button on:click={() => applyWorkflow(workflow)}>Replay</button><button on:click={() => persistWorkflows(duplicateWorkflow(workflows, workflow.id))}>Duplicate</button><button on:click={() => persistWorkflows(removeWorkflow(workflows, workflow.id))}>Delete</button></div>
           </article>
         {:else}<p class="empty-copy">No saved workflows match this search.</p>{/each}
@@ -561,6 +632,10 @@
         <div class="workflow-editor"><h3>Workflow editor</h3><label>Name<input value={selectedWorkflow.name} on:change={(event) => updateSelected((workflow) => ({ ...workflow, name: event.currentTarget.value }))} /></label><label>Folder<input value={selectedWorkflow.folder} on:change={(event) => updateSelected((workflow) => ({ ...workflow, folder: event.currentTarget.value }))} /></label>
           <ol>{#each selectedWorkflow.operations as operation, index}<li><span>{index + 1}. {operationLabels[operationType(operation)]}{operation.type === 'masked' ? ' · Masked' : ''}</span><div><button aria-label="Move up" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, -1) }))}>↑</button><button aria-label="Move down" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: moveOperation(workflow.operations, index, 1) }))}>↓</button><button aria-label="Duplicate operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: duplicateOperationAt(workflow.operations, index) }))}>⧉</button><button aria-label="Delete operation" on:click={() => updateSelected((workflow) => ({ ...workflow, operations: removeOperationAt(workflow.operations, index) }))}>×</button></div></li>{/each}</ol>
           <label>Typed operation JSON<textarea rows="8" bind:value={workflowJson} placeholder="Select workflow to edit operation parameters"></textarea></label><div class="button-row"><button on:click={applyWorkflowJson}>Validate & update</button><button class="primary" on:click={() => applyWorkflow(selectedWorkflow)}>Preview workflow</button></div>
+          <h3>Layer steps</h3>
+          <ol aria-label="Workflow layer steps">{#each describeLayerSteps(selectedWorkflow.layerSteps) as label}<li>{label}</li>{/each}</ol>
+          <label>Typed layer-step JSON<textarea rows="8" bind:value={layerWorkflowJson} placeholder="Select workflow to edit layer steps"></textarea></label>
+          <button type="button" on:click={applyLayerWorkflowJson}>Validate & update layer steps</button>
         </div>
       {/if}
     </div>

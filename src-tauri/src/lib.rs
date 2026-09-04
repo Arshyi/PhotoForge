@@ -1,5 +1,8 @@
-mod application;
-mod commands;
+// Public so the integration tests can drive the real Tauri command boundary —
+// dispatch, argument deserialization, and managed state — instead of calling the
+// underlying Rust functions directly. Nothing outside the app consumes them.
+pub mod application;
+pub mod commands;
 pub mod components;
 pub mod domain;
 pub mod error;

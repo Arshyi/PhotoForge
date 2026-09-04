@@ -1,17 +1,18 @@
 use crate::application::AppState;
-use crate::domain::{EditOperation, ExportProfile, ExportResult, PreviewResult};
+use crate::domain::{EditOperation, ExportProfile, ExportResult, ImageMetadata, PreviewResult};
 use crate::error::AppError;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
-use crate::infrastructure::{encode_preview, load_image, save_image_with_profile};
+use crate::infrastructure::{encode_preview, load_image, save_image_with_profile, LoadedImage};
 use crate::layers::{
-    layer_mask_to_selection, preview_dimensions, render_layers, selection_to_layer_mask, Layer,
-    LayerDocument, LayerKind, RenderOptions, ResolvedPixels,
+    layer_mask_to_selection, preview_dimensions, render_layers, selection_to_layer_mask, BlendMode,
+    Layer, LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
 };
 use crate::mask::{MaskBitmap, MaskSnapshot};
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::State;
 
@@ -47,6 +48,11 @@ pub struct ProjectSaveResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLoadResult {
+    pub document_id: u64,
+    pub is_current: bool,
+    pub metadata: ImageMetadata,
+    pub original_preview_data_url: String,
+    pub preview_data_url: String,
     pub document: LayerDocument,
     pub operations: Vec<EditOperation>,
     pub canvas_width: u32,
@@ -340,6 +346,79 @@ async fn render_subset_into_buffer(
     })
 }
 
+/// Validates that a merge request can be represented by one ordinary pixel
+/// layer without silently changing the visible composite. A contiguous normal
+/// source-over range is associative and can be rendered against transparency;
+/// a range that omits its backdrop cannot safely bake blend-dependent layers,
+/// adjustments, or pass-through groups.
+fn merge_targets(document: &LayerDocument, layer_ids: &[String]) -> Result<Vec<Layer>, AppError> {
+    if layer_ids.is_empty() {
+        return Err(AppError::InvalidLayerDocument(
+            "merging requires at least one layer".into(),
+        ));
+    }
+    let paths: Vec<Vec<usize>> = layer_ids
+        .iter()
+        .map(|id| {
+            document
+                .path_to(id)
+                .ok_or_else(|| AppError::LayerNotFound(id.clone()))
+        })
+        .collect::<Result<_, _>>()?;
+    let parent_path = paths[0][..paths[0].len() - 1].to_vec();
+    if paths
+        .iter()
+        .any(|path| path.len() != parent_path.len() + 1 || path[..path.len() - 1] != parent_path)
+    {
+        return Err(AppError::InvalidLayerDocument(
+            "merging requires layers from one sibling stack".into(),
+        ));
+    }
+    let parent = if parent_path.is_empty() {
+        None
+    } else {
+        document.layer_at(&parent_path)
+    };
+    let siblings: &[Layer] = match parent {
+        Some(layer) => layer.children(),
+        None => &document.layers,
+    };
+    let mut indices: Vec<usize> = paths.iter().map(|path| path[path.len() - 1]).collect();
+    indices.sort_unstable();
+    if indices.windows(2).any(|pair| pair[0] == pair[1])
+        || indices
+            .windows(2)
+            .any(|pair| pair[1] != pair[0].saturating_add(1))
+    {
+        return Err(AppError::InvalidLayerDocument(
+            "merging requires a contiguous sibling range".into(),
+        ));
+    }
+    let selected: Vec<Layer> = indices
+        .iter()
+        .map(|index| {
+            siblings
+                .get(*index)
+                .cloned()
+                .ok_or_else(|| AppError::LayerNotFound(layer_ids[0].clone()))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let omitted_backdrop = indices[0] > 0 || parent.is_some_and(|layer| layer.is_pass_through());
+    if omitted_backdrop
+        && selected.iter().any(|layer| {
+            layer.kind() == LayerKind::Adjustment
+                || layer.blend_mode != BlendMode::Normal
+                || layer.is_pass_through()
+        })
+    {
+        return Err(AppError::InvalidLayerDocument(
+            "this merge depends on layers beneath the selection because of a blend mode, adjustment layer, or pass-through group".into(),
+        ));
+    }
+    Ok(selected)
+}
+
 /// Merges the named layers, bottom to top, into a single pixel buffer.
 #[tauri::command]
 pub async fn merge_layer_pixels(
@@ -348,28 +427,9 @@ pub async fn merge_layer_pixels(
     state: State<'_, AppState>,
 ) -> Result<LayerPixelsResult, AppError> {
     document.validate()?;
-    if layer_ids.is_empty() {
-        return Err(AppError::InvalidLayerDocument(
-            "merging requires at least one layer".into(),
-        ));
-    }
     // Preserve the document's own bottom-to-top order rather than the order the
     // caller listed identifiers in, so a merge can never reorder pixels.
-    let mut ordered = Vec::new();
-    for layer in document.iter() {
-        if layer_ids.iter().any(|id| id == &layer.id) {
-            ordered.push(layer.clone());
-        }
-    }
-    if ordered.len() != layer_ids.len() {
-        return Err(AppError::LayerNotFound(
-            layer_ids
-                .iter()
-                .find(|id| !document.contains(id))
-                .cloned()
-                .unwrap_or_default(),
-        ));
-    }
+    let ordered = merge_targets(&document, &layer_ids)?;
     render_subset_into_buffer(document, ordered, &state).await
 }
 
@@ -392,12 +452,17 @@ pub async fn rasterize_layer_transform(
     state: State<'_, AppState>,
 ) -> Result<LayerPixelsResult, AppError> {
     request.document.validate()?;
-    let layer = find_layer(&request.document, &request.layer_id)?;
+    let mut layer = find_layer(&request.document, &request.layer_id)?;
     if layer.kind() != LayerKind::Pixel {
         return Err(AppError::InvalidLayerDocument(
             "only pixel layers can have their transform rasterized".into(),
         ));
     }
+    // Bake placement and mask only. Opacity, blend mode and visibility remain
+    // editable on the resulting layer and must not be applied a second time.
+    layer.visible = true;
+    layer.opacity = 1.0;
+    layer.blend_mode = crate::layers::BlendMode::Normal;
     render_subset_into_buffer(request.document, vec![layer], &state).await
 }
 
@@ -631,13 +696,26 @@ pub async fn validate_layer_document(document: LayerDocument) -> Result<usize, A
 #[tauri::command]
 pub async fn retain_layer_pixels(
     pixel_ids: Vec<String>,
+    document_id: u64,
     state: State<'_, AppState>,
 ) -> Result<LayerStoreReport, AppError> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
     let mut store = state
         .layers
         .lock()
         .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    let released = store.retain(&pixel_ids);
+    let is_current = session
+        .as_ref()
+        .is_some_and(|session| session.document_id == document_id)
+        && state.pending_open_request.load(Ordering::Acquire) == 0;
+    let released = if is_current {
+        store.retain(&pixel_ids)
+    } else {
+        0
+    };
     Ok(LayerStoreReport {
         buffers: store.buffer_count(),
         released,
@@ -713,39 +791,132 @@ pub async fn save_layer_project(
     })
 }
 
-/// Reads an editable project file and rebinds the session pixel store to it.
-#[tauri::command]
-pub async fn load_layer_project(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<ProjectLoadResult, AppError> {
-    let input_path = PathBuf::from(path);
-    let started = Instant::now();
-    let loaded =
-        tauri::async_runtime::spawn_blocking(move || crate::layers::load_project(&input_path))
-            .await
-            .map_err(|_| AppError::ProcessingFailure("project load worker stopped".into()))??;
+/// A fully staged replacement. Preparing it never touches the current session.
+struct PreparedProject {
+    store: LayerPixelStore,
+    source: LoadedImage,
+    result: ProjectLoadResult,
+}
 
-    let mut store = state
-        .layers
-        .lock()
-        .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    store.reset(loaded.document.canvas_width, loaded.document.canvas_height)?;
+fn prepare_project(
+    loaded: LoadedProject,
+    path: PathBuf,
+    request_id: u64,
+) -> Result<PreparedProject, AppError> {
+    loaded.document.validate()?;
+    let (width, height) = (loaded.document.canvas_width, loaded.document.canvas_height);
+    let mut store = LayerPixelStore::default();
+    store.reset(width, height)?;
     for (pixel_id, image) in loaded.pixels {
         store.register_with_id(&pixel_id, image)?;
     }
-    drop(store);
-
-    Ok(ProjectLoadResult {
-        canvas_width: loaded.document.canvas_width,
-        canvas_height: loaded.document.canvas_height,
-        document: loaded.document,
-        operations: loaded.document_operations,
-        application_version: loaded.application_version,
-        created_at: loaded.created_at,
-        modified_at: loaded.modified_at,
-        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    let resolved = store.resolve(&loaded.document.referenced_pixel_ids(), false)?;
+    let original = Arc::new(DynamicImage::ImageRgba8(render_layers(
+        &loaded.document.layers,
+        width,
+        height,
+        &resolved,
+        RenderOptions::default(),
+    )?));
+    let (preview_width, preview_height) = preview_dimensions(width, height);
+    let preview = if (preview_width, preview_height) == (width, height) {
+        Arc::clone(&original)
+    } else {
+        Arc::new(original.thumbnail(preview_width, preview_height))
+    };
+    let original_preview_data_url = encode_preview(&preview)?;
+    let operations = prepare_preview_operations(
+        &loaded.document_operations,
+        (width, height),
+        (preview_width, preview_height),
+    )?;
+    let preview_data_url = if operations.is_empty() {
+        original_preview_data_url.clone()
+    } else {
+        encode_preview(&apply_pipeline(&preview, &operations)?)?
+    };
+    let metadata = ImageMetadata {
+        filename: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("PhotoForge project")
+            .into(),
+        width,
+        height,
+        format: "PhotoForge".into(),
+        file_size: std::fs::metadata(&path)
+            .map(|value| value.len())
+            .unwrap_or(0),
+        color_space: "sRGB".into(),
+        bit_depth: 8,
+        has_alpha: true,
+        created_at: Some(loaded.created_at.clone()).filter(|value| !value.is_empty()),
+        modified_at: Some(loaded.modified_at.clone()).filter(|value| !value.is_empty()),
+        camera_model: None,
+        exif_available: false,
+    };
+    Ok(PreparedProject {
+        source: LoadedImage {
+            path,
+            original,
+            preview,
+            metadata: metadata.clone(),
+        },
+        store,
+        result: ProjectLoadResult {
+            document_id: request_id,
+            is_current: false,
+            metadata,
+            original_preview_data_url,
+            preview_data_url,
+            canvas_width: width,
+            canvas_height: height,
+            document: loaded.document,
+            operations: loaded.document_operations,
+            application_version: loaded.application_version,
+            created_at: loaded.created_at,
+            modified_at: loaded.modified_at,
+            processing_time_ms: 0.0,
+        },
     })
+}
+
+async fn open_project(
+    path: String,
+    request_id: u64,
+    recovery: bool,
+    state: &AppState,
+) -> Result<ProjectLoadResult, AppError> {
+    let started = Instant::now();
+    let request = super::editor::OpenRequest::begin(state, request_id)?;
+    let input_path = PathBuf::from(path);
+    let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        let loaded = if recovery {
+            crate::layers::read_managed_snapshot(&input_path)?
+        } else {
+            crate::layers::load_project(&input_path)?
+        };
+        prepare_project(loaded, input_path, request_id)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("project load worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(prepared.result)
+}
+
+/// Reads an editable project and atomically installs its source and pixel store.
+#[tauri::command]
+pub async fn load_layer_project(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ProjectLoadResult, AppError> {
+    open_project(path, request_id, false, &state).await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -811,36 +982,10 @@ pub async fn list_recovery_snapshots() -> Result<RecoveryListResult, AppError> {
 #[tauri::command]
 pub async fn restore_recovery_snapshot(
     path: String,
+    request_id: u64,
     state: State<'_, AppState>,
 ) -> Result<ProjectLoadResult, AppError> {
-    let snapshot = PathBuf::from(path);
-    let started = Instant::now();
-    let loaded = tauri::async_runtime::spawn_blocking(move || {
-        crate::layers::read_managed_snapshot(&snapshot)
-    })
-    .await
-    .map_err(|_| AppError::ProcessingFailure("recovery worker stopped".into()))??;
-
-    let mut store = state
-        .layers
-        .lock()
-        .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-    store.reset(loaded.document.canvas_width, loaded.document.canvas_height)?;
-    for (pixel_id, image) in loaded.pixels {
-        store.register_with_id(&pixel_id, image)?;
-    }
-    drop(store);
-
-    Ok(ProjectLoadResult {
-        canvas_width: loaded.document.canvas_width,
-        canvas_height: loaded.document.canvas_height,
-        document: loaded.document,
-        operations: loaded.document_operations,
-        application_version: loaded.application_version,
-        created_at: loaded.created_at,
-        modified_at: loaded.modified_at,
-        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
-    })
+    open_project(path, request_id, true, &state).await
 }
 
 #[tauri::command]
@@ -880,4 +1025,122 @@ pub async fn plan_layer_workflow(
         steps: steps.len(),
         targets,
     })
+}
+
+/// Registers every layer command on a Tauri builder.
+///
+/// Exposed so integration tests can stand up an application that dispatches
+/// these commands the way the running program does — through the IPC boundary,
+/// with real argument deserialization and real managed state — rather than by
+/// calling the functions directly and proving nothing about the wiring. The
+/// shipped binary registers its commands in `lib.rs` and never calls this.
+#[doc(hidden)]
+pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        render_layer_composite,
+        export_layer_composite,
+        import_layer_image,
+        create_layer_pixels,
+        merge_layer_pixels,
+        flatten_layer_document,
+        rasterize_layer_transform,
+        apply_operations_to_layer,
+        render_layer_thumbnail,
+        layer_mask_from_selection,
+        selection_from_layer_mask,
+        create_layer_mask,
+        validate_layer_document,
+        retain_layer_pixels,
+        layer_store_report,
+        save_layer_project,
+        load_layer_project,
+        write_recovery_snapshot,
+        list_recovery_snapshots,
+        restore_recovery_snapshot,
+        discard_recovery_snapshot,
+        plan_layer_workflow,
+        super::editor::analyze_image,
+        super::professional::generate_histogram,
+        super::professional::inspect_image_pixel,
+        super::professional::create_point_operation,
+        super::mask::magic_wand_selection,
+        super::mask::color_range_selection,
+        super::mask::refine_selection_mask
+    ])
+}
+
+#[cfg(test)]
+mod project_session_tests {
+    use super::*;
+    use crate::layers::test_pixel_layer;
+
+    fn project(pixel_id: &str, value: u8) -> LoadedProject {
+        LoadedProject {
+            document: LayerDocument {
+                schema_version: crate::layers::LAYER_SCHEMA_VERSION,
+                canvas_width: 2,
+                canvas_height: 2,
+                layers: vec![test_pixel_layer("background", pixel_id, 2, 2)],
+                active_layer_id: Some("background".into()),
+            },
+            document_operations: vec![],
+            pixels: vec![(
+                pixel_id.into(),
+                RgbaImage::from_pixel(2, 2, Rgba([value, 0, 0, 255])),
+            )],
+            application_version: "test".into(),
+            created_at: String::new(),
+            modified_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn failed_staging_preserves_the_previous_session_and_all_pixel_buffers() {
+        let state = AppState::default();
+        let prepared = prepare_project(project("px1", 10), "old.photoforge".into(), 1).unwrap();
+        let old = super::super::editor::OpenRequest::begin(&state, 1).unwrap();
+        assert!(old.commit(prepared.source, prepared.store).unwrap());
+        drop(old);
+        {
+            let _new = super::super::editor::OpenRequest::begin(&state, 2).unwrap();
+            let mut invalid = project("px2", 20);
+            // One valid staged buffer is followed by an invalid registration.
+            invalid
+                .pixels
+                .push(("../escape".into(), RgbaImage::new(2, 2)));
+            assert!(prepare_project(invalid, "bad.photoforge".into(), 2).is_err());
+        }
+        assert_eq!(state.pending_open_request.load(Ordering::Acquire), 0);
+        assert_eq!(session_document_id(&state).unwrap(), 1);
+        let store = state.layers.lock().unwrap();
+        assert!(store.contains("px1"));
+        assert!(!store.contains("px2"));
+        assert_eq!(store.full("px1").unwrap().get_pixel(0, 0).0[0], 10);
+    }
+
+    #[test]
+    fn stale_open_cannot_commit_or_clear_the_newer_requests_pending_flag() {
+        let state = AppState::default();
+        let old = super::super::editor::OpenRequest::begin(&state, 1).unwrap();
+        let old_prepared = prepare_project(project("px1", 10), "old.photoforge".into(), 1).unwrap();
+        let current = super::super::editor::OpenRequest::begin(&state, 2).unwrap();
+        assert!(!old.commit(old_prepared.source, old_prepared.store).unwrap());
+        drop(old);
+        assert_eq!(state.pending_open_request.load(Ordering::Acquire), 2);
+        assert!(state.session.lock().unwrap().is_none());
+        let prepared = prepare_project(project("px2", 20), "new.photoforge".into(), 2).unwrap();
+        assert!(current.commit(prepared.source, prepared.store).unwrap());
+        drop(current);
+        assert_eq!(state.pending_open_request.load(Ordering::Acquire), 0);
+        assert_eq!(session_document_id(&state).unwrap(), 2);
+        assert!(state.layers.lock().unwrap().contains("px2"));
+    }
+
+    #[test]
+    fn zero_open_identifier_is_rejected_without_setting_pending() {
+        let state = AppState::default();
+        assert!(super::super::editor::OpenRequest::begin(&state, 0).is_err());
+        assert_eq!(state.pending_open_request.load(Ordering::Acquire), 0);
+        assert!(state.session.lock().unwrap().is_none());
+    }
 }

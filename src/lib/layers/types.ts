@@ -1,4 +1,4 @@
-import type { BaseEditOperation, EditOperation } from '../types/editor';
+import type { BaseEditOperation, EditOperation, ImageMetadata } from '../types/editor';
 import type { MaskSnapshot } from '../selections/types';
 
 /// Mirrors `layers::LAYER_SCHEMA_VERSION`.
@@ -48,6 +48,14 @@ export const blendModes: { id: BlendMode; label: string; group: string }[] = [
 
 export type LayerKind = 'pixel' | 'group' | 'adjustment';
 
+/** Mirrors `layers::LayerInterpolation`. */
+export type LayerInterpolation = 'bilinear' | 'nearest';
+
+export const interpolationModes: { id: LayerInterpolation; label: string; hint: string }[] = [
+  { id: 'bilinear', label: 'Smooth', hint: 'Blends neighbouring pixels. Best for photographs.' },
+  { id: 'nearest', label: 'Hard edge', hint: 'Copies the nearest pixel. Best for pixel art and screenshots.' }
+];
+
 export interface LayerTransform {
   translateX: number;
   translateY: number;
@@ -56,6 +64,8 @@ export interface LayerTransform {
   rotationDegrees: number;
   flipHorizontal: boolean;
   flipVertical: boolean;
+  /** Absent in projects written before 0.8.2, which always sampled bilinearly. */
+  interpolation: LayerInterpolation;
 }
 
 export const identityTransform: LayerTransform = {
@@ -65,7 +75,8 @@ export const identityTransform: LayerTransform = {
   scaleY: 1,
   rotationDegrees: 0,
   flipHorizontal: false,
-  flipVertical: false
+  flipVertical: false,
+  interpolation: 'bilinear'
 };
 
 export interface LayerMask {
@@ -147,6 +158,11 @@ export interface ProjectSaveResult {
 }
 
 export interface ProjectLoadResult {
+  documentId: number;
+  isCurrent: boolean;
+  metadata: ImageMetadata;
+  originalPreviewDataUrl: string;
+  previewDataUrl: string;
   document: LayerDocument;
   operations: EditOperation[];
   canvasWidth: number;
@@ -198,4 +214,7 @@ export type LayerPanelAction =
   | 'edit_adjustment'
   | 'reset_transform'
   | 'rasterize_transform'
-  | 'toggle_pass_through';
+  | 'toggle_pass_through'
+  | 'flip_horizontal'
+  | 'flip_vertical'
+  | 'transform_mode';

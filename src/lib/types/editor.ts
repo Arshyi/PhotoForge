@@ -1,3 +1,5 @@
+import type { LayerWorkflowStep } from '../layers/workflow';
+
 export interface CurvePoint { input: number; output: number }
 export interface CurveSet {
   rgb: CurvePoint[];
@@ -145,6 +147,8 @@ export interface EditPlan {
   confidence: number;
   warnings: string[];
   operations: EditOperation[];
+  /** Older operation-only planners may omit this field. */
+  layerSteps?: LayerWorkflowStep[];
   operationExplanations: string[];
 }
 
@@ -432,11 +436,12 @@ export interface Workflow {
   folder: string;
   favorite: boolean;
   operations: EditOperation[];
+  layerSteps: LayerWorkflowStep[];
   createdAt: string;
   updatedAt: string;
 }
 
-export interface WorkflowDocument { schemaVersion: 1; workflow: Workflow }
+export interface WorkflowDocument { schemaVersion: 1 | 2; workflow: Workflow }
 export type ExportProfile = 'web' | 'print' | 'archive' | 'lossless' | 'high_jpeg' | 'maximum_compression';
 export interface BatchOptions {
   inputFolder: string;

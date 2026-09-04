@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MaskSnapshot } from '../selections/types';
-import RefineSelectionDialog, { REFINE_SELECTION_DEFAULTS } from './RefineSelectionDialog.svelte';
+import RefineSelectionDialog from './RefineSelectionDialog.svelte';
+import { REFINE_SELECTION_DEFAULTS } from './refineSelectionDefaults';
 
 const originalMask: MaskSnapshot = {
   version: 1,

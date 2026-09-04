@@ -1,6 +1,6 @@
 use super::blend::{clamp_unit, composite_pixel, BlendMode};
 use super::model::{Layer, LayerContent, LayerDocument, MAX_GROUP_DEPTH};
-use super::transform::LayerTransform;
+use super::transform::{LayerInterpolation, LayerTransform};
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::image_processing::apply_operation;
@@ -112,10 +112,10 @@ fn scaled_dimension(value: u32, scale: f64) -> u32 {
 
 /// Composites one stack of siblings onto a transparent backdrop.
 ///
-/// Groups are **isolated**: children composite against a transparent buffer of
-/// their own, and only the finished group result is blended into the parent
-/// with the group's mask, opacity, and blend mode. Pass-through groups are not
-/// implemented; see `docs/compositing.md`.
+/// Isolated groups composite children against a transparent buffer of their
+/// own before blending the finished result into the parent. Pass-through
+/// groups instead let their children operate on the existing backdrop, then
+/// apply the group's mask and opacity to that reworked result.
 ///
 /// Recursion is bounded because `LayerDocument::validate` rejects any tree
 /// deeper than `MAX_GROUP_DEPTH` before a render begins, and this function
@@ -125,6 +125,7 @@ fn composite_stack(
     context: &RenderContext<'_>,
     depth: usize,
 ) -> Result<RgbaImage, AppError> {
+    context.check_cancelled()?;
     if depth > MAX_GROUP_DEPTH {
         return Err(AppError::LayerDepthExceeded {
             depth,
@@ -187,7 +188,7 @@ fn composite_onto(
             }
         }
     }
-    Ok(())
+    context.check_cancelled()
 }
 
 /// Interpolates a pass-through group's reworked backdrop back over the original,
@@ -202,17 +203,29 @@ fn cross_fade(
     layer: &Layer,
     context: &RenderContext<'_>,
 ) -> Result<(), AppError> {
+    context.check_cancelled()?;
     let opacity = clamp_unit(layer.opacity);
     let mask = decoded_mask(layer)?;
     let inverted = mask_inverted(layer);
+    let interpolation = layer.transform.interpolation;
     let transform = render_transform(&layer.transform, context.scale);
     let inverse = transform.inverse(context.canvas_width, context.canvas_height)?;
 
     // A fully opaque, unmasked pass-through group is exactly its reworked
     // backdrop, which is the common case and needs no per-pixel mixing.
     if opacity >= 1.0 && mask.is_none() {
-        backdrop.copy_from_slice(reworked.as_raw());
-        return Ok(());
+        let row_bytes = context.canvas_width as usize * 4;
+        return for_each_row_band(
+            backdrop.as_mut(),
+            context.canvas_width,
+            0,
+            context.canvas_height,
+            context.cancel,
+            |y, row| {
+                let start = y as usize * row_bytes;
+                row.copy_from_slice(&reworked.as_raw()[start..start + row_bytes]);
+            },
+        );
     }
 
     let canvas_width = context.canvas_width;
@@ -238,6 +251,7 @@ fn cross_fade(
                         local_y,
                         canvas_width,
                         canvas_height,
+                        interpolation,
                     );
                 if coverage <= 0.0 {
                     continue;
@@ -313,6 +327,7 @@ fn draw_source(
     let inverted = mask_inverted(layer);
     let opacity = clamp_unit(layer.opacity);
     let blend = layer.blend_mode;
+    let interpolation = layer.transform.interpolation;
 
     // Fast path for the most common placement: a whole-pixel position with no
     // mask, full opacity, and normal blending. Whole-pixel sampling is already
@@ -320,8 +335,14 @@ fn draw_source(
     // this produces byte-identical output without any resampling arithmetic.
     if blend == BlendMode::Normal && mask.is_none() && layer.opacity >= 1.0 {
         if let Some((offset_x, offset_y)) = transform.integer_translation() {
-            draw_source_over(backdrop, source, offset_x, offset_y, (x0, y0, x1, y1));
-            return Ok(());
+            return draw_source_over(
+                backdrop,
+                source,
+                offset_x,
+                offset_y,
+                (x0, y0, x1, y1),
+                context.cancel,
+            );
         }
     }
 
@@ -341,7 +362,7 @@ fn draw_source(
         |y, row| {
             for x in x0..x1 {
                 let (local_x, local_y) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
-                let Some(sample) = sample_rgba(source, local_x, local_y) else {
+                let Some(sample) = sample_rgba(source, local_x, local_y, interpolation) else {
                     continue;
                 };
                 let coverage = opacity
@@ -352,6 +373,7 @@ fn draw_source(
                         local_y,
                         source_width,
                         source_height,
+                        interpolation,
                     );
                 if coverage <= 0.0 || sample[3] <= 0.0 {
                     continue;
@@ -398,19 +420,38 @@ fn for_each_row_band<F>(
 where
     F: Fn(u32, &mut [u8]) + Sync,
 {
-    if y1 <= y0 {
-        return Ok(());
-    }
-    let row_bytes = width as usize * 4;
-    if row_bytes == 0 {
-        return Ok(());
-    }
-    let rows = y1 - y0;
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .min(MAX_RENDER_THREADS);
-    let threads = available.min((rows / MIN_ROWS_PER_THREAD).max(1) as usize);
+    for_each_row_band_with_threads(pixels, width, y0, y1, cancel, available, apply)
+}
+
+// Keeping the worker limit explicit here lets tests exercise both schedules,
+// including on a one-core CI runner, without relying on timing or sleeps.
+fn for_each_row_band_with_threads<F>(
+    pixels: &mut [u8],
+    width: u32,
+    y0: u32,
+    y1: u32,
+    cancel: Option<&AtomicBool>,
+    max_threads: usize,
+    apply: F,
+) -> Result<(), AppError>
+where
+    F: Fn(u32, &mut [u8]) + Sync,
+{
+    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(AppError::RenderCancelled);
+    }
+    if y1 <= y0 || width == 0 {
+        return Ok(());
+    }
+    let row_bytes = width as usize * 4;
+    let rows = y1 - y0;
+    let threads = max_threads
+        .clamp(1, MAX_RENDER_THREADS)
+        .min((rows / MIN_ROWS_PER_THREAD).max(1) as usize);
 
     let region = &mut pixels[y0 as usize * row_bytes..y1 as usize * row_bytes];
     if threads <= 1 {
@@ -420,24 +461,23 @@ where
             }
             apply(y0 + offset as u32, row);
         }
-        return Ok(());
-    }
-
-    let band_rows = rows.div_ceil(threads as u32) as usize;
-    std::thread::scope(|scope| {
-        for (band, chunk) in region.chunks_mut(band_rows * row_bytes).enumerate() {
-            let first_row = y0 + (band * band_rows) as u32;
-            let apply = &apply;
-            scope.spawn(move || {
-                for (offset, row) in chunk.chunks_mut(row_bytes).enumerate() {
-                    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                        break;
+    } else {
+        let band_rows = rows.div_ceil(threads as u32) as usize;
+        std::thread::scope(|scope| {
+            for (band, chunk) in region.chunks_mut(band_rows * row_bytes).enumerate() {
+                let first_row = y0 + (band * band_rows) as u32;
+                let apply = &apply;
+                scope.spawn(move || {
+                    for (offset, row) in chunk.chunks_mut(row_bytes).enumerate() {
+                        if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                            break;
+                        }
+                        apply(first_row + offset as u32, row);
                     }
-                    apply(first_row + offset as u32, row);
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
     if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         Err(AppError::RenderCancelled)
     } else {
@@ -456,54 +496,59 @@ fn draw_source_over(
     offset_x: i64,
     offset_y: i64,
     region: (u32, u32, u32, u32),
-) {
+    cancel: Option<&AtomicBool>,
+) -> Result<(), AppError> {
     let (x0, y0, x1, y1) = region;
     let (source_width, source_height) = source.dimensions();
     let backdrop_width = backdrop.width();
     let source_raw = source.as_raw();
-    let backdrop_raw: &mut [u8] = backdrop.as_mut();
-
-    for y in y0..y1 {
-        let source_y = i64::from(y) - offset_y;
-        if source_y < 0 || source_y >= i64::from(source_height) {
-            continue;
-        }
-        let source_row = source_y as usize * source_width as usize;
-        let backdrop_row = y as usize * backdrop_width as usize;
-        for x in x0..x1 {
-            let source_x = i64::from(x) - offset_x;
-            if source_x < 0 || source_x >= i64::from(source_width) {
-                continue;
+    for_each_row_band(
+        backdrop.as_mut(),
+        backdrop_width,
+        y0,
+        y1,
+        cancel,
+        |y, row| {
+            let source_y = i64::from(y) - offset_y;
+            if source_y < 0 || source_y >= i64::from(source_height) {
+                return;
             }
-            let source_index = (source_row + source_x as usize) * 4;
-            let alpha = source_raw[source_index + 3];
-            if alpha == 0 {
-                continue;
+            let source_row = source_y as usize * source_width as usize;
+            for x in x0..x1 {
+                let source_x = i64::from(x) - offset_x;
+                if source_x < 0 || source_x >= i64::from(source_width) {
+                    continue;
+                }
+                let source_index = (source_row + source_x as usize) * 4;
+                let alpha = source_raw[source_index + 3];
+                if alpha == 0 {
+                    continue;
+                }
+                let backdrop_index = x as usize * 4;
+                if alpha == u8::MAX {
+                    row[backdrop_index..backdrop_index + 4]
+                        .copy_from_slice(&source_raw[source_index..source_index + 4]);
+                    continue;
+                }
+                let source_pixel = [
+                    f32::from(source_raw[source_index]) / 255.0,
+                    f32::from(source_raw[source_index + 1]) / 255.0,
+                    f32::from(source_raw[source_index + 2]) / 255.0,
+                    f32::from(alpha) / 255.0,
+                ];
+                let backdrop_pixel = [
+                    f32::from(row[backdrop_index]) / 255.0,
+                    f32::from(row[backdrop_index + 1]) / 255.0,
+                    f32::from(row[backdrop_index + 2]) / 255.0,
+                    f32::from(row[backdrop_index + 3]) / 255.0,
+                ];
+                let result = composite_pixel(backdrop_pixel, source_pixel, BlendMode::Normal);
+                for channel in 0..4 {
+                    row[backdrop_index + channel] = to_byte(result[channel]);
+                }
             }
-            let backdrop_index = (backdrop_row + x as usize) * 4;
-            if alpha == u8::MAX {
-                backdrop_raw[backdrop_index..backdrop_index + 4]
-                    .copy_from_slice(&source_raw[source_index..source_index + 4]);
-                continue;
-            }
-            let source_pixel = [
-                f32::from(source_raw[source_index]) / 255.0,
-                f32::from(source_raw[source_index + 1]) / 255.0,
-                f32::from(source_raw[source_index + 2]) / 255.0,
-                f32::from(alpha) / 255.0,
-            ];
-            let backdrop_pixel = [
-                f32::from(backdrop_raw[backdrop_index]) / 255.0,
-                f32::from(backdrop_raw[backdrop_index + 1]) / 255.0,
-                f32::from(backdrop_raw[backdrop_index + 2]) / 255.0,
-                f32::from(backdrop_raw[backdrop_index + 3]) / 255.0,
-            ];
-            let result = composite_pixel(backdrop_pixel, source_pixel, BlendMode::Normal);
-            for channel in 0..4 {
-                backdrop_raw[backdrop_index + channel] = to_byte(result[channel]);
-            }
-        }
-    }
+        },
+    )
 }
 
 /// Re-evaluates an adjustment layer against the backdrop beneath it.
@@ -537,6 +582,7 @@ fn apply_adjustment(
     let inverted = mask_inverted(layer);
     let opacity = clamp_unit(layer.opacity);
     let blend = layer.blend_mode;
+    let interpolation = layer.transform.interpolation;
 
     context.check_cancelled()?;
     let canvas_width = context.canvas_width;
@@ -562,6 +608,7 @@ fn apply_adjustment(
                         local_y,
                         canvas_width,
                         canvas_height,
+                        interpolation,
                     );
                 if coverage <= 0.0 {
                     continue;
@@ -618,18 +665,29 @@ fn to_byte(value: f32) -> u8 {
 /// Samples a buffer at a continuous layer-space coordinate.
 ///
 /// Pixel centres sit at `index + 0.5`. Whole-pixel coordinates take an exact
-/// copy path so an identity or integer translation is lossless; anything else
-/// interpolates in premultiplied space, which is what prevents dark or light
-/// halos around transparent edges. Coordinates outside the buffer return
-/// `None`, and neighbours outside the buffer count as transparent so edges fade
-/// correctly instead of smearing.
-fn sample_rgba(source: &RgbaImage, x: f32, y: f32) -> Option<[f32; 4]> {
+/// copy path so an identity or integer translation is lossless. Bilinear mode
+/// interpolates in premultiplied space to prevent dark or light halos around
+/// transparent edges; nearest mode selects one pixel. Coordinates outside the
+/// buffer return `None`, and neighbours outside the buffer count as transparent
+/// so edges fade correctly instead of smearing.
+fn sample_rgba(
+    source: &RgbaImage,
+    x: f32,
+    y: f32,
+    interpolation: LayerInterpolation,
+) -> Option<[f32; 4]> {
     let (width, height) = source.dimensions();
     if !x.is_finite() || !y.is_finite() {
         return None;
     }
     if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
         return None;
+    }
+
+    if interpolation == LayerInterpolation::Nearest {
+        // The bounds check above already places x and y inside the buffer, so
+        // truncating lands on a real pixel without further clamping.
+        return Some(unpack(source.get_pixel(x as u32, y as u32)));
     }
 
     let sample_x = x - 0.5;
@@ -694,6 +752,7 @@ fn mask_coverage(
     local_y: f32,
     space_width: u32,
     space_height: u32,
+    interpolation: LayerInterpolation,
 ) -> f32 {
     let Some(mask) = mask else {
         return 1.0;
@@ -708,12 +767,25 @@ fn mask_coverage(
     if !x.is_finite() || !y.is_finite() {
         return 0.0;
     }
-    let x0 = x.floor() as u32;
-    let y0 = y.floor() as u32;
-    let x1 = (x0 + 1).min(mask.width() - 1);
-    let y1 = (y0 + 1).min(mask.height() - 1);
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
+    let (x0, y0) = if interpolation == LayerInterpolation::Nearest {
+        // x/y are pixel-centre coordinates after subtracting 0.5. Rounding,
+        // rather than flooring, keeps the mask on the same texel as artwork.
+        (x.round() as u32, y.round() as u32)
+    } else {
+        (x.floor() as u32, y.floor() as u32)
+    };
+    // Nearest sampling keeps a mask edge exactly as hard as the artwork it
+    // covers, which is the whole point of choosing it.
+    let (x1, y1, fx, fy) = if interpolation == LayerInterpolation::Nearest {
+        (x0, y0, 0.0, 0.0)
+    } else {
+        (
+            (x0 + 1).min(mask.width() - 1),
+            (y0 + 1).min(mask.height() - 1),
+            x - x0 as f32,
+            y - y0 as f32,
+        )
+    };
     let top = f32::from(mask.get(x0, y0)) * (1.0 - fx) + f32::from(mask.get(x1, y0)) * fx;
     let bottom = f32::from(mask.get(x0, y1)) * (1.0 - fx) + f32::from(mask.get(x1, y1)) * fx;
     let coverage = (top * (1.0 - fy) + bottom * fy) / 255.0;
@@ -1420,6 +1492,120 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_empty_document_does_not_report_a_successful_render() {
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(
+            render_document(
+                &document_with(vec![], 4, 4),
+                &MapSource::default(),
+                RenderOptions {
+                    cancel: Some(&cancel),
+                    ..RenderOptions::default()
+                }
+            ),
+            Err(AppError::RenderCancelled)
+        ));
+    }
+
+    #[test]
+    fn serial_row_bands_stop_between_rows_and_detect_cancellation_on_the_last_row() {
+        for height in [1, 4] {
+            let cancel = AtomicBool::new(false);
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let mut pixels = vec![0; height as usize * 4];
+            let result = for_each_row_band_with_threads(
+                &mut pixels,
+                1,
+                0,
+                height,
+                Some(&cancel),
+                1,
+                |_, row| {
+                    row.fill(255);
+                    count.fetch_add(1, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Release);
+                },
+            );
+            assert!(matches!(result, Err(AppError::RenderCancelled)));
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+            assert!(pixels[4..].iter().all(|value| *value == 0));
+        }
+    }
+
+    #[test]
+    fn parallel_row_bands_stop_between_rows_without_timing_assumptions() {
+        let height = 2 * MIN_ROWS_PER_THREAD;
+        let cancel = AtomicBool::new(false);
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let started = std::sync::Barrier::new(2);
+        let mut pixels = vec![0; height as usize * 4];
+        let result = for_each_row_band_with_threads(
+            &mut pixels,
+            1,
+            0,
+            height,
+            Some(&cancel),
+            2,
+            |y, row| {
+                row.fill(255);
+                count.fetch_add(1, Ordering::Relaxed);
+                // Both workers enter their first row before either cancels.
+                // Only those two in-flight rows may finish after the signal.
+                if y == 0 || y == MIN_ROWS_PER_THREAD {
+                    started.wait();
+                }
+                cancel.store(true, Ordering::Release);
+            },
+        );
+        assert!(matches!(result, Err(AppError::RenderCancelled)));
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            pixels.chunks_exact(4).filter(|row| row[0] == 255).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn row_bands_preserve_nonzero_region_offsets_and_match_serial_output() {
+        let width = 7;
+        let height = 211;
+        let original = vec![17; width as usize * height as usize * 4];
+        let draw = |y: u32, row: &mut [u8]| {
+            for (index, value) in row.iter_mut().enumerate() {
+                *value = ((y * 13 + index as u32 * 7) % 256) as u8;
+            }
+        };
+        let mut serial = original.clone();
+        for_each_row_band_with_threads(&mut serial, width, 5, 204, None, 1, draw).unwrap();
+        for threads in [2, 3, 8] {
+            let mut parallel = original.clone();
+            for_each_row_band_with_threads(&mut parallel, width, 5, 204, None, threads, draw)
+                .unwrap();
+            assert_eq!(parallel, serial, "{threads} workers changed the result");
+        }
+        assert_eq!(
+            &serial[..5 * width as usize * 4],
+            &original[..5 * width as usize * 4]
+        );
+        assert_eq!(
+            &serial[204 * width as usize * 4..],
+            &original[204 * width as usize * 4..]
+        );
+    }
+
+    #[test]
+    fn source_over_fast_path_honours_cancellation_before_writing() {
+        let cancel = AtomicBool::new(true);
+        let source = solid(4, 4, RED);
+        let mut backdrop = solid(4, 4, BLUE);
+        assert!(matches!(
+            draw_source_over(&mut backdrop, &source, 0, 0, (0, 0, 4, 4), Some(&cancel)),
+            Err(AppError::RenderCancelled)
+        ));
+        assert_eq!(backdrop, solid(4, 4, BLUE));
+    }
+
+    #[test]
     fn an_invalid_document_is_rejected_before_any_pixel_work() {
         let mut layer = pixel_layer("a", 4, 4);
         layer.opacity = 5.0;
@@ -1432,28 +1618,47 @@ mod tests {
     #[test]
     fn sampling_outside_a_buffer_returns_nothing_rather_than_wrapping() {
         let image = solid(4, 4, RED);
-        assert!(sample_rgba(&image, -0.1, 1.0).is_none());
-        assert!(sample_rgba(&image, 4.0, 1.0).is_none());
-        assert!(sample_rgba(&image, f32::NAN, 1.0).is_none());
-        assert!(sample_rgba(&image, 3.9, 3.9).is_some());
+        assert!(sample_rgba(&image, -0.1, 1.0, LayerInterpolation::Bilinear).is_none());
+        assert!(sample_rgba(&image, 4.0, 1.0, LayerInterpolation::Bilinear).is_none());
+        assert!(sample_rgba(&image, f32::NAN, 1.0, LayerInterpolation::Bilinear).is_none());
+        assert!(sample_rgba(&image, 3.9, 3.9, LayerInterpolation::Bilinear).is_some());
     }
 
     #[test]
     fn whole_pixel_sampling_is_an_exact_copy() {
         let mut image = solid(2, 2, CLEAR);
         image.put_pixel(1, 1, Rgba([3, 5, 7, 199]));
-        let sample = sample_rgba(&image, 1.5, 1.5).unwrap();
+        let sample = sample_rgba(&image, 1.5, 1.5, LayerInterpolation::Bilinear).unwrap();
         assert_eq!(pack(sample).0, [3, 5, 7, 199]);
     }
 
     #[test]
     fn mask_coverage_is_neutral_without_a_mask_and_clamped_with_one() {
-        assert_eq!(mask_coverage(None, false, 0.0, 0.0, 4, 4), 1.0);
+        assert_eq!(
+            mask_coverage(None, false, 0.0, 0.0, 4, 4, LayerInterpolation::Bilinear),
+            1.0
+        );
         let mut mask = MaskBitmap::empty(4, 4).unwrap();
         mask.set(0, 0, 255);
-        let coverage = mask_coverage(Some(&mask), false, 0.5, 0.5, 4, 4);
+        let coverage = mask_coverage(
+            Some(&mask),
+            false,
+            0.5,
+            0.5,
+            4,
+            4,
+            LayerInterpolation::Bilinear,
+        );
         assert!((coverage - 1.0).abs() < 1e-5);
-        let inverted = mask_coverage(Some(&mask), true, 0.5, 0.5, 4, 4);
+        let inverted = mask_coverage(
+            Some(&mask),
+            true,
+            0.5,
+            0.5,
+            4,
+            4,
+            LayerInterpolation::Bilinear,
+        );
         assert!(inverted.abs() < 1e-5);
     }
 
@@ -1525,47 +1730,58 @@ mod tests {
     /// while leaving coverage at 1.0, so the two results have to match exactly.
     #[test]
     fn the_opaque_fast_path_matches_the_general_path_byte_for_byte() {
-        let mut top = RgbaImage::new(6, 5);
-        for (index, pixel) in top.pixels_mut().enumerate() {
-            let value = (index * 11 % 256) as u8;
-            *pixel = Rgba([
-                value,
-                255 - value,
-                value / 3,
-                if index % 5 == 0 { 0 } else { 255 },
-            ]);
-        }
-        let mut source = MapSource::default();
-        source.insert("pxbottom", solid(6, 5, [30, 60, 90, 255]));
-        source.insert("pxtop", top);
+        for (width, height) in [(6, 5), (11, 201)] {
+            let mut top = RgbaImage::new(width, height);
+            let mut bottom = RgbaImage::new(width, height);
+            for (index, (upper, lower)) in top.pixels_mut().zip(bottom.pixels_mut()).enumerate() {
+                let value = (index * 11 % 256) as u8;
+                let alpha = [0, 1, 64, 128, 254, 255][index % 6];
+                *upper = Rgba([value, 255 - value, value / 3, alpha]);
+                *lower = Rgba([255 - value, value / 2, value, 255 - alpha]);
+            }
+            let mut source = MapSource::default();
+            source.insert("pxbottom", bottom);
+            source.insert("pxtop", top);
 
-        for translation in [(0.0, 0.0), (2.0, 1.0), (-1.0, 3.0)] {
-            let mut fast = pixel_layer("top", 6, 5);
-            fast.transform = LayerTransform {
-                translate_x: translation.0,
-                translate_y: translation.1,
-                ..LayerTransform::default()
-            };
-            let mut general = fast.clone();
-            general.mask = Some(LayerMask {
-                snapshot: MaskSnapshot::encode(&MaskBitmap::full(6, 5).unwrap()),
-                enabled: true,
-                inverted: false,
-            });
+            for interpolation in [LayerInterpolation::Bilinear, LayerInterpolation::Nearest] {
+                for translation in [(0.0, 0.0), (2.0, 1.0), (-1.0, 3.0)] {
+                    let mut fast = pixel_layer("top", width, height);
+                    fast.transform = LayerTransform {
+                        translate_x: translation.0,
+                        translate_y: translation.1,
+                        interpolation,
+                        ..LayerTransform::default()
+                    };
+                    let mut general = fast.clone();
+                    general.mask = Some(LayerMask {
+                        snapshot: MaskSnapshot::encode(&MaskBitmap::full(width, height).unwrap()),
+                        enabled: true,
+                        inverted: false,
+                    });
 
-            let fast_result = render(
-                &document_with(vec![pixel_layer("bottom", 6, 5), fast], 6, 5),
-                &source,
-            );
-            let general_result = render(
-                &document_with(vec![pixel_layer("bottom", 6, 5), general], 6, 5),
-                &source,
-            );
-            assert_eq!(
-                fast_result.as_raw(),
-                general_result.as_raw(),
-                "paths disagreed at translation {translation:?}"
-            );
+                    let fast_result = render(
+                        &document_with(
+                            vec![pixel_layer("bottom", width, height), fast],
+                            width,
+                            height,
+                        ),
+                        &source,
+                    );
+                    let general_result = render(
+                        &document_with(
+                            vec![pixel_layer("bottom", width, height), general],
+                            width,
+                            height,
+                        ),
+                        &source,
+                    );
+                    assert_eq!(
+                        fast_result.as_raw(),
+                        general_result.as_raw(),
+                        "paths disagreed for {width}x{height} {interpolation:?} at {translation:?}"
+                    );
+                }
+            }
         }
     }
 
@@ -1635,6 +1851,291 @@ mod tests {
         // A pixel from the middle of the canvas actually changed, so the test
         // is not comparing two blank buffers.
         assert_ne!(first.get_pixel(20, 200).0, [0, 0, 0, 0]);
+    }
+
+    // -- Interpolation ----------------------------------------------------
+
+    /// A two-tone strip scaled up: bilinear blends across the boundary, nearest
+    /// must not. Nothing in the nearest result may be a colour the source never
+    /// contained, which is exactly what interpolation would introduce.
+    #[test]
+    fn nearest_sampling_keeps_a_hard_edge_that_bilinear_softens() {
+        let mut strip = RgbaImage::new(2, 1);
+        strip.put_pixel(0, 0, Rgba([0, 0, 0, 255]));
+        strip.put_pixel(1, 0, Rgba([255, 255, 255, 255]));
+        let source = MapSource::with("pxart", strip);
+
+        let scaled = |interpolation: LayerInterpolation| {
+            let mut layer = pixel_layer("art", 2, 1);
+            layer.transform = LayerTransform {
+                scale_x: 8.0,
+                scale_y: 8.0,
+                interpolation,
+                ..LayerTransform::default()
+            };
+            render(&document_with(vec![layer], 16, 8), &source)
+        };
+
+        let smooth = scaled(LayerInterpolation::Bilinear);
+        let hard = scaled(LayerInterpolation::Nearest);
+        for pixel in hard.pixels().filter(|pixel| pixel.0[3] > 0) {
+            assert!(
+                pixel.0[0] == 0 || pixel.0[0] == 255,
+                "nearest produced {pixel:?}"
+            );
+        }
+        assert!(
+            smooth
+                .pixels()
+                .any(|pixel| pixel.0[3] > 0 && pixel.0[0] > 0 && pixel.0[0] < 255),
+            "bilinear produced no blended pixel"
+        );
+    }
+
+    #[test]
+    fn the_sampling_mode_changes_nothing_when_no_resampling_happens() {
+        let source = MapSource::with("pxart", solid(4, 4, RED));
+        let render_with = |interpolation: LayerInterpolation| {
+            let mut layer = pixel_layer("art", 4, 4);
+            layer.transform.interpolation = interpolation;
+            // A whole-pixel move is an exact copy under either mode.
+            layer.transform.translate_x = 1.0;
+            render(&document_with(vec![layer], 4, 4), &source)
+        };
+        assert_eq!(
+            render_with(LayerInterpolation::Bilinear).as_raw(),
+            render_with(LayerInterpolation::Nearest).as_raw()
+        );
+    }
+
+    #[test]
+    fn nearest_sampling_applies_to_the_layer_mask_as_well() {
+        let source = MapSource::with("pxart", solid(2, 2, RED));
+        let mut bitmap = MaskBitmap::empty(2, 2).unwrap();
+        bitmap.set(0, 0, 255);
+        bitmap.set(0, 1, 255);
+        let render_with = |interpolation: LayerInterpolation| {
+            let mut layer = pixel_layer("art", 2, 2);
+            layer.mask = Some(LayerMask {
+                snapshot: MaskSnapshot::encode(&bitmap),
+                enabled: true,
+                inverted: false,
+            });
+            layer.transform = LayerTransform {
+                scale_x: 6.0,
+                scale_y: 6.0,
+                interpolation,
+                ..LayerTransform::default()
+            };
+            render(&document_with(vec![layer], 12, 12), &source)
+        };
+        let hard = render_with(LayerInterpolation::Nearest);
+        assert!(
+            hard.pixels()
+                .all(|pixel| pixel.0[3] == 0 || pixel.0[3] == 255),
+            "nearest left a partly covered pixel"
+        );
+        assert!(render_with(LayerInterpolation::Bilinear)
+            .pixels()
+            .any(|pixel| pixel.0[3] > 0 && pixel.0[3] < 255));
+    }
+
+    #[test]
+    fn nearest_mask_samples_the_same_texel_as_nearest_artwork() {
+        let mut bitmap = MaskBitmap::empty(2, 2).unwrap();
+        bitmap.set(0, 0, 255);
+        bitmap.set(1, 1, 128);
+        let mut artwork = solid(2, 2, CLEAR);
+        artwork.put_pixel(0, 0, Rgba([255, 255, 255, 255]));
+        artwork.put_pixel(1, 1, Rgba([255, 255, 255, 128]));
+        for x in [0.1, 0.5, 0.9, 1.0, 1.1, 1.5, 1.9] {
+            for y in [0.1, 0.5, 0.9, 1.0, 1.1, 1.5, 1.9] {
+                let alpha = sample_rgba(&artwork, x, y, LayerInterpolation::Nearest).unwrap()[3];
+                for scale in [1, 2, 4] {
+                    let coverage = mask_coverage(
+                        Some(&bitmap),
+                        false,
+                        x * scale as f32,
+                        y * scale as f32,
+                        2 * scale,
+                        2 * scale,
+                        LayerInterpolation::Nearest,
+                    );
+                    let inverted = mask_coverage(
+                        Some(&bitmap),
+                        true,
+                        x * scale as f32,
+                        y * scale as f32,
+                        2 * scale,
+                        2 * scale,
+                        LayerInterpolation::Nearest,
+                    );
+                    assert_eq!(
+                        coverage, alpha,
+                        "misaligned mask at ({x}, {y}), scale {scale}"
+                    );
+                    assert_eq!(inverted, 1.0 - alpha);
+                }
+            }
+        }
+    }
+
+    // -- Transforms inside groups -----------------------------------------
+
+    /// A child transform is applied inside the group, and the group opacity to
+    /// the finished result, rather than the other way round.
+    #[test]
+    fn a_transformed_child_composites_inside_its_group() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(8, 8, [0, 0, 0, 255]));
+        source.insert("pxchild", solid(8, 8, RED));
+
+        let mut child = pixel_layer("child", 8, 8);
+        child.transform.translate_x = 4.0;
+        let mut group = group_layer("g", vec![child]);
+        group.opacity = 0.5;
+        let document = document_with(vec![pixel_layer("back", 8, 8), group], 8, 8);
+        let rendered = render(&document, &source);
+        // Left of the moved child: untouched backdrop. Right: half-strength red.
+        assert_eq!(rendered.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert!(rendered.get_pixel(6, 0).0[0].abs_diff(128) <= 1);
+    }
+
+    #[test]
+    fn a_transformed_child_of_a_pass_through_group_matches_the_same_child_in_the_parent() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(8, 8, [20, 30, 40, 255]));
+        source.insert("pxchild", solid(8, 8, RED));
+
+        let transformed = || {
+            let mut layer = pixel_layer("child", 8, 8);
+            layer.transform = LayerTransform {
+                translate_x: 2.0,
+                translate_y: -1.0,
+                scale_x: 0.75,
+                rotation_degrees: 15.0,
+                ..LayerTransform::default()
+            };
+            layer
+        };
+
+        let grouped = document_with(
+            vec![
+                pixel_layer("back", 8, 8),
+                pass_through_group("g", vec![transformed()]),
+            ],
+            8,
+            8,
+        );
+        let direct = document_with(vec![pixel_layer("back", 8, 8), transformed()], 8, 8);
+        assert_eq!(
+            render(&grouped, &source).as_raw(),
+            render(&direct, &source).as_raw()
+        );
+    }
+
+    /// The invariant pass-through exists to satisfy, stated over a deliberately
+    /// awkward tree so a future renderer change cannot quietly break it.
+    #[test]
+    fn an_open_pass_through_group_equals_its_children_placed_directly() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(8, 8, [90, 40, 10, 255]));
+        source.insert("pxone", solid(8, 8, RED));
+        source.insert("pxtwo", solid(8, 8, BLUE));
+        source.insert("pxthree", solid(8, 8, CLEAR));
+        source.insert("pxfour", solid(8, 8, [30, 200, 120, 255]));
+
+        let children = || {
+            let mut moved = pixel_layer("one", 8, 8);
+            moved.transform.translate_y = 3.0;
+            moved.opacity = 0.6;
+            let mut blended = pixel_layer("two", 8, 8);
+            blended.blend_mode = BlendMode::Multiply;
+            let mut transparent = pixel_layer("three", 8, 8);
+            transparent.opacity = 0.25;
+            let mut hidden = pixel_layer("two", 8, 8);
+            hidden.id = "hidden".into();
+            hidden.visible = false;
+            let mut isolated_inner = group_layer("inner", vec![pixel_layer("four", 8, 8)]);
+            isolated_inner.opacity = 0.4;
+            vec![
+                adjustment_layer("adj", EditOperation::Brightness { amount: 0.3 }),
+                moved,
+                blended,
+                transparent,
+                hidden,
+                isolated_inner,
+            ]
+        };
+
+        let grouped = document_with(
+            vec![
+                pixel_layer("back", 8, 8),
+                pass_through_group("g", children()),
+            ],
+            8,
+            8,
+        );
+        let mut flat = vec![pixel_layer("back", 8, 8)];
+        flat.extend(children());
+        let direct = document_with(flat, 8, 8);
+        assert_eq!(
+            render(&grouped, &source).as_raw(),
+            render(&direct, &source).as_raw(),
+            "a fully open pass-through group changed the result"
+        );
+    }
+
+    #[test]
+    fn an_isolated_group_inside_a_pass_through_group_still_contains_its_adjustment() {
+        let mut source = MapSource::default();
+        source.insert("pxback", solid(4, 4, [10, 10, 10, 255]));
+
+        let inner = group_layer(
+            "inner",
+            vec![adjustment_layer(
+                "adj",
+                EditOperation::Brightness { amount: 1.0 },
+            )],
+        );
+        let document = document_with(
+            vec![
+                pixel_layer("back", 4, 4),
+                pass_through_group("g", vec![inner]),
+            ],
+            4,
+            4,
+        );
+        // The isolated group has no pixels of its own, so its adjustment reaches
+        // nothing and the backdrop below the pass-through group is untouched.
+        assert_eq!(
+            render(&document, &source).get_pixel(0, 0).0,
+            [10, 10, 10, 255]
+        );
+    }
+
+    #[test]
+    fn a_transformed_layer_dragged_off_canvas_contributes_nothing_and_does_not_error() {
+        let source = MapSource::with("pxart", solid(4, 4, RED));
+        for translate in [-1_000.0_f32, 1_000.0, 500_000.0] {
+            let mut layer = pixel_layer("art", 4, 4);
+            layer.transform.translate_x = translate;
+            let rendered = render(&document_with(vec![layer], 4, 4), &source);
+            assert!(
+                rendered.pixels().all(|pixel| pixel.0 == CLEAR),
+                "{translate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partly_off_canvas_transform_draws_only_the_visible_part() {
+        let source = MapSource::with("pxart", solid(4, 4, RED));
+        let mut layer = pixel_layer("art", 4, 4);
+        layer.transform.translate_x = -2.0;
+        let rendered = render(&document_with(vec![layer], 4, 4), &source);
+        assert_eq!(rendered.get_pixel(0, 0).0, RED);
+        assert_eq!(rendered.get_pixel(3, 0).0, CLEAR);
     }
 
     /// The defining difference between the two group models: an adjustment

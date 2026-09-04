@@ -10,6 +10,18 @@ pub const LAYER_WORKFLOW_SCHEMA_VERSION: u32 = 2;
 /// Largest number of layer steps one workflow may carry.
 pub const MAX_LAYER_WORKFLOW_STEPS: usize = 100;
 
+// Serde's internally tagged unit visitor accepts surplus fields even when the
+// enum denies them. Route fieldless variants through a strict empty struct.
+fn deserialize_empty_variant<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Empty {}
+    Empty::deserialize(deserializer).map(|_| ())
+}
+
 /// How a workflow step names the layer it acts on.
 ///
 /// Selectors are deterministic by construction: an identifier is exact, `Active`
@@ -18,13 +30,21 @@ pub const MAX_LAYER_WORKFLOW_STEPS: usize = 100;
 /// that name. Anything ambiguous or missing fails the replay rather than
 /// silently retargeting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LayerSelector {
-    Id { id: String },
+    Id {
+        id: String,
+    },
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     Active,
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     LastCreated,
-    Name { name: String },
+    Name {
+        name: String,
+    },
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     Bottom,
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     Top,
 }
 
@@ -64,7 +84,7 @@ impl LayerSelector {
 
 /// One layer-aware workflow step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LayerWorkflowStep {
     SelectLayer {
         selector: LayerSelector,
@@ -97,7 +117,9 @@ pub enum LayerWorkflowStep {
     MergeDown {
         selector: LayerSelector,
     },
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     Flatten,
+    #[serde(deserialize_with = "deserialize_empty_variant")]
     ExportComposite,
 }
 
@@ -661,5 +683,38 @@ mod tests {
             serde_json::from_str::<LayerWorkflowStep>(r#"{"type":"delete_everything"}"#).is_err()
         );
         assert!(serde_json::from_str::<LayerSelector>(r#"{"type":"any"}"#).is_err());
+    }
+
+    #[test]
+    fn selectors_reject_unknown_fields_including_unit_variants() {
+        for json in [
+            r#"{"type":"id","id":"layer","fallback":"active"}"#,
+            r#"{"type":"name","name":"Sky","index":0}"#,
+            r#"{"type":"active","id":"different-layer"}"#,
+            r#"{"type":"last_created","unknown":true}"#,
+            r#"{"type":"top","unknown":true}"#,
+            r#"{"type":"bottom","unknown":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<LayerSelector>(json).is_err(),
+                "accepted {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn steps_reject_unknown_fields_before_workflow_validation() {
+        for json in [
+            r#"{"type":"set_opacity","selector":{"type":"active"},"opacity":0.5,"mask":"ignored"}"#,
+            r#"{"type":"select_layer","selector":{"type":"active","id":"ignored"}}"#,
+            r#"{"type":"create_adjustment_layer","operation":{"type":"grayscale"},"layerId":"ignored"}"#,
+            r#"{"type":"flatten","visibleOnly":false}"#,
+            r#"{"type":"export_composite","outputPath":"ignored.png"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<LayerWorkflowStep>(json).is_err(),
+                "accepted {json}"
+            );
+        }
     }
 }

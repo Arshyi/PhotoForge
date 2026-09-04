@@ -35,7 +35,7 @@ pub use selection::{
     intersect_with_layer_bounds, layer_mask_to_selection, mask_space, selection_to_layer_mask,
 };
 pub use store::{preview_dimensions, LayerPixelStore, ResolvedPixels, PREVIEW_MAX_DIMENSION};
-pub use transform::{LayerBounds, LayerTransform};
+pub use transform::{LayerBounds, LayerInterpolation, LayerTransform};
 pub use workflow::{
     check_kind as check_layer_step_kind, plan_against as plan_layer_steps,
     resolve as resolve_layer, validate_layer_steps, validate_planner_layer_steps, LayerSelector,

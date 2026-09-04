@@ -212,7 +212,8 @@ export function clonePlan(plan: EditPlan): EditPlan {
   return {
     ...plan,
     warnings: [...plan.warnings],
-    operations: plan.operations.map((operation) => ({ ...operation })) as EditOperation[],
+    operations: structuredClone(plan.operations),
+    ...(plan.layerSteps === undefined ? {} : { layerSteps: structuredClone(plan.layerSteps) }),
     operationExplanations: [...plan.operationExplanations]
   };
 }

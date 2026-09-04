@@ -2,9 +2,13 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through the Phase 8 layer and non-destructive editing system. The current version is **0.8.1**, a bug-fix release on the 0.8.0 layers implementation.
+This repository contains the Phase 0 foundation through the Phase 8 layer and
+non-destructive editing system. The working tree is **0.8.2**, a continuation
+of the 0.8.1 implementation. It has a Rust release build, but it is not yet a
+packaged 0.8.2 desktop release; native GUI/DPI, elevated MSI, and production
+signing acceptance remain outstanding.
 
-## Layers and non-destructive editing (0.8.0)
+## Layers and non-destructive editing (0.8.0 baseline, 0.8.2 continuation)
 
 PhotoForge is now a layer-based editor. Documents hold a real layer tree — pixel
 layers, nestable groups, and parametric adjustment layers — composited by a
@@ -24,6 +28,12 @@ the existing Phase 7 mask engine unchanged.
   drag-and-drop reorders each collapsing into one logical step
 - **An explicit editing target** so painting into a mask can never be mistaken
   for painting into pixels
+- **Current-layer sampling** for histogram, pixel inspection, and selection
+  tools, with stale-document guards
+- **Mask-target shape and brush gestures** mapped through a pixel layer's
+  transform and committed as one history entry
+- **Fail-closed merge safety** for contiguous sibling ranges whose omitted
+  backdrop cannot affect the result
 - **Editable curves and selective-colour adjustment layers**, including a
   keyboard-operable curve editor
 - **Bounded local recovery snapshots** for unsaved work, with a startup recovery
@@ -34,9 +44,9 @@ the existing Phase 7 mask engine unchanged.
   file
 - **Sibling multi-selection and grouping** in the Layers panel
 
-Opening an ordinary photo still produces a single background layer and behaves
-exactly as it did in 0.7.1; the layer machinery only engages once the document
-actually has layers. See [docs/layers.md](docs/layers.md),
+Opening an ordinary photo still produces a single background layer and keeps
+the original fast path until a layer-aware edit or project load needs the
+compositor. See [docs/layers.md](docs/layers.md),
 [docs/compositing.md](docs/compositing.md), and
 [docs/project-format.md](docs/project-format.md).
 

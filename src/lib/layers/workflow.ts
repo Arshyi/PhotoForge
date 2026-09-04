@@ -11,6 +11,7 @@ import {
   updateLayer
 } from './tree';
 import type { BlendMode, Layer, LayerDocument } from './types';
+import { mergeSafetyProblem } from './mergeSafety';
 
 /** Mirrors `layers::MAX_LAYER_WORKFLOW_STEPS`. */
 export const MAX_LAYER_WORKFLOW_STEPS = 100;
@@ -244,6 +245,11 @@ export function runLayerWorkflow(
         if (!path || path[path.length - 1] === 0) {
           throw new LayerWorkflowError('There is no layer beneath this one to merge into.');
         }
+        const parent = parentOf(current, id);
+        const siblings = parent ? childrenOf(findLayer(current, parent)!) : current.layers;
+        const below = siblings[path[path.length - 1] - 1];
+        const mergeProblem = mergeSafetyProblem(current, [below.id, id]);
+        if (mergeProblem) throw new LayerWorkflowError(mergeProblem);
         deferred.push({ type: 'merge_down', layerId: id });
         break;
       }

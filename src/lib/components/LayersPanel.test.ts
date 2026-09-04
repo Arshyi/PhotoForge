@@ -123,6 +123,41 @@ describe('LayersPanel', () => {
     expect(window.document.activeElement).toBe(field);
   });
 
+  /**
+   * The real-browser pass could confirm the focus but not the selection,
+   * because typing under automation collapses the caret before it can be read.
+   * The selection is set on the animation frame after the field opens, so
+   * flushing one frame here settles it deterministically.
+   */
+  it('selects the whole existing name so typing replaces it', async () => {
+    const { document, top } = selectedDocument();
+    render(LayersPanel, { props: props(document) });
+    const selectSpy = vi.spyOn(HTMLInputElement.prototype, 'select');
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename layer' }));
+    const field = screen.getByLabelText(`Rename ${top.name}`) as HTMLInputElement;
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+
+    expect(selectSpy).toHaveBeenCalled();
+    expect(field.value).toBe(top.name);
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(top.name.length);
+    selectSpy.mockRestore();
+  });
+
+  it('replaces rather than appends when the selected name is typed over', async () => {
+    const { document, top } = selectedDocument();
+    const value = props(document);
+    render(LayersPanel, { props: value });
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename layer' }));
+    const field = screen.getByLabelText(`Rename ${top.name}`) as HTMLInputElement;
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    // What a browser does to a fully selected field when the next key arrives.
+    field.setRangeText('Clouds', field.selectionStart ?? 0, field.selectionEnd ?? 0, 'end');
+    await fireEvent.input(field);
+    await fireEvent.keyDown(field, { key: 'Enter' });
+    expect(value.onrename).toHaveBeenCalledWith(top.id, 'Clouds');
+  });
+
   it('shows an empty state when there are no layers', () => {
     render(LayersPanel, { props: props(createDocument(16, 16, [])) });
     expect(screen.getByText(/No layers yet/)).toBeTruthy();

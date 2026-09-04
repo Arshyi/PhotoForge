@@ -12,7 +12,14 @@ import {
   removeLayer,
   updateLayer
 } from './tree';
-import type { Layer, LayerDocument } from './types';
+import {
+  applyTransformGesture,
+  beginTransformGesture,
+  flipTransform,
+  nudgeTransform,
+  resetTransform
+} from './transformTool';
+import { identityTransform, type Layer, type LayerDocument } from './types';
 
 function pixel(name: string, pixelId = `px${name}`): Layer {
   return createPixelLayer(name, pixelId, 16, 16);
@@ -117,6 +124,129 @@ describe('layer history', () => {
     expect(history.undoDepth).toBe(1);
     history.undo();
     expect(findLayer(history.document as LayerDocument, background.id)?.opacity).toBe(1);
+  });
+
+  /**
+   * A pointer drag emits one transform per move. All of them belong to a single
+   * gesture, so the whole drag must land as one undo entry that returns the
+   * layer to exactly where it started.
+   */
+  it('collapses a whole transform drag into one undo step', () => {
+    const { history, document, background } = start();
+    let current = document;
+    const gesture = beginTransformGesture('move', background.transform, 16, 16, { x: 0, y: 0 });
+    for (let step = 1; step <= 80; step += 1) {
+      const next = applyTransformGesture(gesture, { x: step, y: step / 2 });
+      current = updateLayer(current, background.id, (layer) => ({ ...layer, transform: next }));
+      history.commit(current, 'Transform layer', `layer-transform:${background.id}`, 1_000 + step);
+    }
+    expect(history.undoDepth).toBe(1);
+    expect(findLayer(history.document as LayerDocument, background.id)?.transform.translateX).toBe(
+      80
+    );
+    history.undo();
+    const restored = findLayer(history.document as LayerDocument, background.id);
+    expect(restored?.transform).toEqual(identityTransform);
+    history.redo();
+    expect(findLayer(history.document as LayerDocument, background.id)?.transform.translateX).toBe(
+      80
+    );
+  });
+
+  it('separates two transform drags on the same layer', () => {
+    const { history, document, background } = start();
+    const first = updateLayer(document, background.id, (layer) => ({
+      ...layer,
+      transform: nudgeTransform(layer.transform, 5, 0)
+    }));
+    history.commit(first, 'Move layer', `layer-transform:${background.id}`, 1_000);
+    const second = updateLayer(first, background.id, (layer) => ({
+      ...layer,
+      transform: nudgeTransform(layer.transform, 0, 5)
+    }));
+    // A second gesture starts after the window lapses, so it undoes separately.
+    history.commit(second, 'Move layer', `layer-transform:${background.id}`, 9_000);
+    expect(history.undoDepth).toBe(2);
+    history.undo();
+    expect(findLayer(history.document as LayerDocument, background.id)?.transform.translateX).toBe(
+      5
+    );
+  });
+
+  it('keeps a transform separate from an opacity drag on the same layer', () => {
+    const { history, document, background } = start();
+    const moved = updateLayer(document, background.id, (layer) => ({
+      ...layer,
+      transform: nudgeTransform(layer.transform, 3, 3)
+    }));
+    history.commit(moved, 'Move layer', `layer-transform:${background.id}`, 1_000);
+    const faded = updateLayer(moved, background.id, (layer) => ({ ...layer, opacity: 0.5 }));
+    history.commit(faded, 'Layer opacity', `opacity:${background.id}`, 1_010);
+    expect(history.undoDepth).toBe(2);
+  });
+
+  it('undoes a flip and a reset as ordinary single steps', () => {
+    const { history, document, background } = start();
+    const flipped = updateLayer(document, background.id, (layer) => ({
+      ...layer,
+      transform: flipTransform(layer.transform, 'horizontal')
+    }));
+    history.commit(flipped, 'Flip layer horizontally');
+    const scaled = updateLayer(flipped, background.id, (layer) => ({
+      ...layer,
+      transform: { ...layer.transform, scaleX: 2 }
+    }));
+    history.commit(scaled, 'Scale layer');
+    const reset = updateLayer(scaled, background.id, (layer) => ({
+      ...layer,
+      transform: resetTransform(layer.transform.interpolation)
+    }));
+    history.commit(reset, 'Reset transform');
+
+    expect(history.undoDepth).toBe(3);
+    history.undo();
+    const afterUndo = findLayer(history.document as LayerDocument, background.id);
+    expect(afterUndo?.transform.scaleX).toBe(2);
+    expect(afterUndo?.transform.flipHorizontal).toBe(true);
+    history.undo();
+    history.undo();
+    expect(findLayer(history.document as LayerDocument, background.id)?.transform).toEqual(
+      identityTransform
+    );
+  });
+
+  /**
+   * Rasterizing replaces the layer's buffer. Undo has to bring back both the
+   * transform and the buffer it was applied to, or the layer comes back in the
+   * right place showing the wrong pixels.
+   */
+  it('restores both the transform and the original buffer when a rasterize is undone', () => {
+    const { history, document, background } = start();
+    const placed = updateLayer(document, background.id, (layer) => ({
+      ...layer,
+      transform: { ...layer.transform, rotationDegrees: 30, scaleX: 1.5 }
+    }));
+    history.commit(placed, 'Transform layer');
+    const baked = updateLayer(placed, background.id, (layer) => ({
+      ...layer,
+      transform: resetTransform(layer.transform.interpolation),
+      mask: null,
+      content: { type: 'pixel', pixelId: 'pxbaked', width: 16, height: 16 }
+    }));
+    history.commit(baked, 'Rasterize transform');
+    expect(history.reachablePixelIds()).toContain('pxbaked');
+
+    history.undo();
+    const restored = findLayer(history.document as LayerDocument, background.id);
+    expect(restored?.transform.rotationDegrees).toBe(30);
+    expect(restored?.content).toEqual({
+      type: 'pixel',
+      pixelId: 'pxBackground',
+      width: 16,
+      height: 16
+    });
+    // The baked buffer stays reachable so the rasterize can be redone.
+    expect(history.reachablePixelIds()).toContain('pxbaked');
   });
 
   it('starts a new undo step once the coalescing window lapses', () => {

@@ -477,6 +477,19 @@ export function displayRows(document: LayerDocument): LayerRow[] {
   return rows;
 }
 
+/** True when a transform places the layer exactly on its own grid. */
+function isIdentityPlacement(transform: LayerTransform): boolean {
+  return (
+    transform.translateX === identityTransform.translateX &&
+    transform.translateY === identityTransform.translateY &&
+    transform.scaleX === identityTransform.scaleX &&
+    transform.scaleY === identityTransform.scaleY &&
+    transform.rotationDegrees === identityTransform.rotationDegrees &&
+    !transform.flipHorizontal &&
+    !transform.flipVertical
+  );
+}
+
 /**
  * True when the document is a single ordinary full-canvas pixel layer with no
  * mask, transform, or blending. PhotoForge keeps using the original Phase 7.1
@@ -489,7 +502,10 @@ export function isSimpleDocument(document: LayerDocument): boolean {
   if (layer.content.type !== 'pixel') return false;
   if (!layer.visible || layer.opacity !== 1 || layer.blendMode !== 'normal') return false;
   if (layer.mask) return false;
-  if (JSON.stringify(layer.transform) !== JSON.stringify(identityTransform)) return false;
+  // Compared field by field rather than by serialising: the transform gained an
+  // optional interpolation mode in 0.8.2, and a mode chosen on an untransformed
+  // layer changes no pixels, so it must not force the layered render path.
+  if (!isIdentityPlacement(layer.transform)) return false;
   return (
     layer.content.width === document.canvasWidth &&
     layer.content.height === document.canvasHeight
@@ -567,9 +583,14 @@ function validTransform(transform: LayerTransform): boolean {
     const magnitude = Math.abs(value);
     return magnitude >= 1 / 64 && magnitude <= 64;
   };
+  // Mirrors `layers::transform::MAX_LAYER_TRANSLATION`. Without this the panel
+  // would happily commit a placement the renderer then refuses to draw.
+  const translationInRange = (value: number) => Math.abs(value) <= 1_000_000;
   return (
     scaleInRange(transform.scaleX) &&
     scaleInRange(transform.scaleY) &&
+    translationInRange(transform.translateX) &&
+    translationInRange(transform.translateY) &&
     Math.abs(transform.rotationDegrees) <= 360
   );
 }

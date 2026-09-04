@@ -1,25 +1,3 @@
-<script context="module" lang="ts">
-  export interface RefineSelectionParameters {
-    smooth: number;
-    feather: number;
-    contrast: number;
-    shiftEdge: number;
-    decontaminate: boolean;
-    decontaminateStrength: number;
-    decontaminateRadius: number;
-  }
-
-  export const REFINE_SELECTION_DEFAULTS: Readonly<RefineSelectionParameters> = Object.freeze({
-    smooth: 3,
-    feather: 2,
-    contrast: 0,
-    shiftEdge: 0,
-    decontaminate: false,
-    decontaminateStrength: 0.5,
-    decontaminateRadius: 4
-  });
-</script>
-
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import {
@@ -29,6 +7,7 @@
   } from '../selections/thumbnails';
   import type { MaskSnapshot } from '../selections/types';
   import { decontaminatePreviewPixels } from './refineDecontamination';
+  import { REFINE_SELECTION_DEFAULTS, type RefineSelectionParameters } from './refineSelectionDefaults';
 
   type ComparisonMode = 'split' | 'toggle';
   type ToggleView = 'before' | 'after';

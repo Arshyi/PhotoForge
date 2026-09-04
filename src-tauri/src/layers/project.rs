@@ -729,6 +729,7 @@ mod tests {
             rotation_degrees: 12.0,
             flip_horizontal: true,
             flip_vertical: false,
+            interpolation: crate::layers::LayerInterpolation::Bilinear,
         };
         document.layers[0]
             .metadata

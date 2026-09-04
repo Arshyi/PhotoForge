@@ -114,8 +114,8 @@ export function validateLayerDocument(document: LayerDocument): Promise<number> 
   return invoke<number>('validate_layer_document', { document });
 }
 
-export function retainLayerPixels(pixelIds: string[]): Promise<LayerStoreReport> {
-  return invoke<LayerStoreReport>('retain_layer_pixels', { pixelIds });
+export function retainLayerPixels(pixelIds: string[], documentId: number): Promise<LayerStoreReport> {
+  return invoke<LayerStoreReport>('retain_layer_pixels', { pixelIds, documentId });
 }
 
 export function layerStoreReport(): Promise<LayerStoreReport> {
@@ -138,8 +138,8 @@ export function saveLayerProject(
   });
 }
 
-export function loadLayerProject(path: string): Promise<ProjectLoadResult> {
-  return invoke<ProjectLoadResult>('load_layer_project', { path });
+export function loadLayerProject(path: string, requestId: number): Promise<ProjectLoadResult> {
+  return invoke<ProjectLoadResult>('load_layer_project', { path, requestId });
 }
 
 export interface RecoveryRecord {
@@ -170,8 +170,8 @@ export function listRecoverySnapshots(): Promise<{ snapshots: RecoveryRecord[] }
   return invoke<{ snapshots: RecoveryRecord[] }>('list_recovery_snapshots');
 }
 
-export function restoreRecoverySnapshot(path: string): Promise<ProjectLoadResult> {
-  return invoke<ProjectLoadResult>('restore_recovery_snapshot', { path });
+export function restoreRecoverySnapshot(path: string, requestId: number): Promise<ProjectLoadResult> {
+  return invoke<ProjectLoadResult>('restore_recovery_snapshot', { path, requestId });
 }
 
 export function discardRecoverySnapshot(path: string | null): Promise<number> {

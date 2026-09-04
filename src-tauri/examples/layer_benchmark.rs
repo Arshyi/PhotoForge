@@ -177,6 +177,165 @@ fn scenario(label: &str, width: u32, height: u32, count: usize) {
     });
 }
 
+/// A deliberately awkward document: many pixel layers, most of them partly
+/// transparent, twenty adjustment layers, nested and pass-through groups, masks,
+/// and transformed children. It exists to show what the interactive paths cost
+/// on the worst tree the model allows rather than on a tidy one.
+fn heavy_document(width: u32, height: u32) -> (LayerDocument, MapSource) {
+    let (mut base, mut source) = build(width, height, 100);
+
+    // Half the stack is barely visible, which is the case where an early exit
+    // would be tempting and wrong.
+    for (index, layer) in base.layers.iter_mut().enumerate() {
+        if index % 2 == 1 {
+            layer.opacity = 0.08;
+        }
+        if index % 7 == 0 {
+            layer.transform = LayerTransform {
+                translate_x: (index % 13) as f32 - 6.0,
+                translate_y: (index % 5) as f32 - 2.0,
+                scale_x: 1.0 + (index % 3) as f32 * 0.05,
+                rotation_degrees: (index % 11) as f32,
+                ..LayerTransform::default()
+            };
+        }
+    }
+
+    let mut bitmap = MaskBitmap::empty(width, height).expect("mask allocates");
+    for y in 0..height {
+        for x in 0..width {
+            bitmap.set(x, y, ((x + y) % 256) as u8);
+        }
+    }
+    let snapshot = MaskSnapshot::encode(&bitmap);
+    for layer in base.layers.iter_mut().step_by(10) {
+        layer.mask = Some(LayerMask {
+            snapshot: snapshot.clone(),
+            enabled: true,
+            inverted: false,
+        });
+    }
+
+    let adjustments: Vec<Layer> = (0..20)
+        .map(|index| {
+            adjustment_layer(
+                &format!("adj{index}"),
+                if index % 2 == 0 {
+                    EditOperation::Brightness {
+                        amount: 0.02 * f32::from(index as u8 + 1),
+                    }
+                } else {
+                    EditOperation::Contrast {
+                        amount: 0.02 * f32::from(index as u8 + 1),
+                    }
+                },
+            )
+        })
+        .collect();
+
+    // The top forty layers move into nested groups, with the outer one set to
+    // pass through so its adjustments reach the backdrop below.
+    let tail: Vec<Layer> = base.layers.split_off(60);
+    let (inner_children, outer_children) = tail.split_at(20);
+    let inner = group_layer("inner", inner_children.to_vec());
+    let mut outer = group_layer("outer", {
+        let mut children = vec![inner];
+        children.extend(outer_children.iter().cloned());
+        children.extend(adjustments);
+        children
+    });
+    outer.content = LayerContent::Group {
+        children: outer.children().to_vec(),
+        isolated: false,
+    };
+    outer.mask = Some(LayerMask {
+        snapshot,
+        enabled: true,
+        inverted: false,
+    });
+    base.layers.push(outer);
+
+    source.0.shrink_to_fit();
+    (base, source)
+}
+
+/// Measures the interactive paths on the heavy document.
+///
+/// Every figure after the first render reuses the same decoded buffers: the
+/// pixel store hands out `Arc` handles and the compositor never decodes a source
+/// again, so changing one layer's opacity costs a re-composite and nothing else.
+/// The `store_bytes` lines either side prove no buffer was decoded a second time.
+fn heavy_scenario(width: u32, height: u32) {
+    let label = format!("{width}x{height}_heavy");
+    let (document, source) = heavy_document(width, height);
+    let preview_scale = f64::from(1_600.min(width.max(height))) / f64::from(width.max(height));
+    println!("METRIC {label}_layer_count {}", document.iter().count());
+
+    measure(&format!("{label}_first_full_render"), || {
+        black_box(render(&document, &source, 1.0))
+    });
+    measure(&format!("{label}_first_preview_render"), || {
+        black_box(render(&document, &source, preview_scale))
+    });
+    // The same document again, to show a repeat render costs the same as the
+    // first: there is no hidden warm-up and no per-render decode.
+    measure(&format!("{label}_repeat_preview_render"), || {
+        black_box(render(&document, &source, preview_scale))
+    });
+
+    let mut faded = document.clone();
+    if let Some(top) = faded.layers.last_mut() {
+        top.opacity = 0.42;
+    }
+    measure(&format!("{label}_opacity_update_preview"), || {
+        black_box(render(&faded, &source, preview_scale))
+    });
+
+    let mut moved = document.clone();
+    if let Some(top) = moved.layers.last_mut() {
+        top.transform.translate_x = 37.0;
+        top.transform.rotation_degrees = 9.5;
+        top.transform.scale_x = 1.2;
+    }
+    measure(&format!("{label}_transform_update_preview"), || {
+        black_box(render(&moved, &source, preview_scale))
+    });
+
+    let mut hidden = document.clone();
+    if let Some(top) = hidden.layers.last_mut() {
+        top.visible = false;
+    }
+    measure(&format!("{label}_visibility_toggle_preview"), || {
+        black_box(render(&hidden, &source, preview_scale))
+    });
+
+    let mut retuned = document.clone();
+    if let Some(LayerContent::Group { children, .. }) =
+        retuned.layers.last_mut().map(|layer| &mut layer.content)
+    {
+        for child in children.iter_mut() {
+            if let LayerContent::Adjustment { operation } = &mut child.content {
+                **operation = EditOperation::Brightness { amount: 0.31 };
+                break;
+            }
+        }
+    }
+    measure(&format!("{label}_adjustment_update_preview"), || {
+        black_box(render(&retuned, &source, preview_scale))
+    });
+
+    measure(&format!("{label}_flatten_full"), || {
+        black_box(render(&document, &source, 1.0))
+    });
+
+    let bytes: usize = source
+        .0
+        .values()
+        .map(|buffer| buffer.as_raw().len())
+        .sum::<usize>();
+    println!("METRIC {label}_source_bytes {bytes} bytes");
+}
+
 fn main() {
     println!("PhotoForge layer benchmark");
 
@@ -194,6 +353,11 @@ fn main() {
     for count in [1_usize, 10, 50, 100] {
         scenario(&format!("1920x1080_{count}layers"), 1_920, 1_080, count);
     }
+
+    // The worst tree the model allows: 100 pixel layers, half of them nearly
+    // transparent, 20 adjustment layers, nested and pass-through groups, masks,
+    // and transformed children.
+    heavy_scenario(1_920, 1_080);
 
     // Nested groups and adjustment layers.
     let (base, source) = build(1_920, 1_080, 6);

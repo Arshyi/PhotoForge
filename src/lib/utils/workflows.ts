@@ -2,8 +2,10 @@ import type { BaseEditOperation, EditOperation, Workflow, WorkflowDocument } fro
 import type { MaskSnapshot } from '../selections/types';
 import { decodedCoverageChecksum } from '../selections/checksum';
 import { cloneOperations } from './operations';
+import { blendModes } from '../layers/types';
+import { MAX_LAYER_WORKFLOW_STEPS, type LayerWorkflowStep } from '../layers/workflow';
 
-export const WORKFLOW_SCHEMA_VERSION = 1 as const;
+export const WORKFLOW_SCHEMA_VERSION = 2 as const;
 export const WORKFLOW_STORAGE_KEY = 'photoforge.workflows.v1';
 export const MAX_WORKFLOWS = 250;
 export const MAX_WORKFLOW_OPERATIONS = 200;
@@ -14,7 +16,8 @@ export function createWorkflow(
   name: string,
   operations: EditOperation[],
   folder = '',
-  now = new Date()
+  now = new Date(),
+  layerSteps: LayerWorkflowStep[] = []
 ): Workflow {
   const timestamp = now.toISOString();
   const slug = name
@@ -29,6 +32,7 @@ export function createWorkflow(
     folder: folder.trim(),
     favorite: false,
     operations: cloneOperations(operations),
+    layerSteps: structuredClone(layerSteps),
     createdAt: timestamp,
     updatedAt: timestamp
   };
@@ -45,8 +49,8 @@ export function validateWorkflow(workflow: unknown): string[] {
   if (!boundedText(workflow.createdAt, 0, 64) || !boundedText(workflow.updatedAt, 0, 64)) {
     errors.push('Workflow timestamps are invalid.');
   }
-  if (!Array.isArray(workflow.operations) || workflow.operations.length === 0) {
-    errors.push('Add at least one operation.');
+  if (!Array.isArray(workflow.operations)) {
+    errors.push('Workflow operations must be an array.');
   } else if (workflow.operations.length > MAX_WORKFLOW_OPERATIONS) {
     errors.push('Workflow has too many operations.');
   } else {
@@ -54,6 +58,12 @@ export function validateWorkflow(workflow: unknown): string[] {
       const error = validateEditOperation(operation);
       if (error) errors.push(`Operation ${index + 1}: ${error}`);
     });
+  }
+  const layerSteps = workflow.layerSteps === undefined ? [] : workflow.layerSteps;
+  errors.push(...validateLayerWorkflowSteps(layerSteps));
+  if (Array.isArray(workflow.operations) && workflow.operations.length === 0 &&
+    Array.isArray(layerSteps) && layerSteps.length === 0) {
+    errors.push('Add at least one operation or layer step.');
   }
   return errors;
 }
@@ -67,10 +77,14 @@ export function workflowDocument(workflow: Workflow): WorkflowDocument {
 export function parseWorkflowDocument(json: string): WorkflowDocument {
   if (json.length > MAX_WORKFLOW_JSON_CHARACTERS) throw new Error('Workflow JSON exceeds the bounded limit.');
   const value: unknown = JSON.parse(json);
-  if (!isRecord(value) || value.schemaVersion !== WORKFLOW_SCHEMA_VERSION) {
+  if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== WORKFLOW_SCHEMA_VERSION)) {
     throw new Error(`Unsupported workflow schema version ${String(isRecord(value) ? value.schemaVersion : undefined)}.`);
   }
   if (!isRecord(value.workflow)) throw new Error('Workflow document is missing its workflow.');
+  if (value.schemaVersion === 1 && value.workflow.layerSteps !== undefined &&
+    (!Array.isArray(value.workflow.layerSteps) || value.workflow.layerSteps.length !== 0)) {
+    throw new Error('Schema version 1 cannot contain layer steps; use version 2.');
+  }
   const workflow = normalizeWorkflow(value.workflow);
   const errors = workflow ? [] : validateWorkflow(withWorkflowDefaults(value.workflow));
   if (errors.length) throw new Error(errors.join(' '));
@@ -116,7 +130,7 @@ export function upsertWorkflow(workflows: Workflow[], workflow: Workflow): Workf
 export function duplicateWorkflow(workflows: Workflow[], workflowId: string, now = new Date()): Workflow[] {
   const source = workflows.find((workflow) => workflow.id === workflowId);
   if (!source) return workflows.map(cloneWorkflow);
-  const duplicate = createWorkflow(`${source.name} Copy`, source.operations, source.folder, now);
+  const duplicate = createWorkflow(`${source.name} Copy`, source.operations, source.folder, now, source.layerSteps);
   duplicate.description = source.description;
   return [duplicate, ...workflows.map(cloneWorkflow)].slice(0, MAX_WORKFLOWS);
 }
@@ -160,7 +174,83 @@ export function duplicateOperationAt(operations: EditOperation[], index: number)
 }
 
 export function cloneWorkflow(workflow: Workflow): Workflow {
-  return { ...workflow, operations: structuredClone(workflow.operations) };
+  return { ...workflow, operations: structuredClone(workflow.operations), layerSteps: structuredClone(workflow.layerSteps ?? []) };
+}
+
+/** Validate all persisted layer instructions before any replay or migration. */
+export function validateLayerWorkflowSteps(value: unknown): string[] {
+  if (!Array.isArray(value)) return ['Workflow layer steps must be an array.'];
+  if (value.length > MAX_LAYER_WORKFLOW_STEPS) return ['Workflow has too many layer steps.'];
+  const errors: string[] = [];
+  let created = false;
+  value.forEach((step, index) => {
+    const error = validateLayerWorkflowStep(step);
+    if (error) errors.push(`Layer step ${index + 1}: ${error}`);
+    else if (isRecord(step)) {
+      if (isRecord(step.selector) && step.selector.type === 'last_created' && !created) {
+        errors.push(`Layer step ${index + 1}: last_created requires an earlier adjustment-layer creation.`);
+      }
+      if (step.type === 'create_adjustment_layer') created = true;
+    }
+  });
+  return errors;
+}
+
+function validateLayerWorkflowStep(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.type !== 'string') return 'layer step structure is invalid.';
+  const fields: Record<string, string[]> = {
+    select_layer: ['selector'], set_visibility: ['selector', 'visible'],
+    set_opacity: ['selector', 'opacity'], set_blend_mode: ['selector', 'blendMode'],
+    create_adjustment_layer: ['operation', 'name'], apply_to_layer: ['selector', 'operations'],
+    create_mask_from_selection: ['selector'], merge_down: ['selector'],
+    flatten: [], export_composite: []
+  };
+  if (!Object.prototype.hasOwnProperty.call(fields, value.type)) return `unsupported layer step type ${value.type}.`;
+  if (Object.keys(value).some((key) => key !== 'type' && !fields[value.type as string].includes(key))) {
+    return 'unknown layer step fields are not allowed.';
+  }
+  if (fields[value.type].includes('selector')) {
+    const error = validateLayerSelector(value.selector);
+    if (error) return error;
+  }
+  switch (value.type) {
+    case 'set_visibility': return typeof value.visible === 'boolean' ? null : 'visibility must be a boolean.';
+    case 'set_opacity': return finiteRange(value.opacity, 0, 1) ? null : 'opacity must be between 0 and 1.';
+    case 'set_blend_mode': return blendModes.some((mode) => mode.id === value.blendMode) ? null : 'blend mode is invalid.';
+    case 'create_adjustment_layer': {
+      if (value.name !== undefined && value.name !== null && !boundedLayerText(value.name, 120)) return 'layer name is invalid.';
+      return validateLayerOperation(value.operation);
+    }
+    case 'apply_to_layer': {
+      if (!Array.isArray(value.operations) || value.operations.length === 0 || value.operations.length > MAX_WORKFLOW_OPERATIONS) {
+        return `apply_to_layer needs 1 to ${MAX_WORKFLOW_OPERATIONS} operations.`;
+      }
+      for (const operation of value.operations) {
+        const error = validateLayerOperation(operation);
+        if (error) return error;
+      }
+    }
+  }
+  return null;
+}
+
+function validateLayerSelector(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.type !== 'string') return 'layer selector is invalid.';
+  const field = value.type === 'id' ? 'id' : value.type === 'name' ? 'name' : null;
+  if (!['id', 'name', 'active', 'last_created', 'bottom', 'top'].includes(value.type) ||
+    Object.keys(value).some((key) => key !== 'type' && key !== field)) return 'layer selector is invalid.';
+  return field && !boundedLayerText(value[field], field === 'id' ? 64 : 120) ? 'layer selector text is invalid.' : null;
+}
+
+function boundedLayerText(value: unknown, maximum: number): boolean {
+  return boundedText(value, 1, maximum, true) && new TextEncoder().encode(value).length <= maximum;
+}
+
+function validateLayerOperation(value: unknown): string | null {
+  const error = validateEditOperation(value);
+  if (error) return error;
+  return isRecord(value) && supportsMasking(value.type) && value.type !== 'decontaminate_colors'
+    ? null : 'this operation cannot be used as a layer adjustment or single-layer edit.';
 }
 
 export function validateEditOperation(value: unknown): string | null {
@@ -313,7 +403,8 @@ function withWorkflowDefaults(value: Record<string, unknown>): Record<string, un
     folder: value.folder === undefined ? '' : value.folder,
     favorite: value.favorite === undefined ? false : value.favorite,
     createdAt: value.createdAt === undefined ? '' : value.createdAt,
-    updatedAt: value.updatedAt === undefined ? '' : value.updatedAt
+    updatedAt: value.updatedAt === undefined ? '' : value.updatedAt,
+    layerSteps: value.layerSteps === undefined ? [] : value.layerSteps
   };
 }
 

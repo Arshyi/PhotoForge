@@ -9,6 +9,20 @@ pub const MAX_LAYER_SCALE: f32 = 64.0;
 /// Largest absolute translation, in document pixels, a transform may request.
 pub const MAX_LAYER_TRANSLATION: f32 = 1_000_000.0;
 
+/// How the compositor samples a transformed layer.
+///
+/// Bilinear is the default and the only behaviour earlier releases had, so a
+/// project written before 0.8.2 loads with it. Nearest neighbour exists for
+/// hard-edged artwork, where interpolating across a boundary is exactly the
+/// wrong answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerInterpolation {
+    #[default]
+    Bilinear,
+    Nearest,
+}
+
 /// A non-destructive per-layer placement.
 ///
 /// The transform maps the layer's own pixel grid into document space. Flip,
@@ -25,6 +39,9 @@ pub struct LayerTransform {
     pub rotation_degrees: f32,
     pub flip_horizontal: bool,
     pub flip_vertical: bool,
+    /// Absent in projects written before 0.8.2, which sampled bilinearly.
+    #[serde(default)]
+    pub interpolation: LayerInterpolation,
 }
 
 impl Default for LayerTransform {
@@ -37,6 +54,7 @@ impl Default for LayerTransform {
             rotation_degrees: 0.0,
             flip_horizontal: false,
             flip_vertical: false,
+            interpolation: LayerInterpolation::Bilinear,
         }
     }
 }
@@ -254,6 +272,21 @@ mod tests {
         (left - right).abs() < 1e-3
     }
 
+    /// The sampling mode is a new key inside the layer tree, which does not
+    /// deny unknown fields. That is what lets a 0.8.2 project open in 0.8.0 and
+    /// 0.8.1: those releases skip the key and draw the layer bilinearly, which
+    /// is exactly what they always did. Pinning it here keeps a future
+    /// deny_unknown_fields from breaking that quietly.
+    #[test]
+    fn an_unknown_transform_key_is_ignored_so_older_releases_can_still_read_a_project() {
+        let json = r#"{"translateX":1.0,"translateY":2.0,"scaleX":1.0,"scaleY":1.0,
+            "rotationDegrees":0.0,"flipHorizontal":false,"flipVertical":false,
+            "someFutureField":42}"#;
+        let transform: LayerTransform = serde_json::from_str(json).expect("unknown keys skipped");
+        assert_eq!(transform.translate_x, 1.0);
+        assert_eq!(transform.interpolation, LayerInterpolation::Bilinear);
+    }
+
     #[test]
     fn identity_transform_is_recognized_and_round_trips() {
         let transform = LayerTransform::default();
@@ -273,6 +306,7 @@ mod tests {
             rotation_degrees: 33.0,
             flip_horizontal: true,
             flip_vertical: false,
+            interpolation: LayerInterpolation::Bilinear,
         };
         let inverse = transform.inverse(40, 24).unwrap();
         for point in [(0.0, 0.0), (12.0, 5.0), (40.0, 24.0), (3.5, 21.75)] {
@@ -314,6 +348,7 @@ mod tests {
 
         let transform = LayerTransform {
             flip_vertical: true,
+            interpolation: LayerInterpolation::Bilinear,
             ..LayerTransform::default()
         };
         let mapped = transform.forward((5.0, 0.0), 10, 10);
@@ -448,6 +483,7 @@ mod tests {
             rotation_degrees: 15.0,
             flip_horizontal: true,
             flip_vertical: true,
+            interpolation: LayerInterpolation::Bilinear,
         };
         let json = serde_json::to_string(&transform).unwrap();
         assert!(json.contains("translateX"));

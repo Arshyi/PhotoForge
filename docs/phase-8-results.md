@@ -15,9 +15,73 @@ interaction pass found three user-visible defects in the layer UI; because the
 binaries rebuilt so the shipped packages actually contain the fixes. No feature
 or architecture changed in 0.8.1.
 
+## 2026-09-04 continuation — 0.8.2 working source, not a packaged release
+
+Claude's unfinished 0.8.2 changes are being continued in the working tree. The
+0.8.1 artifacts, hashes, benchmark figures, browser observations, and installer
+ results below are historical records: they do not validate the changed 0.8.2
+source. No rebuilt 0.8.2 release bundle or new installer acceptance result is
+claimed here. Current source-level gates are 722 Rust unit tests plus 39
+IPC/integration tests passing, clean Rust formatting and Clippy, a successful
+Rust release build, and a clean `npx tsc --noEmit`. The frontend Vite/Svelte
+check and Vitest rerun is blocked in this sandbox by esbuild directory access;
+an earlier escalated run passed 50 files and 814 tests before the latest
+merge-safety tests were added. These results must not be read as packaged GUI
+acceptance.
+
+Verified continuation regressions currently cover:
+
+- Opening or recovering a project establishes the backend document identity,
+  and even a single-layer, zero-operation project renders through the layer
+  compositor. Replacing the original pixel buffer, including flattening, cannot
+  silently return to the originally opened image's preview.
+- Save As holds the document stable while its dialog is pending. Open and
+  native drag-drop are rejected while asynchronous layer creation owns the
+  document. These are real-App integration tests with mocked Tauri calls, not
+  packaged Windows GUI tests.
+- Recovery keeps the source snapshot after restore and after a failed save.
+  A successful save deletes only snapshots tracked for that working document,
+  never all documents' recovery files.
+- Imported schema-v2 workflows replay document operations and layer steps
+  together. A mixed replay enters one Undo/Redo action; a failed pixel worker
+  leaves the visible tree and document pipeline unchanged. Work is staged in a
+  private tree and only published after success.
+- Compositor fast paths and serial/parallel row bands honor cancellation.
+  Nearest-neighbour masks now select the same texel as nearest-neighbour
+  artwork. Regression coverage compares fast/general output across small and
+  tall canvases, both sampling modes, and transparent/translucent/opaque pixels.
+- Sampling commands resolve the current layer composite with document/revision
+  guards, and mask-target shape/brush gestures map into layer-local mask space
+  before committing one history entry. Colour-range and magic-wand sampling
+  remain Selection-target operations by design.
+- Merge Down and workflow `merge_down` now fail closed unless selected layers
+  form a contiguous sibling range whose omitted backdrop cannot affect the
+  result through a non-Normal blend, adjustment layer, or pass-through group.
+
+The working source also adds the unlocked-pixel-layer transform panel and
+on-canvas handles: numeric position, size, scale, rotation, proportion lock,
+flips, reset, rasterize, and bilinear/nearest sampling. Transform math and
+component tests are automated evidence; no Windows pointer/DPI acceptance is
+implied. Current-layer sampling and mask-target routing are implemented and
+covered by Rust IPC plus frontend lifecycle/component regressions; the blocked
+frontend rerun and lack of packaged GUI automation are recorded above.
+
+Planner support is a schema/validation capability, not automatic generation:
+both backend planners still emit no layer steps. Imported/manually edited layer
+steps can replay; recording captures document operations only. Batch deliberately
+rejects any workflow containing layer steps before output work begins.
+
+The native 73-item GUI/DPI matrix, elevated all-users MSI lifecycle, trusted
+Authenticode signing, and complete-process-tree zero-network claim remain
+unfulfilled. The historical binaries remain explicitly unsigned.
+
 ---
 
-# Completed
+# Implementation record
+
+Behavior described here is not blanket release acceptance. The dated
+continuation above distinguishes current source fixes from the historical
+validation and packaging evidence later in this document.
 
 ## Architecture
 
@@ -58,7 +122,8 @@ change. No stub of an unimplemented type ships.
 Every layer carries a stable random identifier, display name, type, visibility,
 lock, opacity, blend mode, transform, optional mask, collapse state, creation
 and modification timestamps, and bounded custom metadata. Nothing in PhotoForge
-addresses a layer by array position or display name.
+stores a layer reference by a mutable array position. Workflows may intentionally
+resolve a unique display name, but reject ambiguous matches.
 
 ## Tree and invalid states
 
@@ -137,8 +202,13 @@ versioned, checksummed, run-length-encoded 8-bit coverage bitmap selections use.
 **There is no second mask representation in PhotoForge.**
 
 Implemented: create from selection, create white, create black, invert, disable,
-delete, apply, replace from selection, load as selection, edit by painting, and
+delete, apply, replace from selection, load as selection, and
 a mask thumbnail in the panel. Partial coverage is supported throughout.
+Mask-target painting/routing is implemented in the working source for shape and
+brush gestures. The stroke is mapped through the layer transform, respects
+inverted masks, and commits atomically; colour-range and magic-wand sampling
+remain Selection-target operations by design, after which the selection can be
+turned into a mask.
 
 A pixel layer's mask lives in that layer's own pixel space and is sampled at the
 same layer-space coordinate as its pixels, so it travels with the layer through
@@ -252,8 +322,10 @@ options are *The selected layer, applied directly* and *A new adjustment layer*.
 Returning a slider to its default always goes to the document pipeline, so a
 control still works as its own reset.
 
-A document that is still one plain full-canvas pixel layer also keeps using the
-original 0.7.1 render and export path entirely. A test asserts compositing such
+A document that is still one plain full-canvas pixel layer backed by the exact
+originally opened pixel buffer keeps using the original render/export path.
+Loaded projects and replacement buffers use the compositor even if their trees
+look equally simple. A test asserts compositing such
 a document reproduces the opened pixels byte for byte, and that the document
 pipeline on top of it matches the destructive path exactly.
 
@@ -262,9 +334,8 @@ perspective, lens correction, guided planning, and Ollama planning are unchanged
 
 ## Autosave and recovery
 
-While a document has unsaved layer changes, a bounded recovery snapshot is
-written to the local `PhotoForge
-ecovery` folder every 90 seconds. Snapshots
+While a document has unsaved changes, a bounded recovery snapshot is written to
+the local `%LOCALAPPDATA%\PhotoForge\recovery` folder every 90 seconds. Snapshots
 use their own `.photoforge-recovery` extension so they can never be mistaken for
 or overwrite a saved project; at most three are kept, oldest pruned first; each
 is written atomically; and the user's project file is never touched.
@@ -273,32 +344,47 @@ A snapshot is an ordinary project container plus a sidecar recording its origin,
 so restoring goes through the same validated, checksummed reader a project does
 — a corrupt snapshot is rejected, not half-read. On startup a snapshot triggers a
 recovery offer; recovered work stays marked unsaved until the user saves it
-where they chose; saving clears the snapshots. Nothing is uploaded.
+where they chose. A successful save clears only snapshots tracked for that
+document; failed saves retain them. Nothing is uploaded.
 
 ## Layer-aware workflows
 
 Workflow schema version 2 adds layer steps: select layer, set visibility, set
 opacity, set blend mode, create adjustment layer, apply operations to a layer,
 create a mask from the selection, merge down, flatten, and export the composite.
-Version 1 files carry none, still load unchanged, and are not rewritten. A
+Version 1 files carry none and still load without rewriting their source file.
+New exports use schema 2, including exports of imported version 1 workflows. A
 version 1 document carrying layer steps is rejected as a mismatch.
 
 Steps name layers through deterministic selectors: an exact identifier, the
 active layer, the layer a previous step created, a unique name, the bottom, or
 the top. A selector that cannot resolve — or a name matching more than one layer
-— fails the replay rather than retargeting, and the whole workflow is resolved
-before any of it is applied, so a replay is never half-applied.
+— fails the replay rather than retargeting. Structural preflight precedes worker
+execution, selectors are resolved against each staged intermediate tree, and
+visible state is committed only after successful completion. A pixel-worker
+failure leaves document operations and layers unchanged. Export is allowed
+once, as the final step, and obtains its destination from the user rather than
+from workflow data.
+
+The library imports/exports layer-aware JSON and exposes a validated layer-step
+JSON editor. Recording still captures only the document operation list; layer
+actions are not automatically recorded. Mixed operations/layer replay is one
+shared Undo/Redo action.
 
 ## Planner integration
 
-`EditPlan` gained an optional layer plan. Planners are restricted to selectors
+`EditPlan` gained an optional layer-step list, and its validator restricts
+prospective planner output to selectors
 they cannot fabricate — only the active layer and the layer the plan just
 created — and may not propose merge, flatten, or export. **This is enforced by
 validation, not convention**: a plan containing an identifier selector is
 rejected with `invalid_plan`. The brief's own example (create a curves
 adjustment layer, mask it from the selection, reduce opacity to 60%) validates;
 an invented identifier does not. Ollama still receives no image, mask, or layer
-data.
+data. Both current backend generators still construct empty `layer_steps`:
+automatic natural-language generation of layer actions is not implemented.
+Schema validation and frontend application support must not be described as
+proof that either planner currently proposes these actions.
 
 ## Batch
 
@@ -307,6 +393,9 @@ accepted as a batch input: batch renders its visible composite, applies the
 project's own document pipeline, then the workflow's operations, and exports the
 result. The project file is only ever read — a test asserts it is byte-identical
 afterwards — and a corrupt project fails that one item rather than the run.
+Workflows containing any layer step are intentionally rejected for batch
+preview/run, before outputs or a batch log are written, rather than silently
+dropping those steps.
 
 ## Undo and redo
 
@@ -380,7 +469,11 @@ ungroup, `Delete` delete the selected layer. Every existing binding was checked
 first; none of these were previously assigned, and Ctrl+Z/Y, Ctrl+O/S, Ctrl+A/D,
 Ctrl+Shift+I, and the single-letter tool keys are untouched.
 
-## Automated tests
+## Historical 0.8.0/0.8.1 automated test record
+
+The following counts belong to the earlier implementation/release record. They
+are not current 0.8.2 totals. Current continuation gates are recorded at the
+top of this document; the historical counts remain here for comparison only.
 
 | Suite | Before (0.7.1) | After (0.8.0) | Added |
 | --- | --- | --- | --- |
@@ -415,7 +508,7 @@ deliver `clientY` through `fireEvent`, so the geometry fell through a NaN
 comparison. They were rewritten to construct the event explicitly and now assert
 the visible drop hint as well as the resulting call.
 
-## Validation performed
+## Historical 0.8.0/0.8.1 validation performed
 
 | Check | Result |
 | --- | --- |
@@ -434,11 +527,11 @@ the visible drop hint as well as the resulting call.
 
 Phase 8 adds **no new Rust or npm dependency**.
 
-## Performance
+## Historical 0.8.0/0.8.1 performance
 
-Measured with `cargo run --release --example layer_benchmark` on this machine.
-Every figure is a wall-clock measurement of the same compositor the application
-uses. Nothing is estimated.
+The prior run recorded these wall-clock measurements with
+`cargo run --release --example layer_benchmark`. They have not been rerun for
+the changed 0.8.2 compositor and must not be presented as current performance.
 
 ### Opaque layers (the common case)
 
@@ -484,8 +577,8 @@ Two optimisations, both asserted to leave output byte-identical:
    tall masked, blended, adjusted document five times and requires identical
    bytes. A 100-layer preview went from 5,490 ms to 904 ms.
 
-**Honest assessment.** Interactive editing is now comfortable across the range
-tested: a 10-layer preview updates in under 110 ms even at 24 MP, a 50-layer
+**Historical assessment.** In that measured build, a 10-layer preview updated
+in under 110 ms even at 24 MP, a 50-layer
 document in ~440 ms, and a 100-layer document in ~900 ms. The last of those is
 noticeable rather than instant. The remaining cost is a per-pixel scalar loop
 with no tiling, no dirty-region tracking, and no caching of unchanged group
@@ -524,7 +617,7 @@ nested JSON is rejected by the parser before validation is reached.
 No project file can trigger network access, executable loading, script
 execution, plugin loading, or a shell command.
 
-## Real-browser interaction validation
+## Historical 0.8.0/0.8.1 real-browser interaction validation
 
 Performed after the 0.8.0 implementation as a validation and hardening pass. It
 is a distinct level of evidence from the jsdom suite and from packaged desktop
@@ -639,11 +732,11 @@ using an `aside`.
 - Select-all-on-rename could not be confirmed, because the automation's typing
   re-collapses the selection; only the focus fix is verified.
 
-## Release artifacts
+## Historical 0.8.1 release artifacts
 
-Built from this tree at version **0.8.1** and stored in the ignored `release/`
-directory, matching existing repository policy. Hashes were written to the
-manifest and then independently recomputed and compared.
+Built from the earlier **0.8.1** source, not the current working tree, and stored
+in the ignored `release/` directory. The prior release record reports these
+hashes and their independent comparison; they are not 0.8.2 artifact hashes.
 
 | Artifact | Size | SHA-256 |
 | --- | --- | --- |
@@ -658,7 +751,7 @@ describes exactly what ships. `Get-AuthenticodeSignature` reports
 **NotSigned** for all three: no legitimate signing identity exists, and no
 self-signed substitute was used.
 
-## Packaging validation
+## Historical 0.8.1 packaging validation
 
 **Portable.** The rebuilt executable started, stayed running, reported
 `Responding: True`, presented a main window titled `PhotoForge`, used about
@@ -728,14 +821,19 @@ Stated plainly, without hedging.
     correctly, but it is an all-users package whose installation requires
     elevation, and UAC was not bypassed or automated. The NSIS installer's full
     per-user lifecycle *was* verified and is recorded above.
-7. **No zero-network claim is made.** As in 0.7.1, the embedded WebView2
-    runtime performs its own diagnostics that the embedding application does not
-    fully control. PhotoForge application code makes no network request; the
-    complete WebView2 process tree is not claimed to be silent.
+7. **No zero-network claim is made.** Earlier observation recorded two
+    Microsoft TLS connections from WebView2 and no observed socket from the
+    PhotoForge Rust process. This is scoped observation, not proof that the
+    complete process tree is network-silent. Optional local Ollama use must also
+    be distinguished from offline editing.
+8. **Production Authenticode signing remains unavailable.** No trusted signing
+    identity/service has been supplied; the historical artifacts are unsigned,
+    and no self-signed substitute is claimed as production signing.
 
 ## Known performance limitation
 
-8. **Documents with many translucent or blended layers still have visible
-   latency** — roughly 440 ms per preview at 50 layers and 904 ms at 100 layers,
-   1920x1080, on the measured machine. Tiling, dirty regions, and cached group
+9. **Documents with many translucent or blended layers have recorded visible
+   latency** — the historical build measured roughly 440 ms per preview at 50
+   layers and 904 ms at 100 layers, 1920x1080. Current 0.8.2 timings are pending.
+   Tiling, dirty regions, and cached group
    composites remain unimplemented; bounded row-band parallelism is implemented.

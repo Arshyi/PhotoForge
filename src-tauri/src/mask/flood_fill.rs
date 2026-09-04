@@ -122,7 +122,7 @@ pub(crate) fn select_with_progress(
 }
 
 fn coverage(distance: f32, tolerance: f32, soft_limit: f32) -> u8 {
-    if distance <= tolerance || soft_limit <= tolerance {
+    if distance <= tolerance {
         255
     } else if distance >= soft_limit {
         0
@@ -214,6 +214,28 @@ mod tests {
         .unwrap();
         assert_eq!(mask.get(0, 0), 255);
         assert_eq!(mask.get(1, 0), 0);
+    }
+
+    #[test]
+    fn non_contiguous_hard_edge_selection_respects_tolerance() {
+        let image = RgbaImage::from_fn(4, 1, |x, _| {
+            if x % 2 == 0 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let mask = select(
+            &image,
+            Point { x: 0.0, y: 0.0 },
+            WandOptions {
+                contiguous: false,
+                ..options(Connectivity::Four)
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(mask.coverage(), &[255, 0, 255, 0]);
     }
 
     #[test]

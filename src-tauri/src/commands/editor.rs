@@ -6,11 +6,86 @@ use crate::domain::{
 use crate::error::AppError;
 use crate::image_processing::{analyze_image_quality, prepare_preview_operations};
 use crate::infrastructure::{encode_preview, load_image, save_image};
+use crate::layers::LayerPixelStore;
 use image::GenericImageView;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tauri::State;
+
+/// All image/project/recovery opens share one replacement protocol. Holding the
+/// session mutex while publishing and committing prevents an older worker from
+/// winning the race after a newer open has started.
+pub(super) struct OpenRequest<'a> {
+    state: &'a AppState,
+    request_id: u64,
+}
+
+impl<'a> OpenRequest<'a> {
+    pub(super) fn begin(state: &'a AppState, request_id: u64) -> Result<Self, AppError> {
+        if request_id == 0 {
+            return Err(AppError::ProcessingFailure(
+                "open request identifiers must be nonzero".into(),
+            ));
+        }
+        let _session = state
+            .session
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+        state
+            .latest_open_request
+            .store(request_id, Ordering::Release);
+        state
+            .pending_open_request
+            .store(request_id, Ordering::Release);
+        state.latest_preview_request.store(0, Ordering::Release);
+        state.latest_analysis_request.store(0, Ordering::Release);
+        state.latest_plan_request.store(0, Ordering::Release);
+        state.latest_histogram_request.store(0, Ordering::Release);
+        state.latest_layer_request.store(0, Ordering::Release);
+        state.latest_mask_request.store(0, Ordering::Release);
+        state.mask_cancelled.store(true, Ordering::Release);
+        Ok(Self { state, request_id })
+    }
+
+    pub(super) fn is_current(&self) -> bool {
+        self.state.latest_open_request.load(Ordering::Acquire) == self.request_id
+    }
+
+    pub(super) fn commit(
+        &self,
+        source: crate::infrastructure::LoadedImage,
+        layers: LayerPixelStore,
+    ) -> Result<bool, AppError> {
+        let mut session = self
+            .state
+            .session
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+        let mut store = self
+            .state
+            .layers
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
+        if !self.is_current() {
+            return Ok(false);
+        }
+        // No fallible work after either piece of live state has been replaced.
+        *store = layers;
+        *session = Some(crate::application::EditorSession {
+            source,
+            document_id: self.request_id,
+            analysis: None,
+        });
+        Ok(true)
+    }
+}
+
+impl Drop for OpenRequest<'_> {
+    fn drop(&mut self) {
+        clear_pending_open(self.state, self.request_id);
+    }
+}
 
 #[tauri::command]
 pub async fn open_image(
@@ -19,17 +94,7 @@ pub async fn open_image(
     state: State<'_, AppState>,
 ) -> Result<OpenImageResult, AppError> {
     let started = Instant::now();
-    state
-        .latest_open_request
-        .store(request_id, Ordering::Release);
-    state
-        .pending_open_request
-        .store(request_id, Ordering::Release);
-    state.latest_preview_request.store(0, Ordering::Release);
-    state.latest_analysis_request.store(0, Ordering::Release);
-    state.latest_plan_request.store(0, Ordering::Release);
-    state.latest_mask_request.store(0, Ordering::Release);
-    state.mask_cancelled.store(true, Ordering::Release);
+    let request = OpenRequest::begin(&state, request_id)?;
 
     let input_path = PathBuf::from(path);
     let loaded = match tauri::async_runtime::spawn_blocking(move || load_image(&input_path)).await {
@@ -62,18 +127,12 @@ pub async fn open_image(
         return Ok(stale_open_result(loaded.metadata, request_id, started));
     }
 
-    // Rebind the layer store to the new canvas and register the opened image as
-    // the document's background pixel buffer. Every previous document's buffers
-    // are released here, so opening images in sequence cannot accumulate memory.
-    let background_pixel_id = {
-        let mut store = state
-            .layers
-            .lock()
-            .map_err(|_| AppError::ProcessingFailure("layer store is unavailable".into()))?;
-        let (width, height) = loaded.original.dimensions();
-        store.reset(width, height)?;
-        store.register(loaded.original.to_rgba8())?
-    };
+    // Stage the replacement store; allocation/validation failures must preserve
+    // both the old source image and all of its live/history pixel buffers.
+    let mut store = LayerPixelStore::default();
+    let (width, height) = loaded.original.dimensions();
+    store.reset(width, height)?;
+    let background_pixel_id = store.register(loaded.original.to_rgba8())?;
 
     let result = OpenImageResult {
         metadata: loaded.metadata.clone(),
@@ -85,17 +144,9 @@ pub async fn open_image(
         background_pixel_id,
     };
 
-    let mut session = state
-        .session
-        .lock()
-        .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
-    *session = Some(crate::application::EditorSession {
-        source: loaded,
-        document_id: request_id,
-        analysis: None,
-    });
-    drop(session);
-    clear_pending_open(&state, request_id);
+    if !request.commit(loaded, store)? {
+        return Ok(stale_open_result(result.metadata, request_id, started));
+    }
     Ok(result)
 }
 
@@ -113,6 +164,8 @@ fn stale_analysis(document_id: u64, request_id: u64) -> AnalysisResult {
 pub async fn analyze_image(
     document_id: u64,
     request_id: u64,
+    layer_document: Option<crate::layers::LayerDocument>,
+    operations: Option<Vec<EditOperation>>,
     state: State<'_, AppState>,
 ) -> Result<AnalysisResult, AppError> {
     state
@@ -126,32 +179,33 @@ pub async fn analyze_image(
         return Ok(stale_analysis(document_id, request_id));
     }
 
-    let (source, cached) = {
-        let session = state
+    // Cache is the latest completed analysis for planners, not a reusable
+    // source-image result: a supplied layer tree/pipeline may have changed.
+    // Recompute rather than risk returning a cache with ambiguous provenance.
+    {
+        let mut session = state
             .session
             .lock()
             .map_err(|_| AppError::AnalysisFailure)?;
-        let session = session.as_ref().ok_or(AppError::NoImageOpen)?;
+        let session = session.as_mut().ok_or(AppError::NoImageOpen)?;
         if session.document_id != document_id {
             return Ok(stale_analysis(document_id, request_id));
         }
-        (session.source.preview.clone(), session.analysis.clone())
-    };
-
-    if let Some(analysis) = cached {
-        return Ok(AnalysisResult {
-            analysis: Some(analysis),
-            document_id,
-            request_id,
-            processing_time_ms: 0.0,
-            is_current: true,
-        });
+        session.analysis = None;
     }
-
+    let source = super::sampling::capture(&state, document_id, layer_document, true)?;
+    let full_dimensions = source.full_dimensions;
+    let operations = operations.unwrap_or_default();
     let started = Instant::now();
-    let analysis = tauri::async_runtime::spawn_blocking(move || analyze_image_quality(&source))
-        .await
-        .map_err(|_| AppError::AnalysisFailure)?;
+    let analysis = tauri::async_runtime::spawn_blocking(move || {
+        let source = source.render()?;
+        let prepared =
+            prepare_preview_operations(&operations, full_dimensions, source.dimensions())?;
+        let processed = crate::image_processing::apply_pipeline(&source, &prepared)?;
+        Ok::<_, AppError>(analyze_image_quality(&processed))
+    })
+    .await
+    .map_err(|_| AppError::AnalysisFailure)??;
     let is_current = state.latest_analysis_request.load(Ordering::Acquire) == request_id
         && state.pending_open_request.load(Ordering::Acquire) == 0;
     if !is_current {

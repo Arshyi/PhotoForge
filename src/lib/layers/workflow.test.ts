@@ -166,6 +166,20 @@ describe('running a layer workflow', () => {
     ).toThrow(/no layer beneath/);
   });
 
+  it('rejects a blend-dependent merge that would omit its backdrop', () => {
+    const bottom = pixel('Bottom');
+    const middle = pixel('Middle');
+    middle.blendMode = 'screen';
+    const top = pixel('Top');
+    const document = { ...createDocument(16, 16, [bottom, middle, top]), activeLayerId: top.id };
+    expect(() => runLayerWorkflow(document, [
+      { type: 'merge_down', selector: { type: 'active' } }
+    ])).toThrow(/depends on layers beneath/);
+    expect(planLayerWorkflow(document, [
+      { type: 'merge_down', selector: { type: 'active' } }
+    ])).toEqual({ ok: false, problem: expect.stringMatching(/depends on layers beneath/) });
+  });
+
   it('rejects an out-of-range opacity and an empty operation list', () => {
     const { document } = documentWith();
     expect(() =>

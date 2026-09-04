@@ -18,6 +18,7 @@
   import LayersPanel from '../lib/components/LayersPanel.svelte';
   import AdjustmentLayerDialog from '../lib/components/AdjustmentLayerDialog.svelte';
   import { LayerHistory } from '../lib/layers/history';
+  import { resetTransform } from '../lib/layers/transformTool';
   import { adjustmentDefinitions, definitionFor } from '../lib/layers/adjustments';
   import {
     createAdjustmentLayer,
@@ -168,15 +169,7 @@
         commit(
           updateLayer(document, layerId as string, (entry) => ({
             ...entry,
-            transform: {
-              translateX: 0,
-              translateY: 0,
-              scaleX: 1,
-              scaleY: 1,
-              rotationDegrees: 0,
-              flipHorizontal: false,
-              flipVertical: false
-            }
+            transform: resetTransform(entry.transform.interpolation)
           })),
           'Reset transform'
         );

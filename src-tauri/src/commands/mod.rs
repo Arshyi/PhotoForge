@@ -5,6 +5,7 @@ mod mask;
 mod ollama;
 mod planner;
 mod professional;
+mod sampling;
 
 pub use components::{
     discover_models, get_component_diagnostics, get_component_snapshot,
@@ -12,6 +13,7 @@ pub use components::{
     select_restoration_engine, update_component_configuration, validate_plugin_manifest,
 };
 pub use editor::{analyze_image, export_image, open_image, render_preview};
+pub use layers::register_layer_commands;
 pub use layers::{
     apply_operations_to_layer, create_layer_mask, create_layer_pixels, discard_recovery_snapshot,
     export_layer_composite, flatten_layer_document, import_layer_image, layer_mask_from_selection,

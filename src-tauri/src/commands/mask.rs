@@ -239,6 +239,7 @@ pub async fn refine_selection_mask(
     edge_strength: f32,
     sample_merged: bool,
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     request_id: u64,
     state: State<'_, AppState>,
@@ -252,7 +253,12 @@ pub async fn refine_selection_mask(
         }
         let _permit = state.mask_gate.lock().await;
         prepare_request(&state, &progress, document_id, request_id)?;
-        let source = source_for_selection(&state, document_id, request_id)?;
+        let source = super::sampling::capture(
+            &state,
+            document_id,
+            layer_document.filter(|_| sample_merged),
+            false,
+        )?;
         let pixels = checked_mask_length(mask.width, mask.height)? as u64;
         let edge_units = if edge_strength == 0.0 || mask.width < 3 || mask.height < 3 {
             pixels
@@ -269,6 +275,7 @@ pub async fn refine_selection_mask(
             };
             let context = MaskWorkContext::new(Some(cancelled.as_ref()), Some(&report));
             context.report("render_selection_source", 0, 0)?;
+            let source = source.render()?;
             let image = rendered_source(source.as_ref(), &operations, sample_merged)?.to_rgba8();
             context.check_cancelled()?;
             let decoded = mask.decode()?;
@@ -292,6 +299,7 @@ pub async fn magic_wand_selection(
     base: Option<MaskSnapshot>,
     sample_merged: bool,
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     request_id: u64,
     state: State<'_, AppState>,
@@ -300,12 +308,18 @@ pub async fn magic_wand_selection(
     let outcome = async {
         let _permit = state.mask_gate.lock().await;
         prepare_request(&state, &progress, document_id, request_id)?;
-        let source = source_for_selection(&state, document_id, request_id)?;
+        let source = super::sampling::capture(
+            &state,
+            document_id,
+            layer_document.filter(|_| sample_merged),
+            false,
+        )?;
         let cancelled = state.mask_cancelled.clone();
         let worker_progress = progress.clone();
         let started = Instant::now();
         let bitmap = tauri::async_runtime::spawn_blocking(move || {
             worker_progress.mark_running("render_selection_source")?;
+            let source = source.render()?;
             let image = rendered_source(source.as_ref(), &operations, sample_merged)?.to_rgba8();
             let pixels = u64::from(image.width()) * u64::from(image.height());
             let selection_units = if options.contiguous { 0 } else { pixels };
@@ -336,6 +350,7 @@ pub async fn color_range_selection(
     base: Option<MaskSnapshot>,
     sample_merged: bool,
     operations: Vec<EditOperation>,
+    layer_document: Option<crate::layers::LayerDocument>,
     document_id: u64,
     request_id: u64,
     state: State<'_, AppState>,
@@ -344,12 +359,18 @@ pub async fn color_range_selection(
     let outcome = async {
         let _permit = state.mask_gate.lock().await;
         prepare_request(&state, &progress, document_id, request_id)?;
-        let source = source_for_selection(&state, document_id, request_id)?;
+        let source = super::sampling::capture(
+            &state,
+            document_id,
+            layer_document.filter(|_| sample_merged),
+            false,
+        )?;
         let cancelled = state.mask_cancelled.clone();
         let worker_progress = progress.clone();
         let started = Instant::now();
         let bitmap = tauri::async_runtime::spawn_blocking(move || {
             worker_progress.mark_running("render_selection_source")?;
+            let source = source.render()?;
             let image = rendered_source(source.as_ref(), &operations, sample_merged)?.to_rgba8();
             let pixels = u64::from(image.width()) * u64::from(image.height());
             let planned = worker_progress.planned(pixels.saturating_mul(2));

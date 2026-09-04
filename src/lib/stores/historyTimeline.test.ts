@@ -1,12 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import {
   eventDepths,
+  historyEventStacks,
+  historyEventForChanges,
   retainedHistorySuffix,
   selectionPanelHistoryAvailability,
   type HistoryEvent
 } from './historyTimeline';
 
 describe('history timeline retention', () => {
+  it('retains a workflow only while every paired stack is available', () => {
+    expect(eventDepths(['layer_compound', 'layer_edit', 'selection'])).toEqual({
+      editDepth: 2, selectionDepth: 2, layerDepth: 2
+    });
+    expect(retainedHistorySuffix(['edit', 'layer_compound', 'layer'], 1, 0, 2).events).toEqual(['layer']);
+    expect(historyEventStacks('layer_compound')).toEqual({ edit: true, selection: true, layer: true });
+    expect(historyEventForChanges(true, false, true)).toBe('layer_edit');
+    expect(historyEventForChanges(false, true, true)).toBe('layer_selection');
+    expect(historyEventForChanges(false, false, false)).toBeNull();
+  });
   it('keeps only the newest chronologically accessible mixed-event suffix', () => {
     const events: HistoryEvent[] = ['edit', 'selection', 'edit', 'geometry', 'selection'];
     expect(retainedHistorySuffix(events, 2, 2)).toEqual({

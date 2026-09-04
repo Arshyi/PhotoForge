@@ -7,6 +7,29 @@ tools interact with layers, and what is deliberately out of scope.
 For the rendering mathematics see [compositing.md](compositing.md); for the
 on-disk format see [project-format.md](project-format.md).
 
+## 2026-09-04 continuation — 0.8.2 working source
+
+This guide includes current unbuilt 0.8.2 source changes continued from Claude's
+work. The available 0.8.1 packages and earlier benchmark/browser records do not
+contain or verify all of these changes. The current source-level evidence is
+722 Rust unit tests plus 39 IPC/integration tests passing, clean Rust formatting
+and Clippy, a successful Rust release build, and a clean `npx tsc --noEmit`.
+The frontend Vite/Svelte check and Vitest rerun is currently blocked in this
+sandbox by esbuild's directory-access denial; an earlier escalated run passed
+50 files and 814 tests before the latest merge-safety tests were added.
+That evidence is source-level, not packaged-app acceptance. Native Windows
+GUI/DPI acceptance, elevated MSI testing, and trusted signing are not claimed.
+
+Automated real-App tests with mocked Tauri calls now cover correct backend
+project identities, zero-operation project compositing, replacement-buffer
+previews, Save As and asynchronous-layer operation locks, scoped recovery
+cleanup, and atomic layer-aware workflow replay/Undo/Redo. These are integration
+regressions, not hands-on packaged-app evidence. Current-layer sampling now
+resolves the active document's immutable composite with document/revision
+guards, and mask-target shape/brush gestures map into pixel-layer mask space
+before committing one history entry. Rust IPC tests and frontend lifecycle/
+component tests cover the stale and routing paths; no native GUI claim follows.
+
 ## The document model
 
 ```text
@@ -79,9 +102,10 @@ opacity, blend mode, transform, optional mask, collapse state, creation and
 modification timestamps, and bounded custom metadata. Parent and ordering come
 from the layer's position in the tree.
 
-Identifiers are random and stable. Nothing in PhotoForge addresses a layer by
-array position or display name — not the UI, not history, not workflows, not the
-project format.
+Identifiers are random and stable. The UI, history, and project format preserve
+those identifiers rather than treating mutable array positions as identity.
+Workflows may also resolve a unique layer name or a relative selector; ambiguous
+names and missing targets fail closed.
 
 ## Tree operations and invalid states
 
@@ -116,8 +140,12 @@ selections use. **There is no second mask representation in PhotoForge.**
 A mask supports partial coverage, an enabled flag, and an inverted flag.
 Supported operations: create from the active selection, create white (reveal
 all), create black (hide all), invert, disable, delete, apply (bake into the
-layer's pixels), replace from selection, load as selection, and edit by
-painting.
+layer's pixels), replace from selection, and load as selection. Mask-target
+painting/routing is implemented in the working source for shape and brush
+gestures. The stroke is mapped through the layer transform, respects inverted
+masks, and commits atomically; colour-range and magic-wand sampling remain
+Selection-target operations by design, after which the selection can be turned
+into a mask.
 
 A pixel layer's mask lives in that layer's own pixel space, so it moves, scales,
 rotates, and flips with the layer automatically. Group and adjustment layer
@@ -132,6 +160,24 @@ vertical. The transform is stored, not applied, so repeated edits accumulate no
 resampling loss. `Reset Transform` returns to identity; `Rasterize` bakes the
 current transform into a new canvas-sized buffer and returns the layer to
 identity.
+
+The 0.8.2 working source exposes numeric Center X/Y, Width/Height, Scale X/Y,
+Rotation, and Keep proportions controls, plus an on-canvas move/resize/rotate
+box for an unlocked pixel layer. A gesture stages a preview and commits one
+history change when completed; cancellation discards its staged transform.
+Controls expose off-canvas bounds, flips, reset, and rasterization.
+
+`Ctrl+T` toggles transform mode. While it is active, arrow keys nudge and Shift
+uses the larger nudge, Enter finishes, and Escape cancels. `Ctrl+Shift+H` and
+`Ctrl+Shift+U` flip horizontally and vertically; `Ctrl+Shift+R` resets. Text
+fields keep their own typing/arrow behavior. These routes have automated
+coverage, not native Windows pointer/DPI acceptance.
+
+Bilinear remains the backward-compatible default; nearest-neighbour preserves
+hard edges. The sampling choice is saved in the transform and applied to both
+artwork and its mask. Regression tests check their texel alignment and preserve
+byte-equivalence for whole-pixel placements. Groups and adjustment layers do
+not expose these interactive pixel-transform controls.
 
 Per-layer transforms are entirely separate from document crop, straighten,
 perspective, and lens correction, which continue to reshape the whole canvas
@@ -160,7 +206,8 @@ selecting an adjustment layer moves the target off Layer automatically.
 | Crop, straighten, perspective, lens correction, rotate, reflect | Document geometry, applied to the finished composite |
 | Global adjustments (brightness, contrast, saturation, gamma, blur, sharpen, restoration) | Routed by the **Adjustments go to** selector |
 | Curves, levels, HSL, selective colour in the Professional workspace | The document pipeline, as before |
-| Guided and Ollama plans | The document pipeline, as before |
+| Generated Guided and Ollama plans | Document operations; current generators emit no layer steps |
+| Imported/manually edited layer workflows | Staged layer tree plus document pipeline, committed together |
 | Export | The visible composite |
 
 ### Preserving existing behaviour
@@ -177,10 +224,11 @@ chooses another target:
 Returning a slider to its default always goes to the document pipeline, so a
 control still works as its own reset regardless of the selected target.
 
-A document that is still one plain full-canvas pixel layer also keeps using the
-original 0.7.1 render and export path entirely. A test asserts that compositing
-such a document reproduces the opened pixels byte for byte, and that the
-document pipeline on top of it matches the destructive path exactly.
+A document that is still one plain full-canvas pixel layer backed by the exact
+originally opened pixel buffer keeps the original render/export path. A loaded
+project or a replaced/flattened buffer uses the compositor even when it also has
+one plain layer, so it cannot fall back to stale original pixels. Automated
+tests assert the pixel-equivalent fast path and the correct lifecycle routing.
 
 ## Merge and flatten
 
@@ -192,7 +240,11 @@ All three are destructive document operations and all three are undoable. Merged
 results are canvas-sized with an identity transform, because a merged layer no
 longer has the individual placements of the layers that produced it. Merging
 preserves the document's own bottom-to-top order rather than the order
-identifiers were listed in, so a merge can never reorder pixels.
+identifiers were listed in, so a merge can never reorder pixels. Merge Down also
+requires a contiguous sibling range and fails closed when an omitted backdrop
+could affect the result through a non-Normal blend, adjustment layer, or
+pass-through group; the same guard runs in the frontend workflow and Rust IPC
+boundary.
 
 ## Undo and redo
 
@@ -247,9 +299,8 @@ history and never marks the project as modified.
 
 ## Autosave and recovery
 
-While a document has unsaved layer changes, PhotoForge writes a bounded recovery
-snapshot to the local `PhotoForge
-ecovery` folder every 90 seconds. Snapshots
+While a document has unsaved changes, PhotoForge writes a bounded recovery
+snapshot to `%LOCALAPPDATA%\PhotoForge\recovery` every 90 seconds. Snapshots
 use the `.photoforge-recovery` extension so they can never be mistaken for, or
 overwrite, a project the user saved; at most three are kept, oldest pruned
 first; and each is written atomically.
@@ -260,38 +311,52 @@ checksummed reader a project does - a corrupt snapshot is rejected rather than
 half-read.
 
 On startup, if a snapshot is present, PhotoForge offers to recover it. Recovered
-work is marked unsaved until the user saves it somewhere they chose. Saving a
-project clears the snapshots. Nothing is uploaded and no cloud autosave exists.
+work is marked unsaved until the user saves it somewhere they chose. Restoring
+or failing a save does not delete the source snapshot. A successful save clears
+only snapshots tracked for that working document, not unrelated documents'
+snapshots. Nothing is uploaded and no cloud autosave exists.
 
 ## Layer-aware workflows
 
 Workflows can carry layer steps at schema version 2: select layer, set
 visibility, set opacity, set blend mode, create adjustment layer, apply
 operations to a layer, create a mask from the selection, merge down, flatten,
-and export the composite. Version 1 files carry none and still load unchanged.
+and export the composite. Version 1 files carry none and still load without
+rewriting their source files; new exports use version 2.
 
 Steps name layers through deterministic selectors - an exact identifier, the
 active layer, the layer a previous step created, a unique name, the bottom, or
 the top. A selector that cannot be resolved, or a name that matches more than
 one layer, fails the replay rather than retargeting silently, and the whole
-workflow is checked before any of it is applied, so a replay is never
-half-applied.
+workflow is structurally checked before worker execution. Steps then resolve
+against staged intermediate trees; visible state is published only after the
+replay succeeds. Global operations and layer changes enter one Undo/Redo action.
+Failed worker operations leave the visible tree and document pipeline unchanged.
 
-The guided planner may also propose layer steps. It is restricted to selectors
-it cannot fabricate - only the active layer and the layer the plan just created
-- and it may not propose merge, flatten, or export. That restriction is enforced
-by validation rather than by convention, so a planner cannot invent a layer
-identifier even if it tries.
+The workflow library supports layer-aware import/export and a validated
+layer-step JSON editor. Recording captures only document operations; it does
+not automatically record layer actions. Export is allowed once as the final
+layer step and asks the user for a destination. Batch intentionally rejects
+workflows containing layer steps before it writes outputs.
 
-## Known limitations in 0.8.0
+Planner schema validation supports layer steps and restricts prospective
+planner selectors to the active/last-created layer, rejecting merge, flatten,
+export, and fabricated identifiers. Both current backend planners still emit
+empty layer-step lists. Automatic natural-language layer-action generation is
+not implemented; validation/application support is not generation support.
+
+## Known limitations, including the 0.8.2 continuation
 
 - **Blending is not linear-light and PhotoForge is not colour managed.** See
   [compositing.md](compositing.md#colour-space-honestly).
 - **Compositing is CPU-only.** There is no GPU acceleration in this release.
-- **Many translucent or blended layers are slow.** See
-  [phase-8-results.md](phase-8-results.md) for measured figures.
+- **Many translucent or blended layers have recorded latency.** See
+  [phase-8-results.md](phase-8-results.md) for historical measurements; changed
+  0.8.2 source has not yet been benchmarked as a release.
 - **No PSD support.** PhotoForge cannot read or write Photoshop documents.
 - Text, vector, smart-object, procedural, and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is
   trimmed back, because only siblings can be grouped.
+- No complete native Windows GUI/DPI matrix, elevated all-users MSI lifecycle,
+  trusted signing, or process-tree zero-network verification is claimed.

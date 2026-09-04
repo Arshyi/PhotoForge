@@ -30,14 +30,17 @@
     withPlanValue
   } from '../utils/guided';
   import { operationLabels, operationType } from '../utils/operations';
+  import { describeLayerSteps } from '../layers/workflow';
+  import { validateLayerWorkflowSteps } from '../utils/workflows';
 
   export let documentId = 0;
+  export let documentRevision = 0;
   export let ready = false;
   export let disabled = false;
   export let settings: GuidedSettings = defaultGuidedSettings;
   export let configurationRevision = 0;
   export let onapply: (
-    operations: EditOperation[]
+    plan: EditPlan
   ) => boolean | void | Promise<boolean | void> = () => undefined;
   export let onmessage: (message: string, kind?: 'error' | 'success') => void = () => undefined;
 
@@ -59,6 +62,7 @@
   let activeProvider: GuidedPlanner = 'rule';
   let planTime = 0;
   let observedDocumentId = documentId;
+  let observedDocumentRevision = documentRevision;
   let observedConfigurationRevision = configurationRevision;
   let validationReport: PlanValidationReport | null = null;
   let reportOpen = false;
@@ -73,8 +77,9 @@
     void loadPlannerState();
   });
 
-  $: if (documentId !== observedDocumentId) {
+  $: if (documentId !== observedDocumentId || documentRevision !== observedDocumentRevision) {
     observedDocumentId = documentId;
+    observedDocumentRevision = documentRevision;
     cancelPlan();
     comparison = null;
   }
@@ -100,6 +105,7 @@
   }
 
   async function generatePlan(requestOverride?: string) {
+    if (applying) return;
     const plannedRequest = (requestOverride ?? request).trim();
     if (!plannedRequest) {
       onmessage('Enter a guided editing request.', 'error');
@@ -134,7 +140,7 @@
         validationReport = result.validationReport;
         planTime = result.totalTimeMs;
         if (result.isCurrent && result.plan) {
-          plan = result.plan;
+          plan = normalizePlan(result.plan);
           inspectorOpen = settings.autoOpenPlanInspector;
           ollamaConnected = true;
           remember(plannedRequest, 'Ollama');
@@ -156,7 +162,7 @@
           result.documentId === documentId &&
           result.plan
         ) {
-          plan = result.plan;
+          plan = normalizePlan(result.plan);
           planTime = result.processingTimeMs;
           inspectorOpen = settings.autoOpenPlanInspector;
           remember(plannedRequest, 'Rule');
@@ -180,16 +186,20 @@
   }
 
   async function applyPlan() {
-    if (!plan || applying || disabled || plan.operations.length === 0) return;
+    if (!plan || applying || disabled || (plan.operations.length === 0 && !plan.layerSteps?.length)) return;
+    const ownGeneration = generation;
+    const ownDocument = documentId;
     applying = true;
     try {
-      const validated = await invoke<EditPlan>('validate_guided_plan', { plan });
-      const accepted = await onapply(validated.operations);
+      const validated = normalizePlan(await invoke<EditPlan>('validate_guided_plan', { plan }));
+      if (ownGeneration !== generation || ownDocument !== documentId || disabled) return;
+      const accepted = await onapply(validated);
+      if (ownGeneration !== generation || ownDocument !== documentId) return;
       if (accepted === false) {
         onmessage('The reviewed guided edits were not applied because the workspace is busy.', 'error');
         return;
       }
-      onmessage(`Applied ${validated.operations.length} reviewed guided edits.`);
+      onmessage(`Applied ${validated.operations.length} reviewed guided edits${validated.layerSteps?.length ? ` and ${validated.layerSteps.length} layer steps` : ''}.`);
       plan = null;
       inspectorOpen = false;
     } catch (error) {
@@ -197,6 +207,13 @@
     } finally {
       applying = false;
     }
+  }
+
+  function normalizePlan(value: EditPlan): EditPlan {
+    const layerSteps = value.layerSteps === undefined ? [] : value.layerSteps;
+    const errors = validateLayerWorkflowSteps(layerSteps);
+    if (errors.length) throw new Error(errors.join(' '));
+    return { ...structuredClone(value), layerSteps: structuredClone(layerSteps) };
   }
 
   function cancelPlan() {
@@ -338,7 +355,7 @@
 
   <label class="planner-selector">
     <span>Planner</span>
-    <select aria-label="Planner" bind:value={planner} disabled={planning || disabled}>
+    <select aria-label="Planner" bind:value={planner} disabled={planning || applying || disabled}>
       <option value="rule">Rule Planner</option>
       <option value="ollama" disabled={!ollamaConfigured}>Ollama Planner</option>
     </select>
@@ -365,7 +382,7 @@
       rows="3"
       maxlength="1000"
       placeholder="Make this darker but bring out the writing"
-      disabled={disabled}
+      disabled={disabled || applying}
       on:input={handlePromptInput}
       on:keydown={handleRequestKey}
     ></textarea>
@@ -375,13 +392,13 @@
     <button
       class="plan-button"
       type="button"
-      disabled={disabled || !ready || planning || !request.trim() || (planner === 'ollama' && !ollamaConfigured)}
+      disabled={disabled || !ready || planning || applying || !request.trim() || (planner === 'ollama' && !ollamaConfigured)}
       on:click={() => generatePlan()}
     >
       {planning ? 'Planning locally…' : 'Generate Plan'}
     </button>
     {#if planning}<button type="button" on:click={cancelPlan}>Cancel</button>{/if}
-    <button type="button" disabled={disabled || !ready || planning || !request.trim() || !ollamaConfigured} on:click={comparePlans}>Compare Planners</button>
+    <button type="button" disabled={disabled || !ready || planning || applying || !request.trim() || !ollamaConfigured} on:click={comparePlans}>Compare Planners</button>
   </div>
 
   {#if ollamaError}
@@ -395,7 +412,7 @@
     <summary>Suggested prompts</summary>
     <div>
       {#each suggestedPrompts as prompt}
-        <button type="button" disabled={disabled || !ready || planning} on:click={() => chooseSuggestion(prompt)}>
+        <button type="button" disabled={disabled || !ready || planning || applying} on:click={() => chooseSuggestion(prompt)}>
           {prompt}
         </button>
       {/each}
@@ -407,7 +424,7 @@
       <summary>Recent requests <span>{recentRequests.length}/25</span></summary>
       <div>
         {#each recentRequests as recent}
-          <button type="button" title={recent.prompt} on:click={() => chooseHistory(recent)}>
+          <button type="button" title={recent.prompt} disabled={applying} on:click={() => chooseHistory(recent)}>
             <small>{recent.provider}</small>{recent.prompt}
           </button>
         {/each}
@@ -424,9 +441,10 @@
             <h3>{candidate.provider} Planner <small>{candidate.executionTimeMs.toFixed(1)} ms</small></h3>
             {#if candidate.plan}
               <p>{candidate.plan.summary}</p>
-              <p><strong>{Math.round(candidate.plan.confidence * 100)}%</strong> confidence · {candidate.plan.operations.length} operations</p>
+              <p><strong>{Math.round(candidate.plan.confidence * 100)}%</strong> confidence · {candidate.plan.operations.length} operations · {candidate.plan.layerSteps?.length ?? 0} layer steps</p>
               {#if candidate.plan.warnings.length}<ul>{#each candidate.plan.warnings as warning}<li>{warning}</li>{/each}</ul>{/if}
               <ol>{#each candidate.plan.operations as operation}<li>{operationLabels[operationType(operation)]}</li>{/each}</ol>
+              <ol>{#each describeLayerSteps(candidate.plan.layerSteps ?? []) as label}<li>{label}</li>{/each}</ol>
             {:else}<p class="comparison-error">{candidate.error}</p>{/if}
           </section>
         {/each}
@@ -489,9 +507,9 @@
               <span><b>{index + 1}</b><strong>{operationLabels[operationType(operation)]}</strong></span>
               {#if inspectorOpen}
                 <div>
-                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} up`} disabled={index === 0} on:click={() => moveOperation(index, -1)}>↑</button>
-                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} down`} disabled={index === plan.operations.length - 1} on:click={() => moveOperation(index, 1)}>↓</button>
-                  <button type="button" aria-label={`Delete ${operationLabels[operationType(operation)]}`} on:click={() => removeOperation(index)}>×</button>
+                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} up`} disabled={applying || index === 0} on:click={() => moveOperation(index, -1)}>↑</button>
+                  <button type="button" aria-label={`Move ${operationLabels[operationType(operation)]} down`} disabled={applying || index === plan.operations.length - 1} on:click={() => moveOperation(index, 1)}>↓</button>
+                  <button type="button" aria-label={`Delete ${operationLabels[operationType(operation)]}`} disabled={applying} on:click={() => removeOperation(index)}>×</button>
                 </div>
               {/if}
             </div>
@@ -502,6 +520,7 @@
                 <input
                   aria-label={`${operationLabels[operationType(operation)]} ${control.noun}`}
                   type="range"
+                  disabled={applying}
                   value={control.value}
                   min={control.min}
                   max={control.max}
@@ -514,9 +533,17 @@
         {/each}
       </ol>
 
-      {#if plan.operations.length === 0}<p class="empty-plan" role="alert">Add a new request or cancel; an empty plan cannot be applied.</p>{/if}
+      {#if plan.layerSteps?.length}
+        <h3>Layer steps</h3>
+        <ol aria-label="Planned layer steps">
+          {#each describeLayerSteps(plan.layerSteps) as label, index}
+            <li>{label}{#if inspectorOpen}<button type="button" aria-label={`Delete layer step ${index + 1}`} disabled={applying} on:click={() => { if (plan) plan = { ...plan, layerSteps: plan.layerSteps?.filter((_, candidate) => candidate !== index) }; }}>×</button>{/if}</li>
+          {/each}
+        </ol>
+      {/if}
+      {#if plan.operations.length === 0 && !plan.layerSteps?.length}<p class="empty-plan" role="alert">Add a new request or cancel; an empty plan cannot be applied.</p>{/if}
       <footer>
-        <button type="button" class="apply-plan" disabled={disabled || applying || plan.operations.length === 0} on:click={applyPlan}>
+        <button type="button" class="apply-plan" disabled={disabled || applying || (plan.operations.length === 0 && !plan.layerSteps?.length)} on:click={applyPlan}>
           {applying ? 'Validating…' : 'Apply'}
         </button>
         <button type="button" on:click={cancelPlan}>Cancel</button>

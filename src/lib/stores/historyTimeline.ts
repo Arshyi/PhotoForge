@@ -1,20 +1,32 @@
-export type HistoryEvent = 'edit' | 'selection' | 'geometry' | 'compound' | 'layer';
+export type HistoryEvent = 'edit' | 'selection' | 'geometry' | 'compound' | 'layer' |
+  'layer_edit' | 'layer_selection' | 'layer_compound';
 
 function includesEdit(event: HistoryEvent): boolean {
-  return event === 'edit' || event === 'geometry' || event === 'compound';
+  return event === 'edit' || event === 'geometry' || event === 'compound' ||
+    event === 'layer_edit' || event === 'layer_compound';
 }
 
 function includesSelection(event: HistoryEvent): boolean {
-  return event === 'selection' || event === 'geometry' || event === 'compound';
+  return event === 'selection' || event === 'geometry' || event === 'compound' ||
+    event === 'layer_selection' || event === 'layer_compound';
 }
 
 /**
- * Layer-tree changes have their own undo stack. They never pair with the edit
- * or selection stacks, so a layer step consumes exactly one layer snapshot and
- * nothing else.
+ * Layer-tree changes have their own undo stack. A workflow can pair them with
+ * document operations and remapped selections as a single atomic undo step.
  */
 function includesLayer(event: HistoryEvent): boolean {
-  return event === 'layer';
+  return event === 'layer' || event.startsWith('layer_');
+}
+
+export function historyEventStacks(event: HistoryEvent) {
+  return { edit: includesEdit(event), selection: includesSelection(event), layer: includesLayer(event) };
+}
+
+export function historyEventForChanges(edit: boolean, selection: boolean, layer: boolean): HistoryEvent | null {
+  if (layer) return edit ? (selection ? 'layer_compound' : 'layer_edit') :
+    (selection ? 'layer_selection' : 'layer');
+  return edit ? (selection ? 'compound' : 'edit') : selection ? 'selection' : null;
 }
 
 export interface RetainedHistoryTimeline {
