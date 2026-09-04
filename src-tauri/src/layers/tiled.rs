@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use super::cache::{DocumentFingerprint, TileCache};
 use super::composite::{
     decoded_mask, mask_coverage, mask_inverted, render_transform, MAX_RENDER_THREADS,
 };
@@ -46,6 +47,8 @@ pub struct TiledStats {
     pub peak_region_bytes: u64,
     /// Worker threads the scheduler actually used.
     pub workers: u32,
+    /// Tiles this render took from the cache instead of computing.
+    pub cached_tiles: u64,
 }
 
 struct Context<'a> {
@@ -71,7 +74,7 @@ impl Context<'_> {
     }
 }
 
-fn render_dimensions(document: &LayerDocument, scale: f64) -> (u32, u32) {
+pub(super) fn render_dimensions(document: &LayerDocument, scale: f64) -> (u32, u32) {
     (
         ((f64::from(document.canvas_width) * scale).round() as u32).max(1),
         ((f64::from(document.canvas_height) * scale).round() as u32).max(1),
@@ -146,7 +149,24 @@ pub fn render_document_tiled_with_threads(
     tile_size: u32,
     max_threads: usize,
 ) -> Result<(FloatImage, TiledStats), AppError> {
-    let Some((plan, mut stats)) = Plan::new(document, options, tile_size)? else {
+    render_document_tiled_cached(document, source, options, tile_size, max_threads, None)
+}
+
+/// Renders a whole document by composing tiles, reusing any that are unchanged.
+///
+/// A cache can only make this faster, never different: a tile is reused only
+/// when every layer that can reach it is byte-for-byte the same, and the tests
+/// check that against uncached renders of randomly mutated documents rather
+/// than trusting the key derivation.
+pub fn render_document_tiled_cached(
+    document: &LayerDocument,
+    source: &dyn PixelSource,
+    options: RenderOptions<'_>,
+    tile_size: u32,
+    max_threads: usize,
+    cache: Option<&TileCache>,
+) -> Result<(FloatImage, TiledStats), AppError> {
+    let Some((plan, mut stats)) = Plan::new(document, source, options, tile_size, cache)? else {
         // A statistical operation reads the whole image by definition. Saying
         // so and rendering the frame whole is honest; quietly producing tiles
         // that each normalised themselves would be wrong.
@@ -219,6 +239,7 @@ pub fn render_document_tiled_with_threads(
     }
     high_precision::check_cancel(options.cancel)?;
     output.validate()?;
+    stats.cached_tiles = plan.hits.load(std::sync::atomic::Ordering::Relaxed);
     Ok((output, stats))
 }
 
@@ -239,7 +260,29 @@ pub fn render_document_streaming(
     max_threads: usize,
     emit: &mut dyn FnMut(u32, &FloatImage) -> Result<(), AppError>,
 ) -> Result<TiledStats, AppError> {
-    let Some((plan, mut stats)) = Plan::new(document, options, tile_size)? else {
+    render_document_streaming_cached(
+        document,
+        source,
+        options,
+        tile_size,
+        max_threads,
+        None,
+        emit,
+    )
+}
+
+/// Streams a document band by band, reusing cached tiles where it can.
+#[allow(clippy::too_many_arguments)]
+pub fn render_document_streaming_cached(
+    document: &LayerDocument,
+    source: &dyn PixelSource,
+    options: RenderOptions<'_>,
+    tile_size: u32,
+    max_threads: usize,
+    cache: Option<&TileCache>,
+    emit: &mut dyn FnMut(u32, &FloatImage) -> Result<(), AppError>,
+) -> Result<TiledStats, AppError> {
+    let Some((plan, mut stats)) = Plan::new(document, source, options, tile_size, cache)? else {
         let image = super::linear::render_document_float(document, source, options)?;
         emit(0, &image)?;
         return Ok(full_frame_stats(document, options));
@@ -261,6 +304,7 @@ pub fn render_document_streaming(
         emit(row * plan.grid.tile_size, &band)?;
     }
     high_precision::check_cancel(options.cancel)?;
+    stats.cached_tiles = plan.hits.load(std::sync::atomic::Ordering::Relaxed);
     Ok(stats)
 }
 
@@ -274,6 +318,7 @@ fn full_frame_stats(document: &LayerDocument, options: RenderOptions<'_>) -> Til
         fell_back_to_full_frame: true,
         peak_region_bytes: Region::whole(width, height).float_bytes(),
         workers: 1,
+        cached_tiles: 0,
     }
 }
 
@@ -292,14 +337,22 @@ struct Plan<'a> {
     grid: TileGrid,
     tiling: DocumentTiling,
     canvas: Region,
+    /// Present only when this render may reuse tiles. The fingerprint is built
+    /// once here rather than per tile, because hashing the layer tree is the
+    /// expensive half and the tile coordinates are the cheap half.
+    cache: Option<(&'a TileCache, DocumentFingerprint)>,
+    /// Tiles served from the cache, counted across workers.
+    hits: std::sync::atomic::AtomicU64,
 }
 
 impl<'a> Plan<'a> {
     /// Returns `None` when the document cannot be tiled at all.
     fn new(
         document: &'a LayerDocument,
+        source: &dyn PixelSource,
         options: RenderOptions<'a>,
         tile_size: u32,
+        cache: Option<&'a TileCache>,
     ) -> Result<Option<(Self, TiledStats)>, AppError> {
         document.validate()?;
         validate_scale(options.scale)?;
@@ -324,7 +377,14 @@ impl<'a> Plan<'a> {
                 .unwrap_or(0),
             fell_back_to_full_frame: false,
             workers: 1,
+            cached_tiles: 0,
         };
+        let cache = cache
+            .map(|cache| {
+                DocumentFingerprint::new(document, source, options.scale, tile_size, tiling.halo)
+                    .map(|fingerprint| (cache, fingerprint))
+            })
+            .transpose()?;
         Ok(Some((
             Self {
                 document,
@@ -332,6 +392,8 @@ impl<'a> Plan<'a> {
                 grid,
                 tiling,
                 canvas,
+                cache,
+                hits: std::sync::atomic::AtomicU64::new(0),
             },
             stats,
         )))
@@ -348,6 +410,17 @@ impl<'a> Plan<'a> {
             return Ok(None);
         };
         high_precision::check_cancel(self.options.cancel)?;
+        let key = self
+            .cache
+            .as_ref()
+            .map(|(_, fingerprint)| fingerprint.tile_key(&tile));
+        if let (Some((cache, _)), Some(key)) = (self.cache.as_ref(), key) {
+            if let Some(hit) = cache.get(&key) {
+                self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // A cached entry is the tile itself, so it needs no cropping.
+                return Ok(Some(((*hit).clone(), tile, tile)));
+            }
+        }
         let expanded = tile.expanded(self.tiling.halo, &self.canvas);
         let rendered = render_region(
             self.document,
@@ -358,7 +431,16 @@ impl<'a> Plan<'a> {
             },
             expanded,
         )?;
-        Ok(Some((rendered, expanded, tile)))
+        let Some(key) = key else {
+            return Ok(Some((rendered, expanded, tile)));
+        };
+        // Only the tile is cached, never its halo: the halo exists to feed this
+        // tile's pixels and is worthless to anyone else.
+        let cropped = crop(&rendered, &expanded, &tile)?;
+        if let Some((cache, _)) = self.cache.as_ref() {
+            cache.insert(key, Arc::new(cropped.clone()));
+        }
+        Ok(Some((cropped, tile, tile)))
     }
 
     /// Renders every tile of one tile row into a contiguous band.
@@ -469,6 +551,10 @@ impl<'a> MemoSource<'a> {
 }
 
 impl PixelSource for MemoSource<'_> {
+    fn dimensions(&self, pixel_id: &str) -> Option<(u32, u32)> {
+        self.inner.dimensions(pixel_id)
+    }
+
     fn resolve(&self, pixel_id: &str) -> Result<Arc<image::RgbaImage>, AppError> {
         self.inner.resolve(pixel_id)
     }
@@ -515,6 +601,27 @@ fn worker_count(bands: usize, requested: usize) -> usize {
         requested
     };
     available.clamp(1, MAX_RENDER_THREADS).min(bands.max(1))
+}
+
+/// Extracts the `tile` part of a rendered `source_region` as its own image.
+fn crop(
+    rendered: &FloatImage,
+    source_region: &Region,
+    tile: &Region,
+) -> Result<FloatImage, AppError> {
+    let (offset_x, offset_y) = source_region.offset_of(tile).ok_or_else(|| {
+        AppError::InvalidLayerDocument("a tile fell outside the rectangle rendered for it".into())
+    })?;
+    let mut cropped = FloatImage::blank(tile.width, tile.height, FloatRgba::TRANSPARENT)?;
+    let rendered_width = rendered.width() as usize;
+    let width = tile.width as usize;
+    for row in 0..tile.height as usize {
+        let from = (offset_y as usize + row) * rendered_width + offset_x as usize;
+        let to = row * width;
+        cropped.pixels_mut()[to..to + width]
+            .copy_from_slice(&rendered.pixels()[from..from + width]);
+    }
+    Ok(cropped)
 }
 
 /// Copies a tile into a band that starts at `first_row` of the output.
@@ -2020,5 +2127,307 @@ mod tests {
             largest * 3 < frame_bytes,
             "the largest band was {largest} bytes against a {frame_bytes} byte frame"
         );
+    }
+
+    /// Renders without any cache: the answer every cached render is judged by.
+    fn uncached(document: &LayerDocument, store: &LayerPixelStore, tile_size: u32) -> FloatImage {
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .expect("resolve");
+        render_document_tiled(
+            document,
+            &resolved,
+            RenderOptions {
+                scale: 1.0,
+                cancel: None,
+            },
+            tile_size,
+        )
+        .expect("uncached render")
+        .0
+    }
+
+    fn cached(
+        document: &LayerDocument,
+        store: &LayerPixelStore,
+        tile_size: u32,
+        cache: &TileCache,
+    ) -> (FloatImage, TiledStats) {
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .expect("resolve");
+        render_document_tiled_cached(
+            document,
+            &resolved,
+            RenderOptions {
+                scale: 1.0,
+                cancel: None,
+            },
+            tile_size,
+            0,
+            Some(cache),
+        )
+        .expect("cached render")
+    }
+
+    /// A small opaque square, so a layer can be moved around a large canvas and
+    /// only affect part of it.
+    fn small_source(size: u32, seed: u32) -> FloatImage {
+        let mut image = FloatImage::blank(size, size, FloatRgba::TRANSPARENT).unwrap();
+        for (index, pixel) in image.pixels_mut().iter_mut().enumerate() {
+            let n = ((index as u32 * 37 + seed * 11) % 251) as f32 / 251.0;
+            *pixel = FloatRgba {
+                red: n,
+                green: 1.0 - n,
+                blue: 0.5,
+                alpha: 1.0,
+            };
+        }
+        image
+    }
+
+    /// Caching must never change a render, only skip work. Rendering the same
+    /// document twice through a warm cache has to give the same bytes.
+    #[test]
+    fn a_warm_cache_returns_the_same_pixels_it_stored() {
+        let store = store_with(&[("a", source_image(W, H, 81)), ("b", source_image(W, H, 82))]);
+        let cache = TileCache::default();
+        for seed in 1..=10u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let document = random_document(&mut rng, &["a", "b"]);
+            let reference = uncached(&document, &store, 64);
+            let (cold, cold_stats) = cached(&document, &store, 64, &cache);
+            assert_eq!(reference.pixels(), cold.pixels(), "seed {seed} cold");
+            let (warm, warm_stats) = cached(&document, &store, 64, &cache);
+            assert_eq!(reference.pixels(), warm.pixels(), "seed {seed} warm");
+            if !cold_stats.fell_back_to_full_frame {
+                assert_eq!(
+                    warm_stats.cached_tiles, warm_stats.tiles,
+                    "seed {seed} recomputed tiles nothing had changed"
+                );
+                assert_eq!(
+                    cold_stats.cached_tiles, 0,
+                    "seed {seed} hit on a cold cache"
+                );
+            }
+        }
+    }
+
+    /// The staleness test. A cache that reuses a tile it should have dropped
+    /// shows the user pixels from a document they no longer have, and every
+    /// other guarantee in this module rests on that not happening.
+    #[test]
+    fn no_mutation_of_a_document_can_produce_a_stale_tile() {
+        let store = store_with(&[
+            ("a", source_image(W, H, 83)),
+            ("b", source_image(W, H, 84)),
+            ("small", small_source(48, 3)),
+        ]);
+        let cache = TileCache::default();
+        // Counted so the test cannot pass by never reusing anything: a cache
+        // that always missed would satisfy every assertion below for free.
+        let mut reuse = 0u64;
+        for seed in 1..=30u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut document = random_document(&mut rng, &["a", "b", "small"]);
+            // Warm the cache on the document as it stands.
+            let _ = cached(&document, &store, 64, &cache);
+
+            for step in 0..6 {
+                mutate(&mut document, &mut rng);
+                if document.validate().is_err() {
+                    continue;
+                }
+                let reference = uncached(&document, &store, 64);
+                let (actual, stats) = cached(&document, &store, 64, &cache);
+                reuse += stats.cached_tiles;
+                let worst = reference
+                    .pixels()
+                    .iter()
+                    .zip(actual.pixels())
+                    .map(|(a, b)| {
+                        (a.red - b.red)
+                            .abs()
+                            .max((a.green - b.green).abs())
+                            .max((a.blue - b.blue).abs())
+                            .max((a.alpha - b.alpha).abs())
+                    })
+                    .fold(0.0f32, f32::max);
+                assert_eq!(
+                    worst, 0.0,
+                    "seed {seed} step {step} served a stale tile differing by {worst}"
+                );
+            }
+        }
+        assert!(
+            reuse > 0,
+            "no tile was ever reused, so this proved nothing about staleness"
+        );
+    }
+
+    /// Changes a document the way a user would: move something, hide it, dial
+    /// an opacity, retype a blend mode, add or remove a layer.
+    fn mutate(document: &mut LayerDocument, rng: &mut Rng) {
+        let count = document.layers.len();
+        if count == 0 {
+            document.layers.push(pixel_layer("added", "a"));
+            return;
+        }
+        let index = rng.below(count as u64) as usize;
+        match rng.below(8) {
+            0 => document.layers[index].visible = !document.layers[index].visible,
+            1 => document.layers[index].opacity = rng.unit(),
+            2 => {
+                let mode = BlendMode::ALL[rng.below(16) as usize];
+                // A pass-through group is only allowed to be Normal, so respect
+                // the invariant the document validator enforces.
+                let pass_through = matches!(
+                    document.layers[index].content,
+                    LayerContent::Group {
+                        isolated: false,
+                        ..
+                    }
+                );
+                document.layers[index].blend_mode = if pass_through {
+                    BlendMode::Normal
+                } else {
+                    mode
+                };
+            }
+            3 => {
+                document.layers[index].transform.translate_x = rng.unit() * 200.0 - 100.0;
+                document.layers[index].transform.translate_y = rng.unit() * 200.0 - 100.0;
+            }
+            4 => document.layers[index].transform.rotation_degrees = rng.unit() * 40.0 - 20.0,
+            5 => {
+                let mut added = pixel_layer(&format!("added{}", rng.next() % 1000), "small");
+                added.transform.translate_x = rng.unit() * 200.0;
+                added.transform.translate_y = rng.unit() * 150.0;
+                document.layers.insert(index, added);
+            }
+            6 => {
+                document.layers.remove(index);
+            }
+            _ => {
+                document.layers[index].mask = if document.layers[index].mask.is_some() {
+                    None
+                } else {
+                    Some(half_mask())
+                };
+            }
+        }
+    }
+
+    /// The cache has to be worth having: moving a small layer must leave the
+    /// tiles it never touched reusable, not invalidate the whole frame.
+    #[test]
+    fn moving_a_small_layer_leaves_distant_tiles_cached() {
+        let store = store_with(&[
+            ("a", source_image(W, H, 85)),
+            ("small", small_source(40, 7)),
+        ]);
+        let mut spot = pixel_layer("spot", "small");
+        spot.transform.translate_x = 10.0;
+        spot.transform.translate_y = 10.0;
+        let mut document = document(vec![pixel_layer("base", "a"), spot]);
+
+        let cache = TileCache::default();
+        let (_, first) = cached(&document, &store, 64, &cache);
+        assert_eq!(first.cached_tiles, 0);
+
+        // Nudge the small layer a few pixels: only the tiles it covers change.
+        document.layers[1].transform.translate_x = 14.0;
+        let (actual, second) = cached(&document, &store, 64, &cache);
+        assert_eq!(
+            uncached(&document, &store, 64).pixels(),
+            actual.pixels(),
+            "moving a small layer produced the wrong image"
+        );
+        assert!(
+            second.cached_tiles > second.tiles / 2,
+            "only {} of {} tiles were reused after moving a 40px layer",
+            second.cached_tiles,
+            second.tiles
+        );
+        assert!(
+            second.cached_tiles < second.tiles,
+            "the tiles the layer moved across were not invalidated"
+        );
+    }
+
+    /// An adjustment layer rewrites everything beneath it, so changing one has
+    /// to invalidate the whole frame however small its parameter change was.
+    #[test]
+    fn changing_an_adjustment_invalidates_every_tile() {
+        let store = store_with(&[("a", source_image(W, H, 86))]);
+        let mut adjustment = pixel_layer("bright", "unused");
+        adjustment.content = LayerContent::Adjustment {
+            operation: Box::new(EditOperation::Brightness { amount: 0.1 }),
+        };
+        let mut document = document(vec![pixel_layer("base", "a"), adjustment]);
+        let cache = TileCache::default();
+        let _ = cached(&document, &store, 64, &cache);
+
+        document.layers[1].content = LayerContent::Adjustment {
+            operation: Box::new(EditOperation::Brightness { amount: 0.2 }),
+        };
+        let (actual, stats) = cached(&document, &store, 64, &cache);
+        assert_eq!(stats.cached_tiles, 0, "an adjustment change reused tiles");
+        assert_eq!(uncached(&document, &store, 64).pixels(), actual.pixels());
+    }
+
+    /// A cache too small to hold a frame must still render it correctly; it
+    /// simply thrashes. Correctness cannot depend on the budget.
+    #[test]
+    fn a_cache_too_small_to_help_still_renders_correctly() {
+        let store = store_with(&[("a", source_image(W, H, 87))]);
+        let document = document(vec![pixel_layer("base", "a")]);
+        let cache = TileCache::with_capacity(64 * 64 * 16 * 2);
+        let reference = uncached(&document, &store, 64);
+        for _ in 0..3 {
+            let (actual, _) = cached(&document, &store, 64, &cache);
+            assert_eq!(reference.pixels(), actual.pixels());
+        }
+        let stats = cache.stats();
+        assert!(stats.evictions > 0, "a tiny cache never evicted");
+        assert!(stats.bytes <= stats.capacity_bytes);
+    }
+
+    /// The streaming export path shares the cache, and must agree with the
+    /// full-frame path tile for tile.
+    #[test]
+    fn a_streamed_render_may_use_tiles_the_full_frame_render_cached() {
+        let store = store_with(&[("a", source_image(W, H, 88))]);
+        let document = document(vec![pixel_layer("base", "a")]);
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .unwrap();
+        let cache = TileCache::default();
+        let (reference, _) = cached(&document, &store, 64, &cache);
+
+        let mut assembled = FloatImage::blank(W, H, FloatRgba::TRANSPARENT).unwrap();
+        let stats = render_document_streaming_cached(
+            &document,
+            &resolved,
+            RenderOptions {
+                scale: 1.0,
+                cancel: None,
+            },
+            64,
+            0,
+            Some(&cache),
+            &mut |first_row, band| {
+                let offset = first_row as usize * W as usize;
+                assembled.pixels_mut()[offset..offset + band.pixels().len()]
+                    .copy_from_slice(band.pixels());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stats.cached_tiles, stats.tiles,
+            "the streamed render recomputed tiles the full-frame render had cached"
+        );
+        assert_eq!(reference.pixels(), assembled.pixels());
     }
 }

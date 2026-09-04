@@ -5,6 +5,7 @@
 //! identifier, so the tree stays cheap to clone, undo, and serialize.
 
 mod blend;
+pub mod cache;
 mod composite;
 mod linear;
 mod model;
@@ -18,6 +19,7 @@ mod transform;
 mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
+pub use cache::{CacheStats, DocumentFingerprint, TileCache, DEFAULT_CACHE_BYTES};
 pub use composite::{
     render_document, render_layers, PixelSource, RenderOptions, MAX_RENDER_THREADS,
 };
@@ -44,7 +46,8 @@ pub use selection::{
 };
 pub use store::{preview_dimensions, LayerPixelStore, ResolvedPixels, PREVIEW_MAX_DIMENSION};
 pub use tiled::{
-    render_document_streaming, render_document_tiled, render_document_tiled_default,
+    render_document_streaming, render_document_streaming_cached, render_document_tiled,
+    render_document_tiled_cached, render_document_tiled_default,
     render_document_tiled_with_threads, render_region, TiledStats,
 };
 pub use tiles::{Region, TileGrid, DEFAULT_TILE_SIZE};

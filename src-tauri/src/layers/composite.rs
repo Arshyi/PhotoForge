@@ -19,6 +19,15 @@ use std::sync::Arc;
 /// threads at once; every implementation is immutable shared data.
 pub trait PixelSource: Sync {
     fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError>;
+    /// The stored size of a source, without decoding or converting it.
+    ///
+    /// The renderer bounds a layer by the size of the buffer it actually
+    /// resolves, not by the size the layer claims, so anything reasoning about
+    /// where a layer can reach has to ask the same question. `None` means the
+    /// answer is unavailable and the caller must assume the worst.
+    fn dimensions(&self, _pixel_id: &str) -> Option<(u32, u32)> {
+        None
+    }
     fn resolve_linear(&self, pixel_id: &str) -> Result<Arc<crate::color::FloatImage>, AppError> {
         let image = self.resolve(pixel_id)?;
         Ok(Arc::new(crate::color::FloatImage::from_rgba8(&image)?))
@@ -841,6 +850,9 @@ pub(crate) mod testing {
     }
 
     impl PixelSource for MapSource {
+        fn dimensions(&self, pixel_id: &str) -> Option<(u32, u32)> {
+            self.buffers.get(pixel_id).map(|image| image.dimensions())
+        }
         fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError> {
             self.buffers
                 .get(pixel_id)

@@ -143,6 +143,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             group.opacity = 0.8;
             doc.layers.push(group);
         }
+        // A big base plus one small layer: the case a tile cache exists for,
+        // and the one where a whole-frame renderer does the most wasted work.
+        "spot" => {
+            let mut spot = layer("spot", &over, w, h);
+            spot.transform = LayerTransform {
+                translate_x: 40.0,
+                translate_y: 40.0,
+                scale_x: 0.05,
+                scale_y: 0.05,
+                ..LayerTransform::default()
+            };
+            doc.layers.push(spot);
+        }
         // Deliberately untileable: shows the honest cost of the fallback rather
         // than hiding it by only benchmarking favourable documents.
         "global" => {
@@ -172,6 +185,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let started = Instant::now();
+    let mut second_ms = 0.0f64;
+    let mut cache_stats: Option<photoforge_lib::layers::CacheStats> = None;
     let mut checksum = 0.0f64;
     // Sampled sparsely and identically in every mode: the point is to prove the
     // modes agree, and a streamed export never holds the frame to check.
@@ -204,6 +219,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                 )?;
             }
+            std::hint::black_box(&result);
+            stats
+        }
+        // Renders twice through one cache and times the second: what the user
+        // waits for when nothing has changed.
+        "warm" | "nudge" => {
+            let cache = TileCache::with_capacity(1024 * 1024 * 1024);
+            let first =
+                render_document_tiled_cached(&doc, &resolved, options, tile_size, 0, Some(&cache))?;
+            std::hint::black_box(&first);
+            if mode == "nudge" {
+                // Move the small layer a few pixels, as dragging it would.
+                if let Some(last) = doc.layers.last_mut() {
+                    last.transform.translate_x += 3.0;
+                }
+            }
+            let started_second = Instant::now();
+            let (result, stats) =
+                render_document_tiled_cached(&doc, &resolved, options, tile_size, 0, Some(&cache))?;
+            second_ms = started_second.elapsed().as_secs_f64() * 1000.0;
+            cache_stats = Some(cache.stats());
+            accumulate(0, &result);
             std::hint::black_box(&result);
             stats
         }
@@ -258,6 +295,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "peakRegionBytes": stats.peak_region_bytes,
             "frameBytes": frame_bytes,
             "workers": stats.workers,
+            "secondRenderMs": second_ms,
+            "cachedTiles": stats.cached_tiles,
+            "cache": cache_stats,
             "outputBytes": output_bytes,
             "peakWorkingSetBytes": peak_bytes(),
             "storeBytes": store.total_bytes(),

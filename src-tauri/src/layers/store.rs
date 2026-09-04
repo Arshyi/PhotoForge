@@ -294,6 +294,9 @@ impl ResolvedPixels {
 }
 
 impl PixelSource for ResolvedPixels {
+    fn dimensions(&self, pixel_id: &str) -> Option<(u32, u32)> {
+        self.buffers.get(pixel_id).map(PixelBuffer::dimensions)
+    }
     fn promotion_bytes(&self, _document: &super::LayerDocument) -> u64 {
         self.buffers
             .values()
