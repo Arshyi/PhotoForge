@@ -57,3 +57,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # CPU-only build is: cargo build --no-default-features --features custom-protocol.
 # The wgpu graph currently requires Rust 1.90 (ordered-float via wgpu-hal).
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# Optional local neural inference. Off until a runtime is actually integrated
+# and validated end to end; the model registry, its security checks and the
+# capability reporting are always compiled, because they have to work — and be
+# tested — in the normal case where no model and no runtime exist.
+inference = []

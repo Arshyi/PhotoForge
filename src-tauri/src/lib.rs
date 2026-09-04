@@ -11,6 +11,9 @@ pub mod error;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod image_processing;
+/// Optional local neural inference. Present in every build; the runtime and any
+/// models are separately optional, and the editor is complete without both.
+pub mod inference;
 pub use image_processing::high_precision;
 /// Fixtures and metrics are public so benchmarks and integration tests can
 /// score restoration against known-clean images rather than against opinion.
@@ -33,21 +36,21 @@ use commands::{
     export_mask_png, export_raw_layer_png16, export_with_profile, export_workflow,
     flatten_layer_document, generate_edit_plan, generate_histogram, generate_ollama_plan,
     get_batch_status, get_component_diagnostics, get_component_snapshot, get_mask_progress,
-    get_ollama_diagnostics, get_render_backend_mode, import_layer_image, import_mask_file,
-    import_mask_png, import_workflow, inspect_image_pixel, inspect_raw, inspect_selection_mask,
-    layer_mask_from_selection, layer_store_report, list_recovery_snapshots, load_layer_project,
-    magic_wand_selection, measure_component_performance, merge_layer_pixels, open_image,
-    open_raw_image, open_raw_layer, plan_layer_workflow, preview_batch_workflow,
-    rasterize_layer_transform, rasterize_selection, refine_selection_mask, refresh_ollama_models,
-    relink_raw_source, remap_selection_masks, render_diagnostics, render_layer_composite,
-    render_layer_thumbnail, render_preview, restore_recovery_snapshot, retain_layer_pixels,
-    save_layer_project, scan_plugins, select_planner_provider, select_restoration_engine,
-    selection_from_layer_mask, set_render_backend_mode, set_render_cache_budget,
-    start_batch_workflow, test_ollama_connection, transform_selection_mask,
-    update_component_configuration, validate_guided_plan, validate_layer_document,
-    validate_mask_snapshot, validate_ollama_json, validate_plugin_manifest,
-    validate_shortcut_bindings, validate_workflow_json, validate_workspace_layout,
-    verify_raw_source, write_recovery_snapshot,
+    get_ollama_diagnostics, get_render_backend_mode, import_inference_model, import_layer_image,
+    import_mask_file, import_mask_png, import_workflow, inference_status, inspect_image_pixel,
+    inspect_raw, inspect_selection_mask, layer_mask_from_selection, layer_store_report,
+    list_recovery_snapshots, load_layer_project, magic_wand_selection,
+    measure_component_performance, merge_layer_pixels, open_image, open_raw_image, open_raw_layer,
+    plan_layer_workflow, preview_batch_workflow, rasterize_layer_transform, rasterize_selection,
+    refine_selection_mask, refresh_ollama_models, relink_raw_source, remap_selection_masks,
+    remove_inference_model, render_diagnostics, render_layer_composite, render_layer_thumbnail,
+    render_preview, restore_recovery_snapshot, retain_layer_pixels, save_layer_project,
+    scan_plugins, select_planner_provider, select_restoration_engine, selection_from_layer_mask,
+    set_render_backend_mode, set_render_cache_budget, start_batch_workflow, test_ollama_connection,
+    transform_selection_mask, update_component_configuration, validate_guided_plan,
+    validate_layer_document, validate_mask_snapshot, validate_ollama_json,
+    validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
+    validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -82,6 +85,9 @@ pub fn run() {
             compare_planners,
             get_ollama_diagnostics,
             render_diagnostics,
+            inference_status,
+            import_inference_model,
+            remove_inference_model,
             get_render_backend_mode,
             set_render_backend_mode,
             clear_render_cache,

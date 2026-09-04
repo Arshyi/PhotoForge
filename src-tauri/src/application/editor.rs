@@ -21,6 +21,10 @@ pub struct AppState {
     /// Tiles are image content. The default cache is memory-only; an explicit
     /// environment setting may add the disposable, checksummed local disk tier.
     pub render_cache: Arc<TileCache>,
+    /// Installed local inference models. Present in every build and empty in
+    /// almost all of them; an empty registry is a supported state, not an
+    /// error, and constructing it touches no disk.
+    pub models: Arc<crate::inference::ModelRegistry>,
     pub components: Mutex<ComponentRegistry>,
     pub ollama_diagnostics: Mutex<OllamaDiagnostics>,
     pub latest_open_request: AtomicU64,
@@ -55,6 +59,7 @@ impl Default for AppState {
             session: Mutex::new(None),
             layers: Mutex::new(LayerPixelStore::default()),
             render_cache: Arc::new(TileCache::from_environment()),
+            models: Arc::new(crate::inference::ModelRegistry::default()),
             components: Mutex::new(components),
             ollama_diagnostics: Mutex::new(OllamaDiagnostics::default()),
             latest_open_request: AtomicU64::new(0),

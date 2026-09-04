@@ -1,5 +1,6 @@
 mod components;
 mod editor;
+mod inference;
 mod layers;
 mod mask;
 mod ollama;
@@ -18,6 +19,7 @@ pub use editor::{
     analyze_image, export_developed_png16, export_image, open_image, open_raw_image,
     render_preview, OpenRawImageResult,
 };
+pub use inference::{import_inference_model, inference_status, remove_inference_model};
 pub use layers::register_layer_commands;
 pub use layers::{
     apply_operations_to_layer, create_layer_mask, create_layer_pixels, discard_recovery_snapshot,
