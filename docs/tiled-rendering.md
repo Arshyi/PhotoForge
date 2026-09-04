@@ -29,7 +29,9 @@ The halo is derived from the implementation, not the control label:
 | Gaussian blur | `ceil(3 × sigma) + 1` for the bilinear taps |
 | Sharpen | the fixed 1.2-sigma blur reach plus one tap |
 | Edge-aware sharpen / mild deblur | their validated sigma reach plus one tap |
-| Denoise | two pixels |
+| Denoise | the chroma radius, which is wider than the luma radius |
+| Dust & hot pixels | one pixel, the ring it reads |
+| Deconvolution | twice the kernel reach per iteration, so usually global |
 | Local contrast | half the validated local window, at least one |
 | Uneven lighting | the validated radius |
 | Decontaminate Colors | the validated integer radius |

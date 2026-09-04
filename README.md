@@ -2,10 +2,26 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through Phase 11 bounded render
-acceleration. The target version is **0.11.0**. See
-[Phase 11 results](docs/phase-11-results.md) for current verification and release
-limits; Phase 10 remains the precision and colour baseline.
+This repository contains the Phase 0 foundation through Phase 12 restoration and
+optional local inference. The target version is **0.12.0**. See
+[Phase 12 results](docs/phase-12-results.md) for current verification and release
+limits; Phase 10 remains the precision and colour baseline and Phase 11 the
+render baseline.
+
+## Restoration (Phase 12)
+
+Every restoration tool is deterministic and runs locally with no model
+installed. Measured against known-clean fixtures, against Phase 11: colour
+noise +7.9 dB, sensor defects +15.1 dB, impulse noise +5.8 dB, motion blur
++4.4 dB, with edge retention restored from 0.64-0.85 to about 1.00. Denoise
+separates luminance from colour; dust and hot pixels get a dedicated repairer
+because a bilateral filter cannot fix an impulse; deconvolution inverts a blur
+you name rather than guessing one. See [Restoration](docs/restoration.md).
+
+PhotoForge can also run a neural model **you install yourself**. It ships none
+and downloads none, and the editor is complete without one. See
+[Local inference](docs/local-inference.md) and
+[Model format](docs/model-format.md).
 
 ## Bounded rendering performance (Phase 11)
 
@@ -211,6 +227,9 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 
 - [Architecture](docs/architecture.md)
 - [Image processing](docs/image-processing.md)
+- [Restoration](docs/restoration.md)
+- [Local inference](docs/local-inference.md)
+- [Model format](docs/model-format.md)
 - [Privacy](docs/privacy.md)
 - [WebView2 network boundary](docs/webview-network-boundary.md)
 - [Performance](docs/performance.md)
@@ -246,6 +265,7 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Phase 10 results](docs/phase-10-results.md)
 - [GPU and tiled rendering](docs/gpu-rendering.md)
 - [Phase 11 results](docs/phase-11-results.md)
+- [Phase 12 results](docs/phase-12-results.md)
 
 ## Honest scope
 

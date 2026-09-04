@@ -133,3 +133,23 @@ Ollama generation receives only the user prompt, approved scalar analysis summar
 Local model discovery reads file names, extensions, sizes, and paths in explicitly configured directories. It does not read or download model content and marks every result unavailable. Plugin scanning reads bounded JSON manifests for validation; manifest entries are never opened or executed and `executionAllowed` is always false.
 
 Any future cloud integration must be visibly identified, disabled by default, and explicitly opted into. Any future local model download must show its source, size, resource requirements, and obtain approval before downloading. See [local-ai-privacy.md](local-ai-privacy.md) for the focused policy.
+
+## Local inference (0.12.0)
+
+PhotoForge can run a neural model **you install yourself**. It ships none and
+downloads none — not on first run, not on first use of a capability, not ever.
+
+- No image or metadata is uploaded, for classical or neural work.
+- No model is fetched. Installing one is an explicit action on a file already
+  on your machine.
+- No Python, no external process, no script is invoked.
+- Model files that can carry executable code are refused by name: `.pt`,
+  `.pth`, `.ckpt`, `.pkl` and similar are Python pickles, and unpickling runs
+  arbitrary code by design.
+- Models live in `%LOCALAPPDATA%\PhotoForge\inference-models`. Removing one
+  deletes only the copy PhotoForge installed, never the file you imported from.
+
+The optional Ollama planner is a separate subsystem that suggests plans as
+text. It never receives image pixels and is not an inference provider. See
+[local-ai-privacy.md](local-ai-privacy.md) and
+[local-inference.md](local-inference.md).
