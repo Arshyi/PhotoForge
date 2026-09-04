@@ -17,6 +17,20 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 png = "0.18"
+# Vulkan only. wgpu 30's DX12 backend does not compile in this dependency
+# graph: it needs gpu-allocator 0.28, which is built against a different
+# `windows` crate version than Tauri 2 resolves to, and Cargo unifies them into
+# a graph where neither compiles. DX12 measured about twice Vulkan's upload
+# throughput here, so this costs real performance and is recorded as such in
+# docs/gpu-rendering.md rather than being papered over.
+wgpu = { version = "30", optional = true, default-features = false, features = [
+    "std",
+    "parking_lot",
+    "vulkan",
+    "wgsl",
+] }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true }
 moxcms = { version = "=0.8.1", features = ["extended_range"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,3 +52,7 @@ windows-core = "=0.61.2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Off by default. wgpu 30 requires Rust 1.93 and pulls in around 190 crates,
+# and the CPU path is complete without it, so the cost is opt-in. Building
+# with this feature raises the toolchain requirement for the whole crate.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

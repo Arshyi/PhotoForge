@@ -8,6 +8,8 @@ pub mod commands;
 pub mod components;
 pub mod domain;
 pub mod error;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod image_processing;
 pub use image_processing::high_precision;
 pub mod infrastructure;

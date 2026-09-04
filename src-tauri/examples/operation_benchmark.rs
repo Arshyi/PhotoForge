@@ -57,9 +57,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         best = best.min(started.elapsed().as_secs_f64() * 1000.0);
         std::hint::black_box(&result);
     }
+    #[cfg(feature = "gpu")]
+    let gpu = serde_json::json!({
+        "info": photoforge_lib::gpu::info(),
+        "stats": photoforge_lib::gpu::stats(),
+    });
+    #[cfg(not(feature = "gpu"))]
+    let gpu = serde_json::Value::Null;
     println!(
         "{}",
         serde_json::json!({
+            "gpu": gpu,
             "operation": name,
             "parameter": parameter,
             "width": width,

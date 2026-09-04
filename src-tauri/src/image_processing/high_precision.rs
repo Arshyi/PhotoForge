@@ -453,6 +453,14 @@ fn gaussian(
     if sigma <= 0.0 {
         return Ok(image.clone());
     }
+    // The device is asked first and may decline for any reason — no adapter,
+    // a frame it will not bind, a radius too small to pay for the transfer.
+    // Declining is normal, not an error, and the CPU path below is always
+    // correct and always present.
+    #[cfg(feature = "gpu")]
+    if let Some(result) = crate::gpu::try_gaussian(image, sigma) {
+        return result;
+    }
     let radius = (sigma * 3.0).ceil() as i64;
     let mut kernel: Vec<f32> = (-radius..=radius)
         .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())

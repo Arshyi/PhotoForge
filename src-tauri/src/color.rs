@@ -64,7 +64,11 @@ pub enum WorkingColorSpace {
 /// values below zero and above one are useful between source decoding and
 /// output quantisation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[serde(rename_all = "camelCase")]
+// Fixed layout so a buffer of these can be handed to a GPU, or read back from
+// one, without copying field by field. Four f32 in declared order, no padding.
+#[repr(C)]
 pub struct FloatRgba {
     pub red: f32,
     pub green: f32,
