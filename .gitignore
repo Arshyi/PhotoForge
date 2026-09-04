@@ -9,3 +9,9 @@ src-tauri/gen/schemas/
 coverage/
 release/
 raw-fixtures/
+# Rendered tile caches are user image content and are always rebuildable.
+# Ignored defensively in case someone points PHOTOFORGE_RENDER_CACHE_DIR here.
+render-cache/
+*.tile
+# Local benchmark output is not curated documentation.
+*.jsonl

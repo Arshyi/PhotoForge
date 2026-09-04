@@ -177,14 +177,34 @@ RAW redevelopment remain safely rejected when those budgets would be exceeded.
 
 ## Packaged validation and artifacts
 
-No final 0.11.0 Tauri package or hashes are claimed in this report yet. The
-frontend build gate above must be available before the real `tauri build` can
-produce trustworthy installers. The previous 0.10.0 artifacts remain historical
-and are not relabelled as 0.11.0. Native packaged DNG editing, GPU initialization
-in the packaged executable, NSIS launch, MSI elevated install/launch/uninstall,
-100/125/150/200% Windows DPI, and final-binary network observation are not
-verified here. Production Authenticode signing remains unavailable; no fake
-certificate is generated.
+`npm run tauri build` now completes and produces both bundles. The previous
+0.10.0 artifacts remain historical and are not relabelled.
+
+| Artifact | Size | SHA-256 |
+| --- | --- | --- |
+| `photoforge.exe` | 23,493,632 B | `d68be8ad58e0a0605fbe89da2d23c196f3a14c29c9012985642ebadc65d1331d` |
+| `PhotoForge_0.11.0_x64-setup.exe` (NSIS) | 5,491,542 B | `2aa510152b908b06d8e3cb1723abc7873da89ae60bcb0c1e12c2f2e43e46cd07` |
+| `PhotoForge_0.11.0_x64_en-US.msi` | 7,950,336 B | `4ecb9831e7e7e51726c148a4ff893045c80b2e627448c62df6bc96482f64a321` |
+
+Checked on the produced binaries:
+
+- `Get-AuthenticodeSignature` reports **NotSigned** for all three. No
+  certificate was generated to make that line read differently.
+- The executable's version resource is `0.11.0`.
+- The GPU feature is compiled into the packaged executable: the embedded WGSL
+  shader text and the `vulkan-1` / `vkGetInstanceProcAddr` loader references are
+  present in the binary.
+- The packaged executable launches, presents a window titled `PhotoForge`, and
+  starts its WebView2 process tree. No Vulkan or Direct3D module is loaded at
+  that point, which is the documented behaviour rather than a contradiction:
+  device initialisation is lazy and happens on the first eligible operation.
+
+Still not verified here, and not claimed: native packaged DNG editing through
+the GUI, a GPU dispatch observed from inside the packaged executable (as
+opposed to the same library exercised by the benchmark and test binaries, where
+`gpu::stats()` reports completed dispatches), NSIS/MSI install and uninstall
+lifecycle, MSI elevated install under a real UAC prompt, the 100/125/150/200%
+Windows DPI matrix, and process-tree network observation.
 
 ## Still incomplete / unverified
 
@@ -196,9 +216,10 @@ certificate is generated.
   test is claimed;
 - visible-viewport priority/progressive refinement is represented in tile
   ordering and UI status, but a complete viewport scheduler is not shipped;
-- release packaging, packaged GUI workflow, DPI matrix, UAC MSI lifecycle,
-  signing and process-tree network observation need an environment with the
-  required approvals; the frontend Vitest/Svelte/Vite gates now run and pass.
+- the packaged GUI workflow, DPI matrix, UAC MSI install/uninstall lifecycle,
+  Authenticode signing and process-tree network observation still need an
+  environment with the required approvals and a real signing identity; the
+  frontend Vitest/Svelte/Vite gates and `tauri build` itself now run and pass.
 
 ## Deferred
 
