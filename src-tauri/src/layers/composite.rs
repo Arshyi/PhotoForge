@@ -15,7 +15,9 @@ use std::sync::Arc;
 /// session pixel store resolves. A preview render resolves smaller buffers than
 /// a full-resolution render, which is why the compositor reads dimensions from
 /// the resolved buffer rather than from the document.
-pub trait PixelSource {
+/// `Sync` because the tiled renderer resolves sources from several worker
+/// threads at once; every implementation is immutable shared data.
+pub trait PixelSource: Sync {
     fn resolve(&self, pixel_id: &str) -> Result<Arc<RgbaImage>, AppError>;
     fn resolve_linear(&self, pixel_id: &str) -> Result<Arc<crate::color::FloatImage>, AppError> {
         let image = self.resolve(pixel_id)?;
@@ -414,7 +416,11 @@ fn draw_source(
 
 /// Number of worker threads a render may use. Bounded so a large document
 /// cannot spawn an unreasonable number of threads on a many-core machine.
-const MAX_RENDER_THREADS: usize = 8;
+/// Largest number of worker threads any one render may use, at any level.
+///
+/// Shared with the tiled scheduler so an interactive render, a batch job and
+/// an export cannot each claim every core at once.
+pub const MAX_RENDER_THREADS: usize = 8;
 /// Below this many rows the coordination cost outweighs the parallelism.
 const MIN_ROWS_PER_THREAD: u32 = 24;
 

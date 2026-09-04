@@ -118,6 +118,30 @@ fn mix(a: FloatRgba, b: FloatRgba, t: f32) -> FloatRgba {
     )
 }
 
+thread_local! {
+    /// Set while this thread is already a worker in an outer parallel render.
+    static NESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `body` with this operation's own row parallelism suppressed.
+///
+/// The tiled renderer already runs one worker per core. Without this, a tile
+/// big enough to cross the row-splitting threshold would fan out again inside
+/// each worker, so eight workers would become sixty-four threads on an
+/// eight-core budget. Relying on tiles staying under a pixel count instead
+/// would make thread bounds depend on the tile size a caller happened to pick.
+pub fn without_nested_parallelism<R>(body: impl FnOnce() -> R) -> R {
+    let previous = NESTED.with(|nested| nested.replace(true));
+    let result = body();
+    NESTED.with(|nested| nested.set(previous));
+    result
+}
+
+/// Whether this thread is already inside an outer parallel render.
+fn nested() -> bool {
+    NESTED.with(std::cell::Cell::get)
+}
+
 fn mapped(
     image: &FloatImage,
     cancel: Option<&AtomicBool>,
@@ -125,7 +149,7 @@ fn mapped(
 ) -> Result<FloatImage, AppError> {
     let mut result = image.clone();
     let width = image.width() as usize;
-    let workers = if image.pixels().len() < 262_144 {
+    let workers = if nested() || image.pixels().len() < 262_144 {
         1
     } else {
         std::thread::available_parallelism()
@@ -825,4 +849,65 @@ fn geometry(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    /// Counts the distinct threads an operation actually runs on.
+    fn threads_used(nest: bool) -> usize {
+        // Comfortably over the row-splitting threshold, so the unnested case
+        // has a real reason to fan out.
+        let image = FloatImage::blank(600, 600, FloatRgba::TRANSPARENT).unwrap();
+        let seen: Mutex<HashSet<ThreadId>> = Mutex::new(HashSet::new());
+        let record = |pixel: FloatRgba| {
+            seen.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(std::thread::current().id());
+            pixel
+        };
+        let run = || mapped(&image, None, record).unwrap();
+        if nest {
+            without_nested_parallelism(run);
+        } else {
+            run();
+        }
+        let count = seen.lock().unwrap_or_else(|e| e.into_inner()).len();
+        count
+    }
+
+    /// The bound that stops eight tiled workers becoming sixty-four threads.
+    #[test]
+    fn nested_parallelism_is_suppressed_inside_an_outer_worker() {
+        assert_eq!(
+            threads_used(true),
+            1,
+            "an operation fanned out while already inside a parallel render"
+        );
+        // Only meaningful where the machine actually has cores to use; on a
+        // single-core runner the unnested case is legitimately 1 as well.
+        if std::thread::available_parallelism().map_or(1, usize::from) > 1 {
+            assert!(
+                threads_used(false) > 1,
+                "the guard suppressed parallelism outside a parallel render too"
+            );
+        }
+    }
+
+    /// The flag must not leak into later work on the same thread, or one tiled
+    /// render would silently make every subsequent render single-threaded.
+    #[test]
+    fn the_nesting_flag_is_restored_afterwards() {
+        assert!(!nested());
+        without_nested_parallelism(|| {
+            assert!(nested());
+            without_nested_parallelism(|| assert!(nested()));
+            assert!(nested(), "the inner guard cleared the outer one");
+        });
+        assert!(!nested(), "the guard leaked past its scope");
+    }
 }

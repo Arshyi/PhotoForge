@@ -12,11 +12,15 @@ mod project;
 mod recovery;
 mod selection;
 mod store;
+pub mod tiled;
+pub mod tiles;
 mod transform;
 mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
-pub use composite::{render_document, render_layers, PixelSource, RenderOptions};
+pub use composite::{
+    render_document, render_layers, PixelSource, RenderOptions, MAX_RENDER_THREADS,
+};
 pub use linear::{render_document_float, render_document_typed};
 pub use model::{
     validate_dimensions, Layer, LayerContent, LayerDocument, LayerKind, LayerMask, LayerMetadata,
@@ -39,6 +43,11 @@ pub use selection::{
     intersect_with_layer_bounds, layer_mask_to_selection, mask_space, selection_to_layer_mask,
 };
 pub use store::{preview_dimensions, LayerPixelStore, ResolvedPixels, PREVIEW_MAX_DIMENSION};
+pub use tiled::{
+    render_document_streaming, render_document_tiled, render_document_tiled_default,
+    render_document_tiled_with_threads, render_region, TiledStats,
+};
+pub use tiles::{Region, TileGrid, DEFAULT_TILE_SIZE};
 pub use transform::{LayerBounds, LayerInterpolation, LayerTransform};
 pub use workflow::{
     check_kind as check_layer_step_kind, plan_against as plan_layer_steps,
