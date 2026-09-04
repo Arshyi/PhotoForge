@@ -37,7 +37,7 @@ Baseline for the completion pass was `824df98`.
 | Embedded RAW in project | Schema only | — | Readable if a later release writes one; not produced here |
 | Preview architecture (decimate + fast demosaic) | Yes | Yes — preview matches full render on a real photograph | — |
 | Full-resolution 16-bit PNG export | Yes | Yes — precision proven beyond 8-bit representability | — |
-| Open a DNG from the interface | Yes | Yes — routing tested; the packaged GUI flow is not | Only DNG is routed |
+| Open a DNG from the interface | Yes | Yes — **verified in the packaged application** on a real Canon file | Only DNG is routed |
 | RAW metadata panel | Yes | Yes | Shows only fields the file carried |
 | Place a RAW as a layer in an existing document | **No** | — | The Open flow handles RAW; "Place image as layer" still uses the 8-bit loader |
 | Sensor above 40 megapixels | **No** | Refusal tested | Application-wide pixel ceiling; see limitations |
@@ -45,7 +45,8 @@ Baseline for the completion pass was `824df98`.
 | Display P3 / Adobe RGB | **No** | — | Not offered rather than mislabelled |
 | ICC profiles | **No** | — | Deferred to Phase 10 |
 | Batch RAW development | **No** | — | Deferred |
-| Packaged desktop GUI / Windows DPI | **No** | — | Unchanged from 0.8.2 |
+| Packaged NSIS lifecycle | Yes | Yes — install, launch, open a RAW, uninstall, residue audit | Per-user; MSI still unverified |
+| Windows DPI matrix | **No** | — | Unchanged from 0.8.2 |
 
 ---
 
@@ -179,6 +180,37 @@ panics. No RAW file causes a network request, process launch, or library load.
 Error messages are written for people. Tests assert that no stack trace,
 pointer, or oversized diagnostic reaches the interface.
 
+## Packaged verification
+
+The final 0.9.0 NSIS artifact was installed per-user (no elevation, UAC
+untouched), launched, driven, and uninstalled.
+
+A real Canon EOS 5D Mark III DNG was opened **through the packaged
+application's own Open dialog**. It decoded and demosaiced 5920x3950, produced a
+full-resolution preview, and the metadata panel showed what the file actually
+contains:
+
+```
+Camera: Canon Canon EOS 5D Mark III      Lens: EF70-200mm f/2.8L IS II USM
+ISO: 200    Shutter: 1/125 s    Aperture: f/2.8    Focal length: 70 mm
+Captured: 2017:01:05 13:52:55   Sensor: 5920 x 3950   RAW depth: 16-bit
+Filter array: RGGB   White balance: 1.649, 1, 2.165
+Camera profile: Camera matrix applied    Source hash: 3118116735d4f6dd...
+```
+
+The source file's SHA-256 was identical before and after opening it.
+
+Packaging notes:
+
+- **No native library is shipped.** The install directory contains
+  `photoforge.exe` and `uninstall.exe` and nothing else — a consequence of
+  writing the decoder in Rust rather than linking one.
+- The installed executable has the same byte length as the portable one and a
+  different hash, which is Tauri patching bundle-type metadata into the copy it
+  packages. That is expected, not a mismatch.
+- Uninstall left no directory, registry entry, roaming data, shortcut, or
+  process behind.
+
 ## Tests
 
 | Suite | Before | After |
@@ -197,6 +229,20 @@ Real camera fixtures are CC0 but too large to commit.
 `scripts/fetch-raw-fixtures.ps1` obtains them on request, and the tests that
 use them skip themselves when it has not been run, so **normal test runs stay
 entirely offline**.
+
+## Release artifacts
+
+Built from this commit, hashed as shipped, and all `NotSigned`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `PhotoForge-portable.exe` | `71051c5a1806507c7e8132161bca6717b0dd8c523ffafebf558f31f1662d916e` |
+| `PhotoForge_0.9.0_x64-setup.exe` | `4645ac19845dcf34926b779e750b67d28d3339fe7b4af6d7b18beb41f63a34cd` |
+| `PhotoForge_0.9.0_x64_en-US.msi` | `e2a89583c22a279c43e4b55ce8c7c962473f81787b3b8289177197d82f1f2831` |
+
+`release/SHA256SUMS.txt` lists exactly these three files and verifies against
+them. The superseded 0.8.2 bundles were removed so the directory describes what
+ships.
 
 ---
 
@@ -229,11 +275,9 @@ entirely offline**.
 6. **Tiled DNG and LinearRaw DNG are implemented but untested** — no fixture
    was available.
 
-7. **Packaged desktop GUI behaviour and the Windows DPI matrix are unverified**,
-   unchanged from 0.8.2. The 0.8.2 pass drove the packaged binary through its
-   WebView2 debugging port; that was not repeated for RAW because the RAW
-   interface surface added here is the command layer and its metadata panel,
-   not new canvas interaction.
+7. **The Windows DPI matrix is unverified**, unchanged from 0.8.2. The packaged
+   application itself *was* exercised for RAW — see below — but not at 100%,
+   125%, 150%, and 200% display scaling.
 
 8. **The MSI lifecycle is unverified** — it is an all-users package requiring
    elevation, and UAC was not bypassed.
