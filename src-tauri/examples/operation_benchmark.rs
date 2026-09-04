@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "denoise" => EditOperation::Denoise {
             strength: parameter,
             preserve_edges: 0.5,
+            color: 0.5,
         },
         "localcontrast" => EditOperation::LocalContrast {
             strength: parameter,

@@ -249,6 +249,8 @@ impl EditPlanner for RulePlanner {
                         0.34
                     },
                     preserve_edges: 0.84,
+                    // Colour noise travels with luminance noise on a sensor.
+                    color: 0.55,
                 },
             );
         }
@@ -270,6 +272,7 @@ impl EditPlanner for RulePlanner {
                 EditOperation::Denoise {
                     strength: 0.16,
                     preserve_edges: 0.90,
+                    color: 0.30,
                 },
             );
             warnings.push(
@@ -288,6 +291,7 @@ impl EditPlanner for RulePlanner {
                     EditOperation::Denoise {
                         strength: 0.22,
                         preserve_edges: 0.88,
+                        color: 0.35,
                     },
                 );
             }
@@ -404,6 +408,7 @@ impl EditPlanner for RulePlanner {
                 EditOperation::Denoise {
                     strength: 0.24,
                     preserve_edges: 0.86,
+                    color: 0.35,
                 },
             );
             push_unique(
@@ -432,6 +437,7 @@ impl EditPlanner for RulePlanner {
                     EditOperation::Denoise {
                         strength: 0.20,
                         preserve_edges: 0.88,
+                        color: 0.35,
                     },
                 );
             }
@@ -1011,6 +1017,7 @@ mod tests {
         let mut candidate = valid_plan(vec![EditOperation::Denoise {
             strength: 0.3,
             preserve_edges: 0.8,
+            color: 0.0,
         }]);
         candidate.confidence = f32::NAN;
         assert!(validate_edit_plan(&candidate).is_err());
@@ -1084,6 +1091,7 @@ mod tests {
             EditOperation::Denoise {
                 strength: 0.3,
                 preserve_edges: 0.8,
+                color: 0.0,
             },
         ]);
         assert!(validate_edit_plan(&candidate).is_err());
@@ -1115,6 +1123,7 @@ mod tests {
         let candidate = valid_plan(vec![EditOperation::Denoise {
             strength: f32::NAN,
             preserve_edges: 0.8,
+            color: 0.0,
         }]);
         assert!(validate_edit_plan(&candidate).is_err());
     }

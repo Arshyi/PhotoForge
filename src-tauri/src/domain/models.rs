@@ -133,11 +133,29 @@ pub enum EditOperation {
         clip_limit: f32,
     },
     Denoise {
+        /// Luminance noise reduction amount.
         strength: f32,
+        /// Detail: how narrow the bilateral range kernel is, and so how
+        /// strongly an edge resists being averaged across.
         preserve_edges: f32,
+        /// Colour noise reduction amount. Defaulted so projects written before
+        /// the control existed load unchanged and keep their appearance.
+        #[serde(default = "default_denoise_color")]
+        color: f32,
     },
     Deblock {
         strength: f32,
+    },
+    /// Repairs isolated hot, dead and stuck photosites and small specks.
+    ///
+    /// Separate from `Denoise` because a bilateral filter cannot fix an
+    /// impulse: its range kernel is centred on the damaged pixel, so that pixel
+    /// rejects every correct neighbour and survives.
+    RemoveDefects {
+        strength: f32,
+        /// How far a pixel must deviate from its neighbours, in multiples of
+        /// the neighbourhood's own spread, before it is treated as a defect.
+        threshold: f32,
     },
     EdgeAwareSharpen {
         strength: f32,
@@ -287,6 +305,10 @@ impl EditOperation {
             Self::AutoWhiteBalance { strength }
             | Self::Deblock { strength }
             | Self::DocumentEnhance { strength, .. } => (0.0..=1.0).contains(strength),
+            Self::RemoveDefects {
+                strength,
+                threshold,
+            } => (0.0..=1.0).contains(strength) && (0.5..=10.0).contains(threshold),
             Self::LocalContrast {
                 strength,
                 tile_size,
@@ -299,7 +321,12 @@ impl EditOperation {
             Self::Denoise {
                 strength,
                 preserve_edges,
-            } => (0.0..=1.0).contains(strength) && (0.0..=1.0).contains(preserve_edges),
+                color,
+            } => {
+                (0.0..=1.0).contains(strength)
+                    && (0.0..=1.0).contains(preserve_edges)
+                    && (0.0..=1.0).contains(color)
+            }
             Self::EdgeAwareSharpen {
                 strength,
                 radius,
@@ -449,6 +476,7 @@ impl EditOperation {
             Self::LocalContrast { .. } => "local_contrast",
             Self::Denoise { .. } => "denoise",
             Self::Deblock { .. } => "deblock",
+            Self::RemoveDefects { .. } => "remove_defects",
             Self::EdgeAwareSharpen { .. } => "edge_aware_sharpen",
             Self::MildDeblur { .. } => "mild_deblur",
             Self::DocumentEnhance { .. } => "document_enhance",
@@ -473,6 +501,13 @@ impl EditOperation {
 
 const fn default_decontaminate_strength() -> f32 {
     0.5
+}
+
+/// Zero, so a project written before colour denoise existed reopens looking
+/// exactly as it did. A new default that changed old pictures would be a
+/// silent edit of the user's work.
+const fn default_denoise_color() -> f32 {
+    0.0
 }
 
 const fn default_decontaminate_radius() -> u32 {
@@ -665,8 +700,13 @@ mod tests {
             EditOperation::Denoise {
                 strength: 0.4,
                 preserve_edges: 0.8,
+                color: 0.5,
             },
             EditOperation::Deblock { strength: 0.5 },
+            EditOperation::RemoveDefects {
+                strength: 0.9,
+                threshold: 3.0,
+            },
             EditOperation::EdgeAwareSharpen {
                 strength: 0.7,
                 radius: 1.5,

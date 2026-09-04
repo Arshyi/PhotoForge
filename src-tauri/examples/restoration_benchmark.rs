@@ -63,6 +63,7 @@ fn main() {
             operation: EditOperation::Denoise {
                 strength: 0.5,
                 preserve_edges: 0.5,
+                color: 0.5,
             },
         },
         Case {
@@ -72,6 +73,7 @@ fn main() {
             operation: EditOperation::Denoise {
                 strength: 0.8,
                 preserve_edges: 0.5,
+                color: 0.6,
             },
         },
         Case {
@@ -81,15 +83,16 @@ fn main() {
             operation: EditOperation::Denoise {
                 strength: 0.8,
                 preserve_edges: 0.5,
+                color: 0.9,
             },
         },
         Case {
             name: "impulse-noise",
             clean: clean.clone(),
             degraded: fixtures::impulse_noise(&clean, 0.02, 104),
-            operation: EditOperation::Denoise {
-                strength: 0.8,
-                preserve_edges: 0.5,
+            operation: EditOperation::RemoveDefects {
+                strength: 1.0,
+                threshold: 3.0,
             },
         },
         Case {
@@ -132,18 +135,18 @@ fn main() {
             name: "sensor-defects",
             clean: clean.clone(),
             degraded: fixtures::sensor_defects(&clean, 60, 105).0,
-            operation: EditOperation::Denoise {
-                strength: 0.8,
-                preserve_edges: 0.5,
+            operation: EditOperation::RemoveDefects {
+                strength: 1.0,
+                threshold: 3.0,
             },
         },
         Case {
             name: "dust",
             clean: clean.clone(),
             degraded: fixtures::dust(&clean, 40, 106).0,
-            operation: EditOperation::Denoise {
-                strength: 0.8,
-                preserve_edges: 0.5,
+            operation: EditOperation::RemoveDefects {
+                strength: 1.0,
+                threshold: 3.0,
             },
         },
     ];

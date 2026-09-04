@@ -159,6 +159,10 @@ pub(crate) fn apply_operation(
         EditOperation::Denoise {
             strength,
             preserve_edges,
+            // The legacy 8-bit renderer has no luma/chroma split, so it has
+            // nothing to apply a colour amount to. Old documents keep the
+            // appearance they were saved with.
+            color: _,
         } => restoration::denoise(image, *strength, *preserve_edges),
         EditOperation::Deblock { strength } => restoration::deblock(image, *strength),
         EditOperation::EdgeAwareSharpen {
@@ -206,6 +210,17 @@ pub(crate) fn apply_operation(
         EditOperation::DecontaminateColors { .. } => {
             return Err(AppError::InvalidOperation(
                 "decontaminate_colors requires a selection mask".into(),
+            ));
+        }
+        EditOperation::RemoveDefects { .. } => {
+            // The legacy encoded-8-bit renderer is kept working for pre-0.10
+            // documents rather than extended. Defect removal compares a pixel
+            // against the spread of its neighbours, and at 8 bits that spread
+            // is quantised to the same order as the threshold, so the detector
+            // would be deciding on rounding error. Refusing is honest; a
+            // silently worse result would not be.
+            return Err(AppError::InvalidOperation(
+                "remove_defects requires a high-precision document".into(),
             ));
         }
         EditOperation::RawDevelopment { parameters } => {
@@ -447,6 +462,7 @@ mod tests {
             EditOperation::Denoise {
                 strength: 0.0,
                 preserve_edges: 0.0,
+                color: 0.0,
             },
             EditOperation::Deblock { strength: 0.0 },
             EditOperation::EdgeAwareSharpen {
@@ -575,6 +591,7 @@ mod tests {
             EditOperation::Denoise {
                 strength: f32::INFINITY,
                 preserve_edges: 0.5,
+                color: 0.0,
             },
             EditOperation::EdgeAwareSharpen {
                 strength: 1.0,

@@ -126,6 +126,7 @@ mod tests {
             .replace(vec![EditOperation::Denoise {
                 strength: 0.5,
                 preserve_edges: 0.8,
+                color: 0.0,
             }])
             .unwrap();
         pipeline

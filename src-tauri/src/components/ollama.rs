@@ -687,6 +687,8 @@ enum OllamaOperationWire {
     Denoise {
         strength: f32,
         preserve_edges: f32,
+        #[serde(default)]
+        color: f32,
     },
     Deblock {
         strength: f32,
@@ -732,9 +734,11 @@ impl From<OllamaOperationWire> for EditOperation {
             OllamaOperationWire::Denoise {
                 strength,
                 preserve_edges,
+                color,
             } => Self::Denoise {
                 strength,
                 preserve_edges,
+                color,
             },
             OllamaOperationWire::Deblock { strength } => Self::Deblock { strength },
             OllamaOperationWire::EdgeAwareSharpen {

@@ -275,8 +275,19 @@ pub fn behavior(operation: &EditOperation, _scale: f64) -> TileBehavior {
         EditOperation::Sharpen { .. } => from_sigma(1.2),
         EditOperation::EdgeAwareSharpen { radius, .. }
         | EditOperation::MildDeblur { radius, .. } => from_sigma(*radius),
-        // `denoise` uses a 1 or 2 pixel window depending on strength.
-        EditOperation::Denoise { .. } => 2,
+        // Read off the implementation rather than restated here: `denoise`
+        // filters chroma over a wider window than luma, so the chroma radius is
+        // the one that sets the halo. A stale constant here is exactly how a
+        // seam appears after an algorithm is improved.
+        EditOperation::Denoise {
+            strength, color, ..
+        } => u64::from(
+            crate::image_processing::high_precision::denoise_radius(*strength).max(
+                crate::image_processing::high_precision::denoise_chroma_radius(*strength, *color),
+            ),
+        ),
+        // `remove_defects` reads the eight surrounding pixels and nothing else.
+        EditOperation::RemoveDefects { .. } => 1,
         // `local_luma` is a box filter of exactly this radius.
         EditOperation::LocalContrast { tile_size, .. } => u64::from((*tile_size / 2).max(1)),
         EditOperation::UnevenLightingCorrection { radius, .. } => {
