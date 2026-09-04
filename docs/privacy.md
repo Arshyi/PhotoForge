@@ -1,5 +1,22 @@
 # Privacy
 
+## Phase 9 RAW and precision foundation
+
+RAW inspection is local and metadata-only in the current checkpoint. The
+inspect_raw command reads a bounded header, computes a local SHA-256 source
+hash in memory, and returns format/capability status; it does not decode,
+modify, upload, or launch anything. Camera metadata fields are optional and
+remain on the device. No GPS or EXIF value is sent to the optional Ollama
+planner. A future linked RAW project must verify the stored hash before
+development and must fail closed when the source is missing or changed.
+
+The float colour module performs sRGB conversion, development, histogramming,
+and 16-bit PNG encoding locally. The explicit `raw_development` operation may
+use that path for raster previews and the 16-bit export command; the 0.8.2
+project still stores RGBA8 layer buffers and no implicit conversion or network
+service is introduced. Arbitrary ICC profiles and camera RAW decoding are not
+yet enabled.
+
 ## Phase 8 layers, projects, and compositing
 
 Layers change nothing about PhotoForge's privacy posture. The layer tree,

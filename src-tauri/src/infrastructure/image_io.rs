@@ -87,6 +87,7 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         modified_at: file_time(file_metadata.modified()),
         exif_available: camera_model.is_some(),
         camera_model,
+        raw: None,
     };
 
     Ok(LoadedImage {
@@ -154,6 +155,31 @@ pub fn save_image_with_profile(
         }
         _ => return Err(AppError::InvalidOutputPath),
     }
+    Ok(safe_path)
+}
+
+/// Writes a high-precision development result as a true 16-bit RGBA PNG.
+/// `FloatImage` has already validated dimensions and finite values; this
+/// function only owns the output-path policy and the PNG boundary.
+pub fn save_float_png16(
+    image: &crate::color::FloatImage,
+    original_path: &Path,
+    output_path: &Path,
+) -> Result<PathBuf, AppError> {
+    let safe_path = validate_output_path(original_path, output_path)?;
+    if output_format(&safe_path)? != ImageFormat::Png {
+        return Err(AppError::InvalidOutputPath);
+    }
+    let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
+    let writer = BufWriter::new(file);
+    PngEncoder::new(writer)
+        .write_image(
+            &image.to_rgba16_native_bytes(),
+            image.width(),
+            image.height(),
+            ExtendedColorType::Rgba16,
+        )
+        .map_err(map_export_error)?;
     Ok(safe_path)
 }
 
@@ -452,6 +478,31 @@ mod tests {
             save_image(&image::open(&source).unwrap(), &source, &output).unwrap();
             assert_eq!(image::image_dimensions(output).unwrap(), (13, 17));
         }
+        assert_eq!(fs::read(&source).unwrap(), before);
+    }
+
+    #[test]
+    fn high_precision_png_export_preserves_float_quantisation_and_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.png");
+        RgbaImage::from_pixel(1, 1, Rgba([128, 64, 32, 255]))
+            .save(&source)
+            .unwrap();
+        let before = fs::read(&source).unwrap();
+        let image = crate::color::FloatImage::new(
+            1,
+            1,
+            vec![crate::color::FloatRgba::new(0.21404114, 0.5, 1.0, 1.0)],
+        )
+        .unwrap();
+        let output = directory.path().join("developed.png");
+        save_float_png16(&image, &source, &output).unwrap();
+        let decoded = image::open(&output).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgba16);
+        assert_eq!(
+            decoded.to_rgba16().get_pixel(0, 0).0,
+            [32_768, 48_192, 65_535, 65_535]
+        );
         assert_eq!(fs::read(&source).unwrap(), before);
     }
 

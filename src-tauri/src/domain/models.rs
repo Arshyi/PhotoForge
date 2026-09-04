@@ -202,6 +202,12 @@ pub enum EditOperation {
         temperature: f32,
         tint: f32,
     },
+    /// Non-destructive linear-light photographic development. This remains
+    /// distinct from the legacy encoded-space adjustment operations so old
+    /// projects keep their established rendering semantics.
+    RawDevelopment {
+        parameters: crate::color::DevelopmentParameters,
+    },
     SelectiveColor {
         target_hue: f32,
         width: f32,
@@ -366,6 +372,7 @@ impl EditOperation {
                     && (-1.0..=1.0).contains(temperature)
                     && (-1.0..=1.0).contains(tint)
             }
+            Self::RawDevelopment { parameters } => parameters.validate().is_ok(),
             Self::SelectiveColor {
                 target_hue,
                 width,
@@ -458,6 +465,7 @@ impl EditOperation {
             Self::LensCorrection { .. } => "lens_correction",
             Self::Hsl { .. } => "hsl",
             Self::TemperatureTint { .. } => "temperature_tint",
+            Self::RawDevelopment { .. } => "raw_development",
             Self::SelectiveColor { .. } => "selective_color",
             Self::DecontaminateColors { .. } => "decontaminate_colors",
             Self::Masked { .. } => "masked",
@@ -546,6 +554,10 @@ pub struct ImageMetadata {
     pub modified_at: Option<String>,
     pub camera_model: Option<String>,
     pub exif_available: bool,
+    /// Decoder-supplied photographic metadata. Legacy raster imports keep it
+    /// absent; RAW import may populate it without making metadata mandatory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<crate::raw::RawCaptureMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -826,6 +838,23 @@ mod tests {
         }
     );
     valid_operation_test!(
+        accepts_linear_raw_development_bounds,
+        EditOperation::RawDevelopment {
+            parameters: crate::color::DevelopmentParameters {
+                white_balance: crate::color::WhiteBalance::TemperatureTint {
+                    temperature: 1.0,
+                    tint: -1.0,
+                },
+                exposure_ev: 8.0,
+                contrast: -1.0,
+                highlights: 1.0,
+                shadows: -1.0,
+                whites: 1.0,
+                blacks: -1.0,
+            }
+        }
+    );
+    valid_operation_test!(
         accepts_selective_color_bounds,
         EditOperation::SelectiveColor {
             target_hue: 360.0,
@@ -940,6 +969,15 @@ mod tests {
         }
     );
     invalid_operation_test!(
+        rejects_non_finite_raw_development,
+        EditOperation::RawDevelopment {
+            parameters: crate::color::DevelopmentParameters {
+                exposure_ev: f32::NAN,
+                ..crate::color::DevelopmentParameters::default()
+            }
+        }
+    );
+    invalid_operation_test!(
         rejects_zero_selective_width,
         EditOperation::SelectiveColor {
             target_hue: 0.0,
@@ -967,6 +1005,14 @@ mod tests {
             EditOperation::TemperatureTint {
                 temperature: 0.2,
                 tint: -0.1,
+            },
+            EditOperation::RawDevelopment {
+                parameters: crate::color::DevelopmentParameters {
+                    white_balance: crate::color::WhiteBalance::Auto,
+                    exposure_ev: 0.4,
+                    highlights: -0.2,
+                    ..crate::color::DevelopmentParameters::default()
+                },
             },
         ];
         let json = serde_json::to_string(&operations).unwrap();

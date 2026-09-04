@@ -21,6 +21,61 @@ pub fn apply_pipeline(
     Ok(DynamicImage::ImageRgba8(current))
 }
 
+/// Applies a pipeline while keeping the dedicated photographic-development
+/// operation in linear `f32` space until the final export boundary. Legacy
+/// operations still run through their established RGBA8 implementation; the
+/// conversion is explicit so a future float compositor can replace those
+/// bridges one operation at a time without changing old project semantics.
+pub fn apply_pipeline_float(
+    source: &DynamicImage,
+    operations: &[EditOperation],
+) -> Result<crate::color::FloatImage, AppError> {
+    let mut current = crate::color::FloatImage::from_rgba8(&source.to_rgba8())
+        .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
+    for operation in operations {
+        operation.validate()?;
+        current = apply_operation_float(&current, operation)?;
+    }
+    Ok(current)
+}
+
+fn apply_operation_float(
+    image: &crate::color::FloatImage,
+    operation: &EditOperation,
+) -> Result<crate::color::FloatImage, AppError> {
+    match operation {
+        EditOperation::RawDevelopment { parameters } => {
+            let mut developed = image.clone();
+            crate::color::apply_development(&mut developed, parameters)
+                .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
+            Ok(developed)
+        }
+        EditOperation::Masked {
+            operation,
+            mask,
+            invert,
+            ..
+        } => {
+            let decoded = mask.decode()?;
+            if (decoded.width(), decoded.height()) != image.dimensions() {
+                return Err(AppError::MaskDimensionMismatch {
+                    mask_width: decoded.width(),
+                    mask_height: decoded.height(),
+                    image_width: image.width(),
+                    image_height: image.height(),
+                });
+            }
+            let adjusted = apply_operation_float(image, operation)?;
+            blend_masked_float(image, &adjusted, &decoded, *invert)
+        }
+        _ => {
+            let processed = apply_operation(&image.to_rgba8(), operation)?;
+            crate::color::FloatImage::from_rgba8(&processed)
+                .map_err(|error| AppError::ColorPipeline(error.to_string()))
+        }
+    }
+}
+
 pub(crate) fn apply_operation(
     image: &RgbaImage,
     operation: &EditOperation,
@@ -160,6 +215,13 @@ pub(crate) fn apply_operation(
                 "decontaminate_colors requires a selection mask".into(),
             ));
         }
+        EditOperation::RawDevelopment { parameters } => {
+            let mut developed = crate::color::FloatImage::from_rgba8(image)
+                .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
+            crate::color::apply_development(&mut developed, parameters)
+                .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
+            developed.to_rgba8()
+        }
         EditOperation::Curves { .. }
         | EditOperation::Levels { .. }
         | EditOperation::WhitePoint { .. }
@@ -250,6 +312,43 @@ fn blend_masked(
         );
     }
     Ok(output)
+}
+
+fn blend_masked_float(
+    source: &crate::color::FloatImage,
+    adjusted: &crate::color::FloatImage,
+    mask: &crate::mask::MaskBitmap,
+    invert: bool,
+) -> Result<crate::color::FloatImage, AppError> {
+    if source.dimensions() != adjusted.dimensions()
+        || source.dimensions() != (mask.width(), mask.height())
+    {
+        return Err(AppError::InvalidOperation(
+            "masked adjustments must preserve the image dimensions".into(),
+        ));
+    }
+    let pixels = source
+        .pixels()
+        .iter()
+        .zip(adjusted.pixels())
+        .enumerate()
+        .map(|(index, (before, after))| {
+            let coverage = if invert {
+                255_u8.saturating_sub(mask.coverage()[index])
+            } else {
+                mask.coverage()[index]
+            };
+            let blend = f32::from(coverage) / 255.0;
+            crate::color::FloatRgba::new(
+                before.red + (after.red - before.red) * blend,
+                before.green + (after.green - before.green) * blend,
+                before.blue + (after.blue - before.blue) * blend,
+                before.alpha,
+            )
+        })
+        .collect();
+    crate::color::FloatImage::new(source.width(), source.height(), pixels)
+        .map_err(|error| AppError::ColorPipeline(error.to_string()))
 }
 
 pub(crate) fn clamp(value: f32) -> u8 {
@@ -538,6 +637,98 @@ mod tests {
         let preview = apply_pipeline(&source, &operations).unwrap().to_rgba8();
         let export = apply_pipeline(&source, &operations).unwrap().to_rgba8();
         assert_eq!(preview, export);
+    }
+
+    #[test]
+    fn raw_development_uses_linear_exposure_and_preserves_alpha() {
+        let source = image(1, 1, &[[128, 64, 32, 77]]);
+        let result = apply_pipeline(
+            &source,
+            &[EditOperation::RawDevelopment {
+                parameters: crate::color::DevelopmentParameters {
+                    exposure_ev: 1.0,
+                    ..crate::color::DevelopmentParameters::default()
+                },
+            }],
+        )
+        .unwrap()
+        .to_rgba8();
+        let pixel = result.get_pixel(0, 0);
+        assert!(pixel[0] > 170, "linear +1 EV should lift mid-grey");
+        assert!(pixel[1] >= 90);
+        assert!(pixel[2] > 45);
+        assert_eq!(pixel[3], 77);
+    }
+
+    #[test]
+    fn raw_development_can_be_masked_without_changing_dimensions() {
+        let source = image(2, 1, &[[64, 64, 64, 10], [64, 64, 64, 20]]);
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 1, vec![255, 0]).unwrap();
+        let result = apply_pipeline(
+            &source,
+            &[EditOperation::Masked {
+                operation: Box::new(EditOperation::RawDevelopment {
+                    parameters: crate::color::DevelopmentParameters {
+                        exposure_ev: 1.0,
+                        ..crate::color::DevelopmentParameters::default()
+                    },
+                }),
+                mask: crate::mask::MaskSnapshot::encode(&mask),
+                invert: false,
+                mask_id: Some("subject".into()),
+            }],
+        )
+        .unwrap()
+        .to_rgba8();
+        assert!(result.get_pixel(0, 0)[0] > source.to_rgba8().get_pixel(0, 0)[0]);
+        assert_eq!(result.get_pixel(1, 0), source.to_rgba8().get_pixel(1, 0));
+        assert_eq!(result.get_pixel(0, 0)[3], 10);
+        assert_eq!(result.dimensions(), source.to_rgba8().dimensions());
+    }
+
+    #[test]
+    fn float_pipeline_keeps_highlight_headroom_until_export() {
+        let source = image(1, 1, &[[200, 200, 200, 255]]);
+        let developed = apply_pipeline_float(
+            &source,
+            &[EditOperation::RawDevelopment {
+                parameters: crate::color::DevelopmentParameters {
+                    exposure_ev: 2.0,
+                    ..crate::color::DevelopmentParameters::default()
+                },
+            }],
+        )
+        .unwrap();
+        assert!(developed.get(0, 0).unwrap().red > 1.0);
+        assert_eq!(developed.to_rgba8().get_pixel(0, 0)[0], 255);
+    }
+
+    #[test]
+    fn float_pipeline_blends_raw_development_in_linear_space_through_a_mask() {
+        let source = image(2, 1, &[[128, 128, 128, 255], [128, 128, 128, 255]]);
+        let mask = crate::mask::MaskBitmap::from_coverage(2, 1, vec![128, 0]).unwrap();
+        let developed = apply_pipeline_float(
+            &source,
+            &[EditOperation::Masked {
+                operation: Box::new(EditOperation::RawDevelopment {
+                    parameters: crate::color::DevelopmentParameters {
+                        exposure_ev: 1.0,
+                        ..crate::color::DevelopmentParameters::default()
+                    },
+                }),
+                mask: crate::mask::MaskSnapshot::encode(&mask),
+                invert: false,
+                mask_id: None,
+            }],
+        )
+        .unwrap();
+        let partial = developed.get(0, 0).unwrap();
+        let untouched = developed.get(1, 0).unwrap();
+        assert!(partial.red > untouched.red && partial.red < 1.0);
+        assert_eq!(
+            untouched,
+            crate::color::FloatRgba::from_srgba8([128, 128, 128, 255])
+        );
     }
 
     #[test]

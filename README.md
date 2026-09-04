@@ -50,9 +50,13 @@ compositor. See [docs/layers.md](docs/layers.md),
 [docs/compositing.md](docs/compositing.md), and
 [docs/project-format.md](docs/project-format.md).
 
-PhotoForge does not support PSD files, GPU acceleration, colour management, or
-generative image editing. Those limits are stated plainly in
-[docs/phase-8-results.md](docs/phase-8-results.md).
+PhotoForge does not support PSD files, GPU acceleration, arbitrary ICC colour
+management, or camera RAW decoding yet. Phase 9 now has a tested linear-light
+float foundation, a non-destructive `raw_development` operation, true 16-bit
+PNG export, and metadata-only RAW inspection, but these are not a 0.9.0
+release. Those limits are
+stated plainly in [docs/phase-8-results.md](docs/phase-8-results.md) and
+[docs/phase-9-results.md](docs/phase-9-results.md).
 
 ## What works
 
@@ -89,6 +93,9 @@ generative image editing. Those limits are stated plainly in
 - Integrity-checked `.photoforge-mask.json` and grayscale PNG mask import/export with bounded raw/run-length encoding, request-scoped numerical progress, cooperative cancellation, and atomic destination replacement
 - Transactional active, named, and embedded workflow-mask remapping through crop, quarter-turn rotation, horizontal reflection, straighten, perspective, and bounded lens-distortion operations
 - Real lazy grayscale mask thumbnails, visible named-mask overlays, delayed numerical progress, optional pen pressure, and a dedicated Refine Selection comparison dialog with opt-in deterministic edge-color decontamination
+- Phase 9 precision foundation: bounded linear-sRGB f32 development buffers,
+  stop-based exposure/WB/tone controls, clipping-aware histograms, true 16-bit
+  PNG encoding, and safe metadata-only RAW inspection with source hashing
 
 ## Requirements
 
@@ -174,6 +181,9 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Compositing](docs/compositing.md)
 - [Project format](docs/project-format.md)
 - [Phase 8 results](docs/phase-8-results.md)
+- [Colour pipeline](docs/color-pipeline.md)
+- [RAW development](docs/raw-development.md)
+- [Phase 9 results](docs/phase-9-results.md)
 
 ## Honest scope
 
@@ -184,9 +194,12 @@ a text-only local planning adapter and receives no image, mask, layer tree, or
 path. The Deterministic Engine remains the only component that changes pixels.
 PhotoForge does not install or download models, execute model-supplied code, call
 cloud providers, execute plugins, generate missing content, or reconstruct
-factual detail that was never captured. Pass-through groups, colour management,
-PSD compatibility, GPU compositing, semantic selection, OCR, neural restoration,
-super-resolution, inpainting, and generative editing remain outside this release.
+factual detail that was never captured. Pass-through groups, arbitrary ICC
+management, RAW decoding/demosaic, source-backed RAW projects, PSD compatibility,
+GPU compositing, semantic selection, OCR, neural restoration, super-resolution,
+inpainting, and generative editing remain outside this release. The Phase 9
+float/development and inspection primitives are intentionally documented as an
+incomplete foundation rather than a packaged 0.9.0 feature.
 
 ## License
 

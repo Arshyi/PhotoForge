@@ -324,6 +324,8 @@ function validateBaseOperation(value: Record<string, unknown>): string | null {
     case 'hsl': return validHsl(value.settings) ? null : invalid();
     case 'temperature_tint':
       return finiteRange(value.temperature, -1, 1) && finiteRange(value.tint, -1, 1) ? null : invalid();
+    case 'raw_development':
+      return validDevelopmentParameters(value.parameters) ? null : invalid();
     case 'selective_color':
       return finiteRange(value.target_hue, 0, 360) && finiteRange(value.width, 1, 180) &&
         validSelectiveAdjustment(value.adjustment) ? null : invalid();
@@ -384,6 +386,24 @@ function point(value: unknown): [number, number] | null {
 
 function validSelectiveAdjustment(value: unknown): boolean {
   return isRecord(value) && ['cyan', 'magenta', 'yellow', 'black'].every((key) => finiteRange(value[key], -1, 1));
+}
+
+function validDevelopmentParameters(value: unknown): boolean {
+  if (!isRecord(value) || !finiteRange(value.exposureEv, -8, 8) ||
+    !finiteRange(value.contrast, -1, 1) || !finiteRange(value.highlights, -1, 1) ||
+    !finiteRange(value.shadows, -1, 1) || !finiteRange(value.whites, -1, 1) ||
+    !finiteRange(value.blacks, -1, 1) || !isRecord(value.whiteBalance) ||
+    typeof value.whiteBalance.mode !== 'string') return false;
+  switch (value.whiteBalance.mode) {
+    case 'auto': return true;
+    case 'temperatureTint':
+      return finiteRange(value.whiteBalance.temperature, -1, 1) && finiteRange(value.whiteBalance.tint, -1, 1);
+    case 'asShot':
+    case 'custom':
+      return Array.isArray(value.whiteBalance.multipliers) && value.whiteBalance.multipliers.length === 3 &&
+        value.whiteBalance.multipliers.every((multiplier) => finiteRange(multiplier, 0.01, 16));
+    default: return false;
+  }
 }
 
 function supportsMasking(type: unknown): type is BaseEditOperation['type'] {

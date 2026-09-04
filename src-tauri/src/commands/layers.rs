@@ -854,6 +854,7 @@ fn prepare_project(
         modified_at: Some(loaded.modified_at.clone()).filter(|value| !value.is_empty()),
         camera_model: None,
         exif_available: false,
+        raw: None,
     };
     Ok(PreparedProject {
         source: LoadedImage {

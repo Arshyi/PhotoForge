@@ -68,6 +68,7 @@ const everyBaseOperation: EditOperation[] = [
   { type: 'lens_correction', distortion: 0, vignetting: 0, chromatic_aberration: 0 },
   { type: 'hsl', settings: { master: hslAdjustment, red: hslAdjustment, yellow: hslAdjustment, green: hslAdjustment, cyan: hslAdjustment, blue: hslAdjustment, magenta: hslAdjustment } },
   { type: 'temperature_tint', temperature: 0, tint: 0 },
+  { type: 'raw_development', parameters: { whiteBalance: { mode: 'auto' }, exposureEv: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } },
   { type: 'selective_color', target_hue: 180, width: 45, adjustment: { cyan: 0, magenta: 0, yellow: 0, black: 0 } }
 ];
 
@@ -112,6 +113,7 @@ describe('workflow system', () => {
     [{ type: 'lens_correction', distortion: -0.17, vignetting: 0, chromatic_aberration: 0 }, /parameters are invalid/],
     [{ type: 'decontaminate_colors', enabled: true, strength: 1.1, radius: 4 }, /parameters are invalid/],
     [{ type: 'decontaminate_colors', enabled: true, strength: 0.5, radius: 0 }, /parameters are invalid/],
+    [{ type: 'raw_development', parameters: { whiteBalance: { mode: 'temperatureTint', temperature: 2, tint: 0 }, exposureEv: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } }, /parameters are invalid/],
     [{ type: 'decontaminate_colors', enabled: true, strength: 0.5, radius: 4 }, /requires an embedded selection mask/],
     [{ type: 'perspective', corners: { topLeft: [1, 0], topRight: [0, 0], bottomRight: [1, 1], bottomLeft: [0, 1] } }, /parameters are invalid/],
     [{ type: 'masked', operation: { type: 'crop', x: 0, y: 0, width: 1, height: 1, aspect_ratio: null, overlay: 'none' }, mask: validMask, invert: false, mask_id: null }, /cannot be masked/]

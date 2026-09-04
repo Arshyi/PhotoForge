@@ -144,6 +144,10 @@ pub enum AppError {
     ProjectTooLarge { bytes: u64, limit: u64 },
     #[error("The render was cancelled.")]
     RenderCancelled,
+    #[error("RAW inspection failed: {0}")]
+    RawInspection(String),
+    #[error("colour development failed: {0}")]
+    ColorPipeline(String),
 }
 
 impl AppError {
@@ -215,6 +219,8 @@ impl AppError {
             Self::ProjectIo(_) => "project_io",
             Self::ProjectTooLarge { .. } => "project_too_large",
             Self::RenderCancelled => "render_cancelled",
+            Self::RawInspection(_) => "raw_inspection",
+            Self::ColorPipeline(_) => "color_pipeline",
         }
     }
 }

@@ -25,6 +25,20 @@ export interface PerspectiveCorners {
   bottomLeft: [number, number];
 }
 export interface SelectiveColorAdjustment { cyan: number; magenta: number; yellow: number; black: number }
+export type WhiteBalance =
+  | { mode: 'asShot'; multipliers: [number, number, number] }
+  | { mode: 'auto' }
+  | { mode: 'temperatureTint'; temperature: number; tint: number }
+  | { mode: 'custom'; multipliers: [number, number, number] };
+export interface DevelopmentParameters {
+  whiteBalance: WhiteBalance;
+  exposureEv: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+}
 import type { MaskSnapshot } from '../selections/types';
 
 export type BaseEditOperation =
@@ -57,6 +71,7 @@ export type BaseEditOperation =
   | { type: 'decontaminate_colors'; enabled: boolean; strength: number; radius: number }
   | { type: 'hsl'; settings: HslSettings }
   | { type: 'temperature_tint'; temperature: number; tint: number }
+  | { type: 'raw_development'; parameters: DevelopmentParameters }
   | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };
 
 export type EditOperation =
@@ -84,6 +99,53 @@ export interface ImageMetadata {
   modifiedAt: string | null;
   cameraModel: string | null;
   exifAvailable: boolean;
+  /** Optional decoder-supplied camera metadata; absent for legacy raster files. */
+  raw?: RawCaptureMetadata | null;
+}
+
+export interface RawCaptureMetadata {
+  manufacturer: string | null;
+  model: string | null;
+  lens: string | null;
+  focalLengthMm: number | null;
+  aperture: number | null;
+  shutterSpeedSeconds: number | null;
+  iso: number | null;
+  captureTime: string | null;
+  orientation: number | null;
+  exposureCompensation: number | null;
+  whiteBalanceMultipliers: [number, number, number] | null;
+}
+
+export type RawFormat =
+  | 'DNG' | 'CR2' | 'CR3' | 'NEF' | 'ARW' | 'RAF' | 'ORF' | 'RW2'
+  | 'PEF' | 'SRW' | 'MRW' | 'ERF' | 'MEF' | 'IIQ' | '3FR' | 'MOS' | 'ARI';
+
+export type RawSupport = 'recognizedDecoderUnavailable' | 'unsupported';
+
+export interface RawInspection {
+  filename: string;
+  format: RawFormat | null;
+  support: RawSupport;
+  fileSize: number;
+  sha256: string;
+  tiffHeader: boolean;
+  dimensions: [number, number] | null;
+  decoder: string | null;
+}
+
+export interface RawDecoderCapabilities {
+  backend: string;
+  backendAvailable: boolean;
+  nativeDependencies: boolean;
+  license: string;
+  formats: RawFormat[];
+  demosaicAlgorithms: string[];
+}
+
+export interface RawInspectionResult {
+  inspection: RawInspection;
+  capabilities: RawDecoderCapabilities;
 }
 
 export interface OpenImageResult {

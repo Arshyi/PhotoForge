@@ -1,5 +1,28 @@
 # Architecture
 
+## Phase 9 precision boundary (foundation checkpoint)
+
+src-tauri/src/color.rs adds a bounded, opt-in FloatImage representation for
+RAW development and future professional compositing. Encoded sRGB input is
+decoded at the source boundary into straight-alpha linear-sRGB f32 samples;
+development controls operate there without clipping negative or above-white
+intermediates; display and export encode and clamp only at the output boundary.
+The existing RgbaImage layer store/compositor remains the 0.8.2 release path.
+The explicit `raw_development` operation and Professional workspace panel bridge
+selected raster previews through FloatImage without changing legacy projects;
+true 16-bit PNG export uses the same final boundary. See
+[color-pipeline.md](color-pipeline.md).
+
+src-tauri/src/raw.rs and the inspect_raw command define the safe RAW source
+boundary. They recognise camera extensions, validate DNG TIFF markers, hash
+sources in bounded chunks, and expose serialisable development/source
+contracts. No decoder is bundled yet: recognised camera files report an
+explicit decoder-unavailable status and never fall through to the 8-bit raster
+loader. Decoder selection, demosaic, source-backed project persistence, ICC
+transforms, and camera-RAW-aware layer integration remain Phase 9 work. See
+[raw-development.md](raw-development.md) and
+[phase-9-results.md](phase-9-results.md).
+
 ## Phase 8 layers and compositing boundary
 
 PhotoForge 0.8.0 adds `src-tauri/src/layers`: an independent domain holding the

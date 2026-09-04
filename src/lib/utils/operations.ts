@@ -219,5 +219,6 @@ export const operationLabels: Record<OperationType, string> = {
   ,decontaminate_colors: 'Decontaminate Colors'
   ,hsl: 'HSL'
   ,temperature_tint: 'Temperature & Tint'
+  ,raw_development: 'RAW Development'
   ,selective_color: 'Selective Color'
 };

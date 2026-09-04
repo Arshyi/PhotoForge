@@ -7,7 +7,8 @@ use crate::domain::{
 };
 use crate::error::AppError;
 use crate::image_processing::{
-    apply_pipeline, calculate_histogram, inspect_pixel, prepare_preview_operations,
+    apply_pipeline, apply_pipeline_float, calculate_histogram, inspect_pixel,
+    prepare_preview_operations,
 };
 use crate::infrastructure::{
     load_workflow, parse_workflow_json, save_image_with_profile, save_workflow,
@@ -43,10 +44,24 @@ pub async fn generate_histogram(
     let started = Instant::now();
     let (before, after) = tauri::async_runtime::spawn_blocking(move || {
         let source = source.render()?;
-        let before = calculate_histogram(source.as_ref());
-        let processed =
-            apply_preview_pipeline(source.as_ref(), full_source_dimensions, &operations)?;
-        let after = calculate_histogram(&processed);
+        let preview_operations =
+            prepare_preview_operations(&operations, full_source_dimensions, source.dimensions())?;
+        let (before, after) = if operations
+            .iter()
+            .any(|operation| matches!(operation, EditOperation::RawDevelopment { .. }))
+        {
+            let before_float = crate::color::FloatImage::from_rgba8(&source.to_rgba8())
+                .map_err(|error| AppError::ColorPipeline(error.to_string()))?;
+            let after_float = apply_pipeline_float(source.as_ref(), &preview_operations)?;
+            (
+                float_histogram_channels(&before_float),
+                float_histogram_channels(&after_float),
+            )
+        } else {
+            let before = calculate_histogram(source.as_ref());
+            let processed = apply_pipeline(source.as_ref(), &preview_operations)?;
+            (before, calculate_histogram(&processed))
+        };
         Ok::<_, AppError>((before, after))
     })
     .await
@@ -61,6 +76,19 @@ pub async fn generate_histogram(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
         is_current,
     })
+}
+
+fn float_histogram_channels(image: &crate::color::FloatImage) -> crate::domain::HistogramChannels {
+    let histogram = crate::color::histogram(image, usize::MAX);
+    crate::domain::HistogramChannels {
+        red: histogram.red,
+        green: histogram.green,
+        blue: histogram.blue,
+        luminance: histogram.luminance,
+        shadow_clipping: histogram.clipped_shadows,
+        highlight_clipping: histogram.clipped_highlights,
+        pixel_count: histogram.sampled_pixels,
+    }
 }
 
 fn stale_histogram(document_id: u64, request_id: u64) -> HistogramResult {

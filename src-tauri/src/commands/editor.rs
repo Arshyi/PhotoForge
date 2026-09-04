@@ -4,8 +4,10 @@ use crate::domain::{
     AnalysisResult, EditOperation, EditPipeline, ExportResult, OpenImageResult, PreviewResult,
 };
 use crate::error::AppError;
-use crate::image_processing::{analyze_image_quality, prepare_preview_operations};
-use crate::infrastructure::{encode_preview, load_image, save_image};
+use crate::image_processing::{
+    analyze_image_quality, apply_pipeline_float, prepare_preview_operations,
+};
+use crate::infrastructure::{encode_preview, load_image, save_float_png16, save_image};
 use crate::layers::LayerPixelStore;
 use image::GenericImageView;
 use std::path::PathBuf;
@@ -385,6 +387,47 @@ pub async fn export_image(
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("export worker stopped".into()))??;
+
+    Ok(ExportResult {
+        output_path: saved_path.to_string_lossy().into_owned(),
+        width,
+        height,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+/// Exports the current document through the explicit float boundary as a true
+/// 16-bit PNG. Legacy operations bridge through their existing RGBA8 engine;
+/// `raw_development` operations remain linear until this final quantisation.
+#[tauri::command]
+pub async fn export_developed_png16(
+    output_path: String,
+    operations: Vec<EditOperation>,
+    state: State<'_, AppState>,
+) -> Result<ExportResult, AppError> {
+    let mut pipeline = EditPipeline::default();
+    pipeline.replace(operations)?;
+    let validated_operations = pipeline.operations().to_vec();
+    let output_path = PathBuf::from(output_path);
+    let (source, original_path) = {
+        let session = state
+            .session
+            .lock()
+            .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+        let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
+        (source.original.clone(), source.path.clone())
+    };
+
+    let _export_permit = state.export_gate.lock().await;
+    let started = Instant::now();
+    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+        let developed = apply_pipeline_float(source.as_ref(), &validated_operations)?;
+        let dimensions = developed.dimensions();
+        let saved_path = save_float_png16(&developed, &original_path, &output_path)?;
+        Ok::<_, AppError>((saved_path, dimensions.0, dimensions.1))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("16-bit export worker stopped".into()))??;
 
     Ok(ExportResult {
         output_path: saved_path.to_string_lossy().into_owned(),

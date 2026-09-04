@@ -279,6 +279,25 @@ export const adjustmentDefinitions: AdjustmentDefinition[] = [
     build: () => ({ type: 'temperature_tint', temperature: 0, tint: 0 })
   },
   {
+    type: 'raw_development',
+    label: 'RAW Development',
+    description: 'Applies non-destructive linear-light photographic controls.',
+    fields: [],
+    editor: 'unsupported',
+    build: () => ({
+      type: 'raw_development',
+      parameters: {
+        whiteBalance: { mode: 'asShot', multipliers: [1, 1, 1] },
+        exposureEv: 0,
+        contrast: 0,
+        highlights: 0,
+        shadows: 0,
+        whites: 0,
+        blacks: 0
+      }
+    })
+  },
+  {
     type: 'auto_white_balance',
     label: 'Auto White Balance',
     description: 'Neutralises a colour cast by a chosen strength.',

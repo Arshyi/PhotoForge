@@ -9,6 +9,7 @@
     BatchStatus,
     ComparisonMode,
     CurveSet,
+    DevelopmentParameters,
     EditOperation,
     ExportProfile,
     HistogramChannels,
@@ -18,10 +19,12 @@
     ImageMetadata,
     PerspectiveCorners,
     PixelInspection,
+    RawInspectionResult,
     Workflow,
     WorkflowDocument
   } from '../types/editor';
   import { errorMessage, formatBytes } from '../utils/format';
+  import { inspectRaw } from '../utils/raw';
   import { baseOperation, operationLabels, operationType, replaceOperation } from '../utils/operations';
   import { describeLayerSteps } from '../layers/workflow';
   import type { LayerDocument } from '../layers/types';
@@ -92,6 +95,17 @@
   const locallyRequestedLensKeys = new Set<string>();
   let temperature = 0;
   let tint = 0;
+  let developmentMode: 'asShot' | 'auto' | 'temperatureTint' = 'asShot';
+  let developmentAsShotMultipliers: [number, number, number] = [1, 1, 1];
+  let developmentExposure = 0;
+  let developmentContrast = 0;
+  let developmentHighlights = 0;
+  let developmentShadows = 0;
+  let developmentWhites = 0;
+  let developmentBlacks = 0;
+  let developmentOperationsKey = '';
+  let developmentDraftKey = '';
+  const locallyRequestedDevelopmentKeys = new Set<string>();
   let hslChannel: HslChannel = 'master';
   let hslSettings: HslSettings = emptyHsl();
   let selectiveHue = 0;
@@ -103,6 +117,8 @@
   let pointX = 0;
   let pointY = 0;
   let pixel: PixelInspection | null = null;
+  let rawInspection: RawInspectionResult | null = null;
+  let rawInspecting = false;
   let measureX1 = 0;
   let measureY1 = 0;
   let measureX2 = 0;
@@ -141,6 +157,7 @@
   $: activeHistogram = histogram?.[histogramMode] ?? null;
   $: measurement = Math.hypot(measureX2 - measureX1, measureY2 - measureY1);
   $: synchronizeLensControls(documentId, operations);
+  $: synchronizeDevelopmentControls(documentId, operations);
 
   onMount(() => {
     workflows = loadWorkflows();
@@ -315,6 +332,113 @@
     }
   }
   function applyTemperatureTint() { setOperation({ type: 'temperature_tint', temperature, tint }, Math.abs(temperature) + Math.abs(tint) > 0.0001); }
+  function defaultDevelopmentParameters(): DevelopmentParameters {
+    return {
+      whiteBalance: { mode: 'asShot', multipliers: [1, 1, 1] },
+      exposureEv: 0,
+      contrast: 0,
+      highlights: 0,
+      shadows: 0,
+      whites: 0,
+      blacks: 0
+    };
+  }
+
+  function developmentValues(source: EditOperation[]): DevelopmentParameters | null {
+    const candidate = source.find((operation) => operationType(operation) === 'raw_development');
+    if (!candidate) return null;
+    const operation = baseOperation(candidate);
+    return operation.type === 'raw_development' ? operation.parameters : null;
+  }
+
+  function developmentParameters(): DevelopmentParameters {
+    return {
+      whiteBalance: developmentMode === 'auto'
+        ? { mode: 'auto' }
+        : developmentMode === 'temperatureTint'
+          ? { mode: 'temperatureTint', temperature, tint }
+          : { mode: 'asShot', multipliers: [...developmentAsShotMultipliers] as [number, number, number] },
+      exposureEv: developmentExposure,
+      contrast: developmentContrast,
+      highlights: developmentHighlights,
+      shadows: developmentShadows,
+      whites: developmentWhites,
+      blacks: developmentBlacks
+    };
+  }
+
+  function developmentKey(parameters: DevelopmentParameters): string { return JSON.stringify(parameters); }
+
+  function synchronizeDevelopmentControls(nextDocumentId: number, source: EditOperation[]) {
+    const next = developmentValues(source) ?? defaultDevelopmentParameters();
+    const nextKey = developmentKey(next);
+    if (nextKey === developmentOperationsKey) return;
+    developmentOperationsKey = nextKey;
+    if (nextKey !== developmentDraftKey && locallyRequestedDevelopmentKeys.has(nextKey)) {
+      locallyRequestedDevelopmentKeys.delete(nextKey);
+      return;
+    }
+    developmentMode = next.whiteBalance.mode === 'auto' || next.whiteBalance.mode === 'temperatureTint'
+      ? next.whiteBalance.mode : 'asShot';
+    if (next.whiteBalance.mode === 'asShot' || next.whiteBalance.mode === 'custom') {
+      developmentAsShotMultipliers = [...next.whiteBalance.multipliers] as [number, number, number];
+    }
+    if (next.whiteBalance.mode === 'temperatureTint') {
+      temperature = next.whiteBalance.temperature;
+      tint = next.whiteBalance.tint;
+    }
+    developmentExposure = next.exposureEv;
+    developmentContrast = next.contrast;
+    developmentHighlights = next.highlights;
+    developmentShadows = next.shadows;
+    developmentWhites = next.whites;
+    developmentBlacks = next.blacks;
+    developmentDraftKey = nextKey;
+    if (nextDocumentId !== documentId) locallyRequestedDevelopmentKeys.clear();
+  }
+
+  function restoreDevelopmentControlsFromOperations() {
+    developmentOperationsKey = '';
+    locallyRequestedDevelopmentKeys.clear();
+    synchronizeDevelopmentControls(documentId, operations);
+  }
+
+  async function applyDevelopment() {
+    const parameters = developmentParameters();
+    const neutral = defaultDevelopmentParameters();
+    const enabled = developmentKey(parameters) !== developmentKey(neutral);
+    const requestedKey = enabled ? developmentKey(parameters) : developmentKey(neutral);
+    developmentDraftKey = requestedKey;
+    locallyRequestedDevelopmentKeys.add(requestedKey);
+    if (locallyRequestedDevelopmentKeys.size > 32) {
+      const oldest = locallyRequestedDevelopmentKeys.values().next().value;
+      if (oldest !== undefined) locallyRequestedDevelopmentKeys.delete(oldest);
+    }
+    try {
+      const accepted = await setOperation({ type: 'raw_development', parameters }, enabled, 'raw_development');
+      if (accepted === false) restoreDevelopmentControlsFromOperations();
+    } catch (error) {
+      restoreDevelopmentControlsFromOperations();
+      onmessage(errorMessage(error), 'error');
+    }
+  }
+
+  async function exportDevelopedPng16() {
+    const path = await save({
+      defaultPath: `${(metadata?.filename ?? 'developed').replace(/\.[^.]+$/, '')}-16bit.png`,
+      filters: [{ name: '16-bit PNG', extensions: ['png'] }]
+    });
+    if (!path) return;
+    try {
+      const result = await invoke<{ outputPath: string; width: number; height: number }>('export_developed_png16', {
+        outputPath: path,
+        operations
+      });
+      onmessage(`Exported ${result.width} × ${result.height} true 16-bit PNG`);
+    } catch (error) {
+      onmessage(errorMessage(error), 'error');
+    }
+  }
   function applyHsl() { setOperation({ type: 'hsl', settings: hslSettings }, JSON.stringify(hslSettings) !== JSON.stringify(emptyHsl())); }
   function setHslValue(field: keyof HslAdjustment, value: number) {
     hslSettings = { ...hslSettings, [hslChannel]: { ...hslSettings[hslChannel], [field]: value } };
@@ -332,6 +456,29 @@
       if (requestId === sampleRequest && sameSampleSource(source)) pixel = result;
     } catch (error) {
       if (requestId === sampleRequest && sameSampleSource(source)) onmessage(errorMessage(error), 'error');
+    }
+  }
+
+  async function inspectRawFile() {
+    const chosen = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Camera RAW', extensions: ['dng', 'cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'pef', 'srw'] }]
+    });
+    if (typeof chosen !== 'string' || rawInspecting) return;
+    rawInspecting = true;
+    try {
+      rawInspection = await inspectRaw(chosen);
+      onmessage(
+        rawInspection.inspection.support === 'recognizedDecoderUnavailable'
+          ? 'RAW format recognised; decoder support is not bundled in this build.'
+          : 'The selected file is not a recognised RAW source.',
+        rawInspection.inspection.support === 'recognizedDecoderUnavailable' ? 'success' : 'error'
+      );
+    } catch (error) {
+      onmessage(errorMessage(error), 'error');
+    } finally {
+      rawInspecting = false;
     }
   }
 
@@ -592,6 +739,23 @@
         <SliderControl label="Tint" value={tint} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { tint = value; applyTemperatureTint(); }} />
       </details>
 
+      <details open>
+        <summary>RAW development <small>Linear-light · non-destructive</small></summary>
+        <p class="privacy-note">Works on the high-precision boundary for raster previews today; camera RAW import remains decoder-gated.</p>
+        <label class="field">White balance mode<select bind:value={developmentMode} on:change={applyDevelopment}><option value="asShot">As Shot</option><option value="auto">Auto (gray world)</option><option value="temperatureTint">Temperature / tint</option></select></label>
+        {#if developmentMode === 'temperatureTint'}
+          <SliderControl label="Temperature" value={temperature} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { temperature = value; applyDevelopment(); }} />
+          <SliderControl label="Tint" value={tint} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => value.toFixed(2)} onchange={(value) => { tint = value; applyDevelopment(); }} />
+        {/if}
+        <SliderControl label="Exposure" value={developmentExposure} min={-8} max={8} step={0.01} defaultValue={0} format={(value) => `${value.toFixed(2)} EV`} onchange={(value) => { developmentExposure = value; applyDevelopment(); }} />
+        <SliderControl label="Contrast" value={developmentContrast} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => `${Math.round(value * 100)}%`} onchange={(value) => { developmentContrast = value; applyDevelopment(); }} />
+        <SliderControl label="Highlights" value={developmentHighlights} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => `${Math.round(value * 100)}%`} onchange={(value) => { developmentHighlights = value; applyDevelopment(); }} />
+        <SliderControl label="Shadows" value={developmentShadows} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => `${Math.round(value * 100)}%`} onchange={(value) => { developmentShadows = value; applyDevelopment(); }} />
+        <SliderControl label="Whites" value={developmentWhites} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => `${Math.round(value * 100)}%`} onchange={(value) => { developmentWhites = value; applyDevelopment(); }} />
+        <SliderControl label="Blacks" value={developmentBlacks} min={-1} max={1} step={0.01} defaultValue={0} format={(value) => `${Math.round(value * 100)}%`} onchange={(value) => { developmentBlacks = value; applyDevelopment(); }} />
+        <button type="button" on:click={exportDevelopedPng16}>Export true 16-bit PNG</button>
+      </details>
+
       <details>
         <summary>Selective color <small>Deterministic hue range</small></summary>
         <SliderControl label="Target hue" value={selectiveHue} min={0} max={360} step={1} defaultValue={0} format={(value) => `${value}°`} onchange={(value) => { selectiveHue = value; applySelective(); }} />
@@ -658,6 +822,8 @@
   {:else}
     <div class="professional-panel inspect-panel">
       {#if metadata}<div class="metadata-grid"><span>Dimensions<b>{metadata.width} × {metadata.height}</b></span><span>Color space<b>{metadata.colorSpace}</b></span><span>Bit depth<b>{metadata.bitDepth}-bit</b></span><span>Alpha<b>{metadata.hasAlpha ? 'Yes' : 'No'}</b></span><span>Format<b>{metadata.format}</b></span><span>Size<b>{formatBytes(metadata.fileSize)}</b></span><span>Camera<b>{metadata.cameraModel ?? 'Not present'}</b></span><span>EXIF<b>{metadata.exifAvailable ? 'Available' : 'Not present'}</b></span><span>Created<b>{metadata.createdAt ?? 'Unavailable'}</b></span><span>Modified<b>{metadata.modifiedAt ?? 'Unavailable'}</b></span></div>{/if}
+      <div class="raw-card"><div><strong>RAW source inspection</strong><small>Metadata-only; the decoder is not bundled yet.</small></div><button type="button" disabled={rawInspecting} on:click={inspectRawFile}>{rawInspecting ? 'Inspecting…' : 'Choose RAW file'}</button></div>
+      {#if rawInspection}<div class="raw-result"><span>Format <b>{rawInspection.inspection.format ?? 'Unknown'}</b></span><span>Status <b>{rawInspection.inspection.support === 'recognizedDecoderUnavailable' ? 'Decoder unavailable' : 'Unsupported'}</b></span><span>SHA-256 <b>{rawInspection.inspection.sha256.slice(0, 16)}…</b></span><span>Size <b>{formatBytes(rawInspection.inspection.fileSize)}</b></span></div>{/if}
       <h3>Pixel inspector</h3><div class="coordinate-fields"><label>X<input type="number" min="0" max={metadata?.width ?? 0} bind:value={pointX} /></label><label>Y<input type="number" min="0" max={metadata?.height ?? 0} bind:value={pointY} /></label></div><div class="button-row"><button on:click={inspect}>Inspect pixel</button><button on:click={() => onviewchange({ crosshair: true })}>Crosshair</button><button on:click={() => onviewchange({ grid: true })}>Pixel grid</button><button on:click={() => onviewchange({ zoom: 1600 })}>Zoom 1600%</button></div>
       {#if pixel}<div class="pixel-result"><span style={`background:rgba(${pixel.red},${pixel.green},${pixel.blue},${pixel.alpha / 255})`}></span><div><b>RGB {pixel.red}, {pixel.green}, {pixel.blue} · A {pixel.alpha}</b><small>HSV {pixel.hue.toFixed(1)}°, {(pixel.saturation * 100).toFixed(1)}%, {(pixel.value * 100).toFixed(1)}% · ({pixel.x}, {pixel.y})</small></div></div>{/if}
       <h3>Measurement tool</h3><div class="four-fields"><label>X₁<input type="number" bind:value={measureX1} /></label><label>Y₁<input type="number" bind:value={measureY1} /></label><label>X₂<input type="number" bind:value={measureX2} /></label><label>Y₂<input type="number" bind:value={measureY2} /></label></div><output>{measurement.toFixed(2)} pixels</output>
@@ -704,6 +870,13 @@
   .scope-stats, .metadata-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
   .scope-stats span, .metadata-grid span { display: grid; gap: 3px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink-faint); font-size: .49rem; overflow-wrap: anywhere; }
   .scope-stats b, .metadata-grid b { color: var(--ink); font-size: .55rem; }
+  .raw-card, .raw-result { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+  .raw-card { grid-template-columns: 1fr auto; align-items: center; }
+  .raw-card div, .raw-result span { display: grid; gap: 2px; }
+  .raw-card strong, .raw-result b { color: var(--ink); font-size: .55rem; }
+  .raw-card small, .raw-result span { color: var(--ink-faint); font-size: .49rem; }
+  .raw-card button { padding: 6px; font-size: .51rem; }
+  .raw-result { grid-template-columns: 1fr 1fr; }
   h3 { margin: 5px 0 0; color: var(--accent); font: 700 .55rem/1 var(--font-mono); text-transform: uppercase; }
   .record-card, .workflow-editor, .batch-summary, .batch-progress { display: grid; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
   .workflow-toolbar { display: grid; grid-template-columns: 1fr auto auto; gap: 4px; }

@@ -21,6 +21,7 @@ describe('adjustment definitions', () => {
       'levels',
       'hsl',
       'temperature_tint',
+      'raw_development',
       'local_contrast',
       'sharpen',
       'denoise'
