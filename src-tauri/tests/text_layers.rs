@@ -465,7 +465,9 @@ fn an_invalid_text_layer_is_refused_at_the_document_level() {
 #[test]
 fn every_setting_changes_what_is_drawn() {
     let baseline = render(&document(400, 260, vec![text_layer("t", sample_text())]));
-    let variants: Vec<(&str, Box<dyn Fn(&mut TextContent)>)> = vec![
+    /// One named change to make, so the loop reads as a list of settings.
+    type Variant = (&'static str, Box<dyn Fn(&mut TextContent)>);
+    let variants: Vec<Variant> = vec![
         ("size", Box::new(|c: &mut TextContent| c.font_size = 56.0)),
         (
             "weight",

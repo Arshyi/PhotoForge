@@ -35,6 +35,7 @@ The halo is derived from the implementation, not the control label:
 | Local contrast | half the validated local window, at least one |
 | Uneven lighting | the validated radius |
 | Decontaminate Colors | the validated integer radius |
+| Shape and text layers | none — they rasterise into the rectangle and read no neighbouring pixels |
 
 Sequential neighbourhood adjustments accumulate their dependency radius.
 Independent branches in an isolated group take the maximum instead, because a
@@ -87,7 +88,11 @@ that require later operations retain the existing full-frame encoder contract.
 Rust tests cover ordinary and RAW-backed sources, masks, all blend modes,
 opacity, transformed and partially off-canvas layers, nested/isolated and
 pass-through groups, sequential halos, cancellation, cache reuse and
-streaming. The `tiled_pipeline` integration suite asserts the streamed PNG is
+streaming. Since 0.13.0 the random layer-tree generator also produces vector
+shapes and text, so the equivalence and staleness properties cover rasterised
+content as well as sampled content. Doing that found a real cache defect: see
+[vector-layers.md](vector-layers.md#caching) for the pass-through group bug it
+exposed. The `tiled_pipeline` integration suite asserts the streamed PNG is
 the same file as the whole-frame export and that changing tile size does not
 change the result. The CPU full-frame path remains in-tree and is used as the
 comparison reference rather than comparing a new implementation with itself.

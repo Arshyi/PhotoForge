@@ -2,9 +2,12 @@
 //!
 //! # Discovery happens once
 //!
-//! Enumerating the installed fonts took 871 ms and found 397 faces on the
-//! machine this was written on. That is far too slow to repeat while somebody
-//! is typing, so the font system is built once on first use and shared.
+//! Enumerating the installed fonts found 226 families on the machine this was
+//! written on, in 15 ms release and 43 ms debug once the operating system had
+//! the font directory cached — and several hundred milliseconds on the first
+//! run of a session, before it did. `family_is_available` is consulted on every
+//! render, so even the warm figure is far too much to repeat, and the font
+//! system is built once on first use and shared.
 //!
 //! # Fonts are not bundled
 //!
@@ -41,8 +44,9 @@ pub const MAX_FONT_NAME_CHARS: usize = 120;
 /// The shared font system.
 ///
 /// Behind a mutex because cosmic-text needs `&mut` to shape — it caches
-/// per-font data as it goes — and behind a `OnceLock` because discovery is
-/// expensive and its result does not change while the application runs.
+/// per-font data as it goes — and behind a `OnceLock` because discovery costs
+/// tens of milliseconds and its result does not change while the application
+/// runs.
 fn font_system() -> MutexGuard<'static, FontSystem> {
     static SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
     SYSTEM
@@ -96,6 +100,13 @@ pub struct PositionedGlyph {
     pub end: usize,
     /// Which visual line the glyph sits on, counting from zero.
     pub line: usize,
+    /// Whether the run this glyph belongs to reads right to left.
+    ///
+    /// Needed for the caret: the edge a character *starts* at is its left edge
+    /// in a left-to-right run and its right edge in a right-to-left one, so a
+    /// caret placed without this lands on the wrong side of every Arabic,
+    /// Hebrew or Persian character.
+    pub rtl: bool,
 }
 
 /// The result of laying out a piece of text.
@@ -230,6 +241,7 @@ pub fn shape(request: &ShapeRequest<'_>) -> Result<ShapedText, AppError> {
                 start: glyph.start,
                 end: glyph.end,
                 line,
+                rtl: run.rtl,
             });
         }
     }

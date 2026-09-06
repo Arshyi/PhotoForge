@@ -52,9 +52,19 @@ project save and load are entirely local and deterministic. Phase 8 adds no
 network request, telemetry, account, cloud autosave, model download, neural
 inference, or generative feature.
 
+## Phase 13 text and vector layers
+
+Text and shape layers add no network access. PhotoForge reads the fonts already
+installed on the machine through a pure-Rust discovery path; it downloads no
+font, contacts no font service, and bundles none of its own — copying a face out
+of Windows into an installer would be redistributing someone else's licensed
+work. Font family names a user chooses are stored in their own project file and
+sent nowhere.
+
 `.photoforge` project files contain the canvas, the layer tree, layer pixel data
-as embedded PNGs, mask coverage as embedded PNGs, adjustment parameters, layer
-names and timestamps, and the document operation pipeline. They contain no
+as embedded PNGs, mask coverage as embedded PNGs, adjustment parameters, shape
+geometry, text characters and their requested font names, layer names and
+timestamps, and the document operation pipeline. They contain no
 source file path, no credentials, no code, no command, and no URL. Reading one
 performs no network access, executable loading, script execution, plugin
 loading, or shell command; every payload is a bounded PNG decoded through the

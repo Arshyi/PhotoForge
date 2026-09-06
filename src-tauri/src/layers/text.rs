@@ -500,10 +500,23 @@ pub fn caret_position(
             (last, true)
         }
     };
-    let x = if trailing {
+    // The caret sits at the edge the character starts from, which is its left
+    // edge in a left-to-right run and its right edge in a right-to-left one.
+    // Placing it at `glyph.x` regardless would put the caret on the far side of
+    // every Arabic, Hebrew and Persian character.
+    let leading = if glyph.rtl {
         glyph.x + glyph.advance
     } else {
         glyph.x
+    };
+    let x = if trailing {
+        if glyph.rtl {
+            glyph.x
+        } else {
+            glyph.x + glyph.advance
+        }
+    } else {
+        leading
     };
     Some((
         content.origin_x + x,
@@ -794,6 +807,51 @@ mod tests {
         let shaped = empty.shaped().expect("shape");
         let caret = caret_position(&empty, &shaped, 0).expect("caret");
         assert_eq!((caret.0, caret.1), (10.0, 20.0));
+    }
+
+    /// In a right-to-left run the caret has to move leftwards as the offset
+    /// grows, and sit on the right edge of the first character rather than its
+    /// left. A caret that used the glyph's x regardless would land on the far
+    /// side of every Persian letter.
+    #[test]
+    fn the_caret_runs_backwards_through_right_to_left_text() {
+        let mut content = sample();
+        // "salam", four letters at byte offsets 0, 2, 4 and 6.
+        content.text = "\u{0633}\u{0644}\u{0627}\u{0645}".into();
+        let shaped = content.shaped().expect("shape");
+        assert!(
+            shaped.glyphs.iter().all(|g| g.rtl),
+            "the run was not right to left"
+        );
+
+        let positions: Vec<f32> = [0usize, 2, 4, 6]
+            .iter()
+            .map(|offset| caret_position(&content, &shaped, *offset).expect("caret").0)
+            .collect();
+        for pair in positions.windows(2) {
+            assert!(
+                pair[1] < pair[0],
+                "the caret advanced rightwards through right-to-left text: {positions:?}"
+            );
+        }
+
+        // The caret for the first character sits at the right edge of its
+        // glyph, which is the rightmost point of the line.
+        let rightmost = shaped
+            .glyphs
+            .iter()
+            .map(|g| g.x + g.advance)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            (positions[0] - (content.origin_x + rightmost)).abs() < 0.001,
+            "the caret did not start at the right edge of the line"
+        );
+
+        // And the end of the text is at the left edge.
+        let end = caret_position(&content, &shaped, content.text.len())
+            .expect("caret")
+            .0;
+        assert!(end < positions[3], "the caret did not finish on the left");
     }
 
     /// Mapping control points through an affine transform and then flattening

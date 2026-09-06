@@ -255,6 +255,8 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Phase 7 results](docs/phase-7-results.md)
 - [Phase 7.1 results](docs/phase-7.1-results.md)
 - [Layers](docs/layers.md)
+- [Vector shape layers](docs/vector-layers.md)
+- [Text layers](docs/text-layers.md)
 - [Compositing](docs/compositing.md)
 - [Project format](docs/project-format.md)
 - [Phase 8 results](docs/phase-8-results.md)

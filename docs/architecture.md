@@ -1,5 +1,25 @@
 # Architecture
 
+## Phase 13 semantic layer boundary
+
+`src-tauri/src/vector` holds geometry and its rasterisation: `path` keeps shapes
+parametric, `raster` turns flattened outlines into `f32` coverage, and `stroke`
+converts a stroke into a fill. `src-tauri/src/text` holds shaping and glyph
+outlines — cosmic-text for the bidirectional algorithm, contextual forms and
+font fallback, swash for outlines — and hands those outlines to the same
+rasteriser. Nothing in either module knows about layers.
+
+`layers/shape.rs` and `layers/text.rs` are the document objects on top of them.
+Both produce colour plus coverage for a rectangle and both composite through one
+shared routine in `layers/tiled.rs`, so a shape and a text layer take exactly
+the same path through masks, opacity and blend modes as everything else. Neither
+holds a pixel buffer, and neither is converted to one except by an explicit
+`rasterize_semantic_layer`. The full-frame renderer in `layers/linear.rs`
+delegates to the tiled routines rather than carrying a second implementation,
+because it is the oracle the tiled path is checked against and two
+implementations would be two things to keep identical. See
+[vector-layers.md](vector-layers.md) and [text-layers.md](text-layers.md).
+
 ## Phase 10 typed precision boundary
 
 `src-tauri/src/color.rs` holds the bounded `FloatImage` representation. Encoded
@@ -159,6 +179,13 @@ The source is decoded once. Tauri commands clone only reference-counted handles 
 ### Image processing
 
 `src-tauri/src/image_processing` is independent of Tauri and filesystem code. `processor` applies ordered operations, `restoration` contains deterministic restoration algorithms, `decontaminate` contains the bounded partial-edge RGB correction, and `analysis` calculates lightweight heuristics. This keeps algorithms unit-testable without changing the application boundary.
+
+### Vector and text
+
+`src-tauri/src/vector` and `src-tauri/src/text` are independent of Tauri, the
+filesystem and the layer model. Neither reaches the network: font discovery
+reads what the operating system has installed, and PhotoForge bundles no fonts
+of its own.
 
 ### Infrastructure
 

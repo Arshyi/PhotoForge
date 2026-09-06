@@ -93,8 +93,22 @@ identifier, name, type, visibility, lock, opacity, blend mode, transform, mask
 metadata; adjustment-layer parameters; the active layer; the document operation
 pipeline; the writing application version; and creation and modification times.
 
+Since 0.13.0 it also preserves **semantic layer content**: a shape layer's
+geometry, fill, stroke and fill rule, and a text layer's characters, requested
+font family, size, weight, style, alignment, line height, letter spacing,
+origin, wrapping width and paint.
+
+Text is stored as characters, never as glyph indices and never as a rendered
+bitmap. A glyph index names a slot in one font file on one machine, so a project
+holding them would reopen as nonsense elsewhere. The requested font family is
+likewise stored verbatim and is never rewritten to whatever a machine
+substituted for it, so opening the project somewhere that has the font restores
+the intended setting rather than a record of another machine's gap. A project
+names the fonts it wants; it does not carry them.
+
 A project never stores only flattened pixels. Exporting a flattened image does
-not flatten the project.
+not flatten the project, and rendering a document never rasterizes its text or
+shape layers.
 
 ## Entry names
 

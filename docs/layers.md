@@ -87,13 +87,31 @@ curve editor with an RGB/R/G/B channel selector where points can be dragged,
 added by clicking the grid, removed with Alt-click or Delete, and nudged with
 the arrow keys.
 
+### Shape layer (0.13.0)
+
+Vector content: parametric geometry, an optional fill and an optional stroke,
+rasterised on demand into whatever rectangle is being rendered. A shape layer
+never holds pixels, so scaling one redraws it rather than resampling it. See
+[vector-layers.md](vector-layers.md).
+
+### Text layer (0.13.0)
+
+Editable text: the characters, the font requested and the setting. Shaped and
+outlined on demand, never stored as pixels and never as glyph indices, so the
+words stay words across a save and reopen. See [text-layers.md](text-layers.md).
+
+Both are first-class layers rather than decorations painted onto the raster.
+They carry the same identifier, visibility, lock, opacity, blend mode, transform
+and mask as every other layer, they nest in groups, and they composite through
+the same path. Neither becomes pixels except through an explicit rasterize.
+
 ### Types designed for but not implemented
 
-Text, vector, smart-object/linked, procedural, and neural layers are **not**
-implemented in 0.8.0. The model is shaped so that adding one means adding a
-`LayerContent` variant and a compositor branch, without changing the tree, the
-mask model, transforms, history, or the project container. No stub or partial
-implementation of them ships.
+Smart-object/linked, procedural, and neural layers are **not** implemented. The
+model is shaped so that adding one means adding a `LayerContent` variant and a
+compositor branch, without changing the tree, the mask model, transforms,
+history, or the project container — which is exactly what shape and text layers
+did in 0.13.0. No stub or partial implementation of the remaining kinds ships.
 
 ## Layer properties
 
