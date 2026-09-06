@@ -124,6 +124,11 @@ fn composite_onto(
                 // module is the oracle the other one is checked against.
                 super::tiled::draw_shape_full_frame(canvas, shape, layer, context.options)?;
             }
+            LayerContent::Text { text } => {
+                // Delegated for the same reason as a shape: one implementation
+                // of glyph drawing, exercised from both renderers.
+                super::tiled::draw_text_full_frame(canvas, text, layer, context.options)?;
+            }
             LayerContent::Group { children, isolated } => {
                 if children.is_empty() {
                     continue;

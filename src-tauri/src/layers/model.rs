@@ -82,12 +82,20 @@ pub enum LayerContent {
         #[serde(flatten)]
         shape: Box<super::shape::ShapeContent>,
     },
+    /// Editable text. The characters, the font asked for and the setting —
+    /// shaped and outlined on demand, never stored as pixels or as glyph
+    /// indices, so the words stay words after a save and reopen.
+    Text {
+        #[serde(flatten)]
+        text: Box<super::text::TextContent>,
+    },
 }
 
 impl LayerContent {
     pub const fn kind(&self) -> LayerKind {
         match self {
             Self::Shape { .. } => LayerKind::Shape,
+            Self::Text { .. } => LayerKind::Text,
             Self::Pixel { .. } => LayerKind::Pixel,
             Self::Group { .. } => LayerKind::Group,
             Self::Adjustment { .. } => LayerKind::Adjustment,
@@ -102,6 +110,7 @@ pub enum LayerKind {
     Group,
     Adjustment,
     Shape,
+    Text,
 }
 
 impl LayerKind {
@@ -111,6 +120,7 @@ impl LayerKind {
             Self::Group => "group",
             Self::Adjustment => "adjustment",
             Self::Shape => "shape",
+            Self::Text => "text",
         }
     }
 }
@@ -279,6 +289,7 @@ impl Layer {
 
         match &self.content {
             LayerContent::Shape { shape } => shape.validate()?,
+            LayerContent::Text { text } => text.validate()?,
             LayerContent::Pixel {
                 pixel_id,
                 width,

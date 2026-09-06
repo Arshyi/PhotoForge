@@ -14,6 +14,7 @@ mod project;
 mod recovery;
 mod selection;
 pub mod shape;
+pub mod text;
 mod store;
 pub mod tiled;
 pub mod tiles;

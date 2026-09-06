@@ -16,6 +16,8 @@ mod image_processing;
 pub mod inference;
 /// Vector geometry: paths, semantic shapes and float-coverage rasterisation.
 pub mod vector;
+/// Text shaping and glyph outlines, drawn through the vector rasteriser above.
+pub mod text;
 pub use image_processing::high_precision;
 /// Fixtures and metrics are public so benchmarks and integration tests can
 /// score restoration against known-clean images rather than against opinion.

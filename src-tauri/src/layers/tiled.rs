@@ -721,6 +721,9 @@ fn composite_onto(
             LayerContent::Shape { shape } => {
                 draw_shape(canvas, shape, layer, context)?;
             }
+            LayerContent::Text { text } => {
+                draw_text(canvas, text, layer, context)?;
+            }
             LayerContent::Adjustment { operation } => {
                 let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
                 mix_adjustment(canvas, &adjusted, layer, context)?;
@@ -742,20 +745,10 @@ fn draw_shape(
     layer: &Layer,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
-    let scale = context.options.scale;
-    let transform = render_transform(&layer.transform, scale);
-    let (canvas_width, canvas_height) = (context.canvas_width, context.canvas_height);
-    // Shape coordinates are document coordinates, so the render scale is
-    // applied first and the layer transform is then taken in the scaled frame,
-    // exactly as it is for a pixel layer's bounds.
-    let to_device = |(x, y): (f32, f32)| -> (f32, f32) {
-        let scaled = ((f64::from(x) * scale) as f32, (f64::from(y) * scale) as f32);
-        transform.forward(scaled, canvas_width, canvas_height)
-    };
     let region = context.region;
     let Some((colours, coverage)) = crate::layers::shape::render_shape(
         shape,
-        to_device,
+        device_mapping(layer, context),
         region.x as i32,
         region.y as i32,
         region.width,
@@ -764,7 +757,66 @@ fn draw_shape(
     else {
         return Ok(());
     };
+    composite_coverage(canvas, &colours, &coverage, layer, context)
+}
 
+/// Draws a text layer into `canvas`, which holds `region` of the render canvas.
+///
+/// The same shape as `draw_shape`, and for the same reason: glyphs are
+/// outlines, mapped into device space and rasterised there, so enlarging a text
+/// layer redraws the letterforms instead of enlarging their pixels.
+fn draw_text(
+    canvas: &mut FloatImage,
+    text: &crate::layers::text::TextContent,
+    layer: &Layer,
+    context: &Context<'_>,
+) -> Result<(), AppError> {
+    let region = context.region;
+    let Some((colours, coverage)) = crate::layers::text::render_text(
+        text,
+        device_mapping(layer, context),
+        region.x as i32,
+        region.y as i32,
+        region.width,
+        region.height,
+    )?
+    else {
+        return Ok(());
+    };
+    composite_coverage(canvas, &colours, &coverage, layer, context)
+}
+
+/// Maps document coordinates to a pixel in the render canvas.
+///
+/// Vector and text coordinates are document coordinates, so the render scale is
+/// applied first and the layer transform is then taken in the scaled frame,
+/// exactly as it is for a pixel layer's bounds. Nothing here depends on the
+/// region, which is what lets a tile agree with the whole frame.
+fn device_mapping(layer: &Layer, context: &Context<'_>) -> impl Fn((f32, f32)) -> (f32, f32) {
+    let scale = context.options.scale;
+    let transform = render_transform(&layer.transform, scale);
+    let (canvas_width, canvas_height) = (context.canvas_width, context.canvas_height);
+    move |(x, y): (f32, f32)| -> (f32, f32) {
+        let scaled = ((f64::from(x) * scale) as f32, (f64::from(y) * scale) as f32);
+        transform.forward(scaled, canvas_width, canvas_height)
+    }
+}
+
+/// Composites rasterised coverage onto the canvas through the layer's mask,
+/// opacity and blend mode.
+///
+/// Shared by shapes and text because both arrive the same way — float coverage
+/// with colour, and no buffer of their own — and because a second copy of this
+/// would be a second place for the two to drift apart.
+fn composite_coverage(
+    canvas: &mut FloatImage,
+    colours: &FloatImage,
+    coverage: &[f32],
+    layer: &Layer,
+    context: &Context<'_>,
+) -> Result<(), AppError> {
+    let region = context.region;
+    let (canvas_width, canvas_height) = (context.canvas_width, context.canvas_height);
     let mask = decoded_mask(layer)?;
     let inverted = mask_inverted(layer);
     for y in 0..region.height {
@@ -775,8 +827,8 @@ fn draw_shape(
                 continue;
             }
             let mut source = colours.pixels()[index];
-            // A shape has no buffer, so its mask lives on the canvas and is
-            // sampled in document coordinates.
+            // Neither a shape nor a text layer has a buffer, so the mask lives
+            // on the canvas and is sampled in document coordinates.
             source.alpha *= layer.opacity
                 * mask_coverage(
                     mask.as_ref(),
@@ -817,6 +869,24 @@ pub(super) fn draw_shape_full_frame(
         region: Region::whole(width, height),
     };
     draw_shape(canvas, shape, layer, &context)
+}
+
+/// Draws text over a whole canvas, for the full-frame reference renderer.
+pub(super) fn draw_text_full_frame(
+    canvas: &mut FloatImage,
+    text: &crate::layers::text::TextContent,
+    layer: &Layer,
+    options: RenderOptions<'_>,
+) -> Result<(), AppError> {
+    let (width, height) = canvas.dimensions();
+    let context = Context {
+        source: &EmptySource,
+        options,
+        canvas_width: width,
+        canvas_height: height,
+        region: Region::whole(width, height),
+    };
+    draw_text(canvas, text, layer, &context)
 }
 
 /// A source that resolves nothing, for contexts where no pixel buffer is used.
@@ -1243,7 +1313,7 @@ mod tests {
     }
 
     /// Builds a small random layer tree: groups, masks, opacity, blend modes,
-    /// adjustments and transforms, mixed at random.
+    /// adjustments, vector shapes, text and transforms, mixed at random.
     fn random_document(rng: &mut Rng, sources: &[&str]) -> LayerDocument {
         fn build(rng: &mut Rng, sources: &[&str], depth: usize, index: &mut u32) -> Layer {
             *index += 1;
@@ -1277,6 +1347,91 @@ mod tests {
                 Layer {
                     content: LayerContent::Adjustment {
                         operation: Box::new(operation),
+                    },
+                    ..test_pixel_layer(&id, "unused", W, H)
+                }
+            } else if choice == 5 {
+                // Vector content, so the equivalence and staleness checks cover
+                // the rasterised path as well as the sampled one.
+                let geometry = match rng.below(3) {
+                    0 => crate::vector::ShapeGeometry::Rectangle {
+                        x: rng.unit() * 40.0,
+                        y: rng.unit() * 40.0,
+                        width: 10.0 + rng.unit() * 60.0,
+                        height: 10.0 + rng.unit() * 60.0,
+                        corner_radius: rng.unit() * 8.0,
+                    },
+                    1 => crate::vector::ShapeGeometry::Ellipse {
+                        cx: 20.0 + rng.unit() * 60.0,
+                        cy: 20.0 + rng.unit() * 60.0,
+                        rx: 5.0 + rng.unit() * 30.0,
+                        ry: 5.0 + rng.unit() * 30.0,
+                    },
+                    _ => crate::vector::ShapeGeometry::Star {
+                        cx: 20.0 + rng.unit() * 60.0,
+                        cy: 20.0 + rng.unit() * 60.0,
+                        outer_radius: 15.0 + rng.unit() * 25.0,
+                        inner_radius: 5.0 + rng.unit() * 8.0,
+                        points: 5,
+                        rotation_degrees: rng.unit() * 60.0,
+                    },
+                };
+                let shape = crate::layers::shape::ShapeContent {
+                    geometry,
+                    fill: Some(crate::layers::shape::ShapeColor::new(
+                        rng.unit(),
+                        rng.unit(),
+                        rng.unit(),
+                        0.3 + rng.unit() * 0.7,
+                    )),
+                    stroke: (rng.below(2) == 0).then(|| {
+                        crate::layers::shape::ShapeColor::new(rng.unit(), rng.unit(), rng.unit(), 1.0)
+                    }),
+                    stroke_style: Some(crate::vector::StrokeStyle {
+                        width: 1.0 + rng.unit() * 4.0,
+                        ..crate::layers::text::default_text_stroke()
+                    }),
+                    fill_rule: crate::vector::FillRule::NonZero,
+                };
+                Layer {
+                    content: LayerContent::Shape {
+                        shape: Box::new(shape),
+                    },
+                    ..test_pixel_layer(&id, "unused", W, H)
+                }
+            } else if choice == 6 {
+                // Text, drawn from real system fonts. Glyph outlines are far
+                // more intricate than any shape the generator builds, so if a
+                // tile boundary can split an outline differently from the whole
+                // frame, this is what finds it.
+                let words = ["Hg", "quip", "Wave", "\u{0633}\u{0644}\u{0627}\u{0645}", "\u{4F60}\u{597D}"];
+                let mut text = crate::layers::text::TextContent::new(
+                    words[rng.below(words.len() as u64) as usize],
+                    rng.unit() * 40.0,
+                    20.0 + rng.unit() * 50.0,
+                    12.0 + rng.unit() * 24.0,
+                );
+                text.fill = crate::layers::shape::ShapeColor::new(
+                    rng.unit(),
+                    rng.unit(),
+                    rng.unit(),
+                    0.3 + rng.unit() * 0.7,
+                );
+                if rng.below(2) == 0 {
+                    text.stroke = Some(crate::layers::shape::ShapeColor::new(
+                        rng.unit(),
+                        rng.unit(),
+                        rng.unit(),
+                        1.0,
+                    ));
+                    text.stroke_style = Some(crate::vector::StrokeStyle {
+                        width: 0.5 + rng.unit() * 2.0,
+                        ..crate::layers::text::default_text_stroke()
+                    });
+                }
+                Layer {
+                    content: LayerContent::Text {
+                        text: Box::new(text),
                     },
                     ..test_pixel_layer(&id, "unused", W, H)
                 }
@@ -2339,12 +2494,110 @@ mod tests {
                     warm_stats.cached_tiles, warm_stats.tiles,
                     "seed {seed} recomputed tiles nothing had changed"
                 );
-                assert_eq!(
-                    cold_stats.cached_tiles, 0,
-                    "seed {seed} hit on a cold cache"
+                // A tile no layer reaches renders transparent whatever the
+                // document says, so two different documents genuinely share
+                // it and a hit there is correct. A hit on a tile with content
+                // in it would be one document serving another's pixels, so
+                // the bound is the number of empty tiles, not zero.
+                let empty_tiles = transparent_tile_count(&reference, 64);
+                assert!(
+                    cold_stats.cached_tiles <= empty_tiles,
+                    "seed {seed} hit on a cold cache for {} tiles, but only {empty_tiles} \
+                     were empty",
+                    cold_stats.cached_tiles
                 );
             }
         }
+    }
+
+    /// How many whole tiles of a render are entirely transparent.
+    fn transparent_tile_count(image: &FloatImage, tile: u32) -> u64 {
+        let (width, height) = image.dimensions();
+        let mut empty = 0u64;
+        let mut y = 0;
+        while y < height {
+            let mut x = 0;
+            while x < width {
+                let mut clear = true;
+                for row in y..(y + tile).min(height) {
+                    for column in x..(x + tile).min(width) {
+                        if image.pixels()[(row * width + column) as usize].alpha != 0.0 {
+                            clear = false;
+                            break;
+                        }
+                    }
+                    if !clear {
+                        break;
+                    }
+                }
+                if clear {
+                    empty += 1;
+                }
+                x += tile;
+            }
+            y += tile;
+        }
+        empty
+    }
+
+    /// A pass-through group has no buffer of its own: its children composite
+    /// straight onto the canvas, and the group's transform only relocates the
+    /// group's mask. A cache that mapped the children's region through that
+    /// transform anyway would invalidate the wrong tiles and leave the real
+    /// ones stale — which is exactly what it did until a layer small enough to
+    /// leave the mapped region existed to show it.
+    #[test]
+    fn a_transformed_pass_through_group_invalidates_the_tiles_its_child_paints() {
+        let store = store_with(&[("a", source_image(W, H, 91))]);
+        let mut child = Layer {
+            content: LayerContent::Shape {
+                shape: Box::new(crate::layers::shape::ShapeContent {
+                    geometry: crate::vector::ShapeGeometry::Ellipse {
+                        cx: 40.0,
+                        cy: 40.0,
+                        rx: 18.0,
+                        ry: 18.0,
+                    },
+                    fill: Some(crate::layers::shape::ShapeColor::new(1.0, 0.0, 0.0, 1.0)),
+                    stroke: None,
+                    stroke_style: None,
+                    fill_rule: crate::vector::FillRule::NonZero,
+                }),
+            },
+            ..pixel_layer("dot", "unused")
+        };
+        child.opacity = 1.0;
+        let group = Layer {
+            content: LayerContent::Group {
+                children: vec![child],
+                isolated: false,
+            },
+            transform: LayerTransform {
+                translate_x: 30.0,
+                translate_y: 45.0,
+                rotation_degrees: 25.0,
+                ..LayerTransform::default()
+            },
+            ..pixel_layer("pass", "unused")
+        };
+        let mut document = document(vec![pixel_layer("base", "a"), group]);
+
+        let cache = TileCache::default();
+        let _ = cached(&document, &store, 64, &cache);
+
+        // Recolour the child. Every tile the group paints must be recomputed.
+        if let LayerContent::Group { children, .. } = &mut document.layers[1].content {
+            if let LayerContent::Shape { shape } = &mut children[0].content {
+                shape.fill = Some(crate::layers::shape::ShapeColor::new(0.0, 0.0, 1.0, 1.0));
+            }
+        }
+        let reference = uncached(&document, &store, 64);
+        let (actual, _) = cached(&document, &store, 64, &cache);
+        assert_eq!(
+            reference.pixels(),
+            actual.pixels(),
+            "a pass-through group served a stale tile after its child changed"
+        );
     }
 
     /// Pixel identifiers are local to one store. Opening a new document resets

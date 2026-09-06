@@ -671,11 +671,11 @@ pub async fn render_layer_thumbnail(
                 height: 0,
             })
         }
-        // A shape has no buffer to crop a thumbnail from, so it is rendered on
-        // its own over the canvas and thumbnailed from that. Rendering the
-        // layer alone is what makes the thumbnail show the shape rather than
-        // whatever happens to sit behind it.
-        LayerKind::Shape => {
+        // Neither a shape nor a text layer has a buffer to crop a thumbnail
+        // from, so each is rendered on its own over the canvas and thumbnailed
+        // from that. Rendering the layer alone is what makes the thumbnail show
+        // the layer rather than whatever happens to sit behind it.
+        LayerKind::Shape | LayerKind::Text => {
             let mut solo = document.clone();
             solo.layers = vec![layer.clone()];
             solo.active_layer_id = None;

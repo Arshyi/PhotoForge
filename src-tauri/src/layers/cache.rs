@@ -461,6 +461,17 @@ fn digest_visible_sources(
                 digest_visible_sources(child, source, hasher)?;
             }
         }
+        LayerContent::Text { text } => {
+            // Text is its own identity too: the characters, the font requested
+            // and the setting. The glyphs it resolves to are derived from
+            // those, so digesting the request covers the result.
+            hasher.update(b"text-content");
+            let encoded = serde_json::to_vec(text.as_ref()).map_err(|_| {
+                AppError::InvalidLayerDocument("a text layer could not be digested".into())
+            })?;
+            hasher.update((encoded.len() as u64).to_le_bytes());
+            hasher.update(&encoded);
+        }
         LayerContent::Adjustment { .. } => {}
     }
     Ok(())
@@ -504,11 +515,23 @@ fn influence_of(
         // Bounding that properly would mean tracking what is beneath it, which
         // is exactly the kind of narrowing this module refuses to guess at.
         LayerContent::Adjustment { .. } => Influence::Everywhere,
-        LayerContent::Shape { shape } => {
-            // A shape reaches exactly as far as it paints, which is what makes
-            // moving one invalidate the tiles it left and the tiles it arrived
-            // at, and nothing else.
-            let Some((min_x, min_y, max_x, max_y)) = shape.untransformed_bounds() else {
+        LayerContent::Shape { .. } | LayerContent::Text { .. } => {
+            // A shape or a text block reaches exactly as far as it paints,
+            // which is what makes moving one invalidate the tiles it left and
+            // the tiles it arrived at, and nothing else.
+            let bounds = match &layer.content {
+                LayerContent::Shape { shape } => shape.untransformed_bounds(),
+                // Bounding text needs it shaped, and shaping can fail. The
+                // honest answer to "I could not work out where this reaches"
+                // is the whole canvas, never a smaller region that would let a
+                // stale tile survive.
+                LayerContent::Text { text } => match text.untransformed_bounds() {
+                    Ok(bounds) => bounds,
+                    Err(_) => return Influence::Everywhere,
+                },
+                _ => unreachable!("the match arm admits only shapes and text"),
+            };
+            let Some((min_x, min_y, max_x, max_y)) = bounds else {
                 return Influence::Nowhere;
             };
             let scaled = |v: f32| (f64::from(v) * scale) as f32;
@@ -562,7 +585,10 @@ fn influence_of(
                 }
             }
         }
-        LayerContent::Group { children, .. } => {
+        LayerContent::Group {
+            children,
+            isolated,
+        } => {
             let mut union: Option<Region> = None;
             for child in children {
                 match influence_of(child, source, scale, halo, canvas) {
@@ -579,7 +605,17 @@ fn influence_of(
             let Some(union) = union else {
                 return Influence::Nowhere;
             };
-            if transform.is_identity() {
+            // A pass-through group has no buffer of its own. Its children
+            // composite straight onto the canvas, and `cross_fade` uses the
+            // group's transform only to sample the group's mask — it never
+            // moves the children's pixels. Mapping the union through that
+            // transform would therefore point the invalidation region at
+            // somewhere the ink is not, which is how a stale tile survives an
+            // edit. This was reachable for as long as groups have had
+            // transforms; it needed a child small enough to leave the mapped
+            // region, and until vector layers existed every generated child
+            // covered the whole canvas.
+            if !*isolated || transform.is_identity() {
                 return Influence::Within(union.expanded(halo, canvas));
             }
             // The group's buffer is sampled through its transform, so a child
@@ -766,3 +802,4 @@ mod tests {
         assert!((stats.hit_rate() - 0.5).abs() < 1e-9);
     }
 }
+
