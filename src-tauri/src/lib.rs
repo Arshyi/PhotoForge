@@ -14,6 +14,8 @@ mod image_processing;
 /// Optional local neural inference. Present in every build; the runtime and any
 /// models are separately optional, and the editor is complete without both.
 pub mod inference;
+/// Vector geometry: paths, semantic shapes and float-coverage rasterisation.
+pub mod vector;
 pub use image_processing::high_precision;
 /// Fixtures and metrics are public so benchmarks and integration tests can
 /// score restoration against known-clean images rather than against opinion.
