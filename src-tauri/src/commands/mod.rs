@@ -9,6 +9,7 @@ mod professional;
 mod raw;
 mod render;
 mod sampling;
+mod text;
 
 pub use components::{
     discover_models, get_component_diagnostics, get_component_snapshot,
@@ -54,4 +55,8 @@ pub use raw::{
 pub use render::{
     clear_render_cache, default_render_cache_budget, get_render_backend_mode, render_diagnostics,
     set_render_backend_mode, set_render_cache_budget,
+};
+pub use text::{
+    inspect_document_fonts, list_system_fonts, rasterize_semantic_layer, FontListResult,
+    FontRequirement, FontRequirementsResult,
 };

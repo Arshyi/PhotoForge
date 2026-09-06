@@ -46,7 +46,7 @@ export const blendModes: { id: BlendMode; label: string; group: string }[] = [
   { id: 'luminosity', label: 'Luminosity', group: 'Component' }
 ];
 
-export type LayerKind = 'pixel' | 'group' | 'adjustment';
+export type LayerKind = 'pixel' | 'group' | 'adjustment' | 'shape' | 'text';
 
 /** Mirrors `layers::LayerInterpolation`. */
 export type LayerInterpolation = 'bilinear' | 'nearest';
@@ -91,10 +91,98 @@ export interface LayerMetadata {
   custom: Record<string, string>;
 }
 
+/** A colour in the document's linear working space, with straight alpha. */
+export interface ShapeColor {
+  red: number;
+  green: number;
+  blue: number;
+  alpha: number;
+}
+
+export type LineCap = 'butt' | 'round' | 'square';
+export type LineJoin = 'round' | 'bevel' | 'miter';
+
+export interface StrokeStyle {
+  width: number;
+  cap: LineCap;
+  join: LineJoin;
+  miterLimit: number;
+}
+
+/** One step of a path. Mirrors `vector::PathCommand`. */
+export type PathCommand =
+  | { type: 'moveTo'; x: number; y: number }
+  | { type: 'lineTo'; x: number; y: number }
+  | { type: 'cubicTo'; c1x: number; c1y: number; c2x: number; c2y: number; x: number; y: number }
+  | { type: 'close' };
+
+/**
+ * A shape that keeps its meaning. A rectangle stays a rectangle rather than
+ * four points, so changing its corner radius later edits a parameter instead of
+ * rebuilding geometry from its remains.
+ */
+export type ShapeGeometry =
+  | { type: 'rectangle'; x: number; y: number; width: number; height: number; cornerRadius: number }
+  | { type: 'ellipse'; cx: number; cy: number; rx: number; ry: number }
+  | { type: 'line'; x1: number; y1: number; x2: number; y2: number }
+  | { type: 'polygon'; cx: number; cy: number; radius: number; sides: number; rotationDegrees: number }
+  | {
+      type: 'star';
+      cx: number;
+      cy: number;
+      outerRadius: number;
+      innerRadius: number;
+      points: number;
+      rotationDegrees: number;
+    }
+  | { type: 'path'; path: { commands: PathCommand[] } };
+
+export type FillRule = 'nonZero' | 'evenOdd';
+
+/** Mirrors `layers::shape::ShapeContent`, flattened into the layer content. */
+export interface ShapeContent {
+  geometry: ShapeGeometry;
+  fill?: ShapeColor | null;
+  stroke?: ShapeColor | null;
+  strokeStyle?: StrokeStyle | null;
+  fillRule: FillRule;
+}
+
+export type TextAlign = 'start' | 'center' | 'end' | 'justified';
+
+/**
+ * Mirrors `layers::text::TextContent`, flattened into the layer content.
+ *
+ * `fontFamily` is what the user asked for and stays what they asked for. When
+ * the machine lacks it the text draws in a substitute and is reported as
+ * missing; the request is never rewritten, so opening the project somewhere
+ * that has the font restores the intended setting.
+ */
+export interface TextContent {
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: number;
+  italic: boolean;
+  align: TextAlign;
+  /** Line advance as a multiple of the font size. */
+  lineHeight: number;
+  letterSpacing: number;
+  originX: number;
+  originY: number;
+  /** Present for area text; absent for point text on a single line. */
+  wrapWidth?: number | null;
+  fill: ShapeColor;
+  stroke?: ShapeColor | null;
+  strokeStyle?: StrokeStyle | null;
+}
+
 export type LayerContent =
   | { type: 'pixel'; pixelId: string; width: number; height: number }
   | { type: 'group'; children: Layer[]; isolated: boolean }
-  | { type: 'adjustment'; operation: BaseEditOperation };
+  | { type: 'adjustment'; operation: BaseEditOperation }
+  | ({ type: 'shape' } & ShapeContent)
+  | ({ type: 'text' } & TextContent);
 
 export interface Layer {
   id: string;
@@ -194,13 +282,17 @@ export interface LayerRow {
 export const layerKindLabels: Record<LayerKind, string> = {
   pixel: 'Pixel layer',
   group: 'Group',
-  adjustment: 'Adjustment layer'
+  adjustment: 'Adjustment layer',
+  shape: 'Shape layer',
+  text: 'Text layer'
 };
 
 export const layerKindIcons: Record<LayerKind, string> = {
   pixel: '▣',
   group: '▤',
-  adjustment: '◐'
+  adjustment: '◐',
+  shape: '◇',
+  text: 'T'
 };
 
 /** Actions the Layers panel raises for the host application to carry out. */
@@ -220,6 +312,8 @@ export type LayerPanelAction =
   | 'mask_apply'
   | 'mask_load_selection'
   | 'edit_adjustment'
+  | 'edit_text'
+  | 'rasterize_semantic'
   | 'reset_transform'
   | 'rasterize_transform'
   | 'toggle_pass_through'

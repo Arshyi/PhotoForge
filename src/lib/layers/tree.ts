@@ -10,7 +10,10 @@ import {
   type LayerDocument,
   type LayerKind,
   type LayerRow,
-  type LayerTransform
+  type LayerTransform,
+  type ShapeColor,
+  type ShapeGeometry,
+  type TextContent
 } from './types';
 
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -89,6 +92,67 @@ export function createAdjustmentLayer(
   now?: Date
 ): Layer {
   return baseLayer(name, { type: 'adjustment', operation }, now);
+}
+
+/**
+ * A new text layer, set in the machine's default sans-serif.
+ *
+ * The empty `fontFamily` means "whatever this machine calls its default", which
+ * is different from naming a face: it cannot go missing, and it does not record
+ * one machine's default as the author's intent.
+ */
+export function createTextLayer(
+  name: string,
+  text: string,
+  originX: number,
+  originY: number,
+  fontSize = 48,
+  now?: Date
+): Layer {
+  return baseLayer(
+    name,
+    {
+      type: 'text',
+      text,
+      fontFamily: '',
+      fontSize,
+      fontWeight: 400,
+      italic: false,
+      align: 'start',
+      lineHeight: 1.2,
+      letterSpacing: 0,
+      originX,
+      originY,
+      fill: { red: 0, green: 0, blue: 0, alpha: 1 }
+    },
+    now
+  );
+}
+
+/** A new shape layer holding one piece of parametric geometry. */
+export function createShapeLayer(
+  name: string,
+  geometry: ShapeGeometry,
+  fill: ShapeColor | null = { red: 0.2, green: 0.4, blue: 0.9, alpha: 1 },
+  now?: Date
+): Layer {
+  return baseLayer(name, { type: 'shape', geometry, fill, fillRule: 'nonZero' }, now);
+}
+
+/**
+ * The semantic content of a text layer, or null when the layer is not one.
+ *
+ * A helper rather than an inline check because callers routinely want the
+ * content and the narrowing together, and writing the check by hand at each
+ * site is how a shape layer ends up read as a text layer.
+ */
+export function textContentOf(layer: Layer): TextContent | null {
+  return layer.content.type === 'text' ? layer.content : null;
+}
+
+/** True for a layer whose content is geometry or characters, not pixels. */
+export function isSemanticLayer(layer: Layer): boolean {
+  return layer.content.type === 'text' || layer.content.type === 'shape';
 }
 
 export function createDocument(

@@ -325,7 +325,10 @@ mod tests {
         assert!(shaped.width > 0.0 && shaped.height > 0.0);
         // Left to right.
         for pair in shaped.glyphs.windows(2) {
-            assert!(pair[1].x >= pair[0].x, "latin text was not laid out forwards");
+            assert!(
+                pair[1].x >= pair[0].x,
+                "latin text was not laid out forwards"
+            );
         }
         // Every glyph produced real geometry.
         assert!(shaped.glyphs.iter().all(|g| !g.path.commands.is_empty()));
@@ -363,8 +366,11 @@ mod tests {
         // The same letters separated by spaces cannot join, so their outlines
         // must differ from the joined ones.
         let isolated = shape(&request("\u{0633} \u{0644} \u{0627} \u{0645}", "")).expect("shape");
-        let joined_shapes: Vec<usize> =
-            joined.glyphs.iter().map(|g| g.path.commands.len()).collect();
+        let joined_shapes: Vec<usize> = joined
+            .glyphs
+            .iter()
+            .map(|g| g.path.commands.len())
+            .collect();
         let isolated_shapes: Vec<usize> = isolated
             .glyphs
             .iter()
@@ -392,7 +398,11 @@ mod tests {
             .collect();
         let arabic: Vec<&PositionedGlyph> =
             ordered.iter().copied().filter(|g| g.start >= 3).collect();
-        assert_eq!(latin.len(), 2, "the Latin prefix did not produce two glyphs");
+        assert_eq!(
+            latin.len(),
+            2,
+            "the Latin prefix did not produce two glyphs"
+        );
         assert_eq!(arabic.len(), 4, "the Persian did not produce four glyphs");
 
         // The paragraph reads left to right, so the Latin sits to the left of
@@ -444,7 +454,10 @@ mod tests {
     #[test]
     fn hostile_text_parameters_are_refused() {
         let huge = "x".repeat(MAX_TEXT_BYTES + 1);
-        assert!(shape(&request(&huge, "")).is_err(), "an oversized string was shaped");
+        assert!(
+            shape(&request(&huge, "")).is_err(),
+            "an oversized string was shaped"
+        );
 
         for size in [f32::NAN, f32::INFINITY, 0.0, -10.0, 1e9] {
             let mut candidate = request("Hi", "");
@@ -474,7 +487,10 @@ mod tests {
         let shaped = shape(&request("Ag\u{0633}\u{4F60}", "")).expect("shape");
         for glyph in &shaped.glyphs {
             assert!(glyph.x.is_finite() && glyph.y.is_finite());
-            glyph.path.validate().expect("a glyph outline was not valid");
+            glyph
+                .path
+                .validate()
+                .expect("a glyph outline was not valid");
         }
     }
 }

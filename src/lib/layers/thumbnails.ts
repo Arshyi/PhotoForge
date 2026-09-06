@@ -23,7 +23,14 @@ export function thumbnailKey(layer: Layer, document: LayerDocument): string {
     parts.push('p', content.pixelId, String(content.width), String(content.height));
   } else if (content.type === 'adjustment') {
     parts.push('a', content.operation.type);
-  } else {
+  } else if (content.type === 'shape' || content.type === 'text') {
+    // Semantic content is its own identity: there is no buffer behind it, so
+    // everything that could change the thumbnail is in the content itself.
+    // Listed explicitly rather than falling through to the group branch, which
+    // would have treated a shape or a text layer as a group with no children
+    // and produced the same key for every one of them.
+    parts.push(content.type === 'shape' ? 's' : 't', JSON.stringify(content));
+  } else if (content.type === 'group') {
     // A group thumbnail is the composite of its children, so every visible
     // property of every descendant contributes to the key.
     parts.push('g');
@@ -33,6 +40,12 @@ export function thumbnailKey(layer: Layer, document: LayerDocument): string {
       parts.push(childSignature(child));
       stack.push(...childrenOf(child));
     }
+  } else {
+    // Unreachable while `LayerContent` is fully handled above. Typed as `never`
+    // so that adding a layer kind without deciding what its thumbnail depends
+    // on fails the build rather than silently keying it as something else.
+    const unhandled: never = content;
+    parts.push('?', JSON.stringify(unhandled));
   }
   parts.push(
     layer.visible ? 'v' : '-',
@@ -52,7 +65,9 @@ function childSignature(layer: Layer): string {
       ? `${content.pixelId}:${content.width}x${content.height}`
       : content.type === 'adjustment'
         ? JSON.stringify(content.operation)
-        : 'group';
+        : content.type === 'group'
+          ? 'group'
+          : JSON.stringify(content);
   return [
     layer.id,
     identity,

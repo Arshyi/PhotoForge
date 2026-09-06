@@ -156,7 +156,10 @@ mod tests {
         for (index, key) in keys.iter().enumerate() {
             for (other_index, other_key) in keys.iter().enumerate() {
                 if index != other_index {
-                    assert_ne!(key, other_key, "requests {index} and {other_index} collided");
+                    assert_ne!(
+                        key, other_key,
+                        "requests {index} and {other_index} collided"
+                    );
                 }
             }
         }
@@ -168,6 +171,10 @@ mod tests {
             shape(&request(&format!("bounded {index}"))).expect("shape");
         }
         let cache = CACHE.lock().expect("lock");
-        assert!(cache.len() <= CACHE_CAPACITY, "the cache grew to {}", cache.len());
+        assert!(
+            cache.len() <= CACHE_CAPACITY,
+            "the cache grew to {}",
+            cache.len()
+        );
     }
 }

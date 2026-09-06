@@ -419,7 +419,7 @@ pub async fn create_layer_pixels(
     })
 }
 
-fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Layer, AppError> {
+pub(super) fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Layer, AppError> {
     document
         .find(layer_id)
         .cloned()
@@ -431,7 +431,7 @@ fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Layer, AppErro
 /// Merge and flatten both land here. The result is canvas sized with an
 /// identity transform, because a merged layer no longer has the individual
 /// placements of the layers that produced it.
-async fn render_subset_into_buffer(
+pub(super) async fn render_subset_into_buffer(
     document: LayerDocument,
     layers: Vec<Layer>,
     state: &AppState,

@@ -14,10 +14,10 @@ mod image_processing;
 /// Optional local neural inference. Present in every build; the runtime and any
 /// models are separately optional, and the editor is complete without both.
 pub mod inference;
-/// Vector geometry: paths, semantic shapes and float-coverage rasterisation.
-pub mod vector;
 /// Text shaping and glyph outlines, drawn through the vector rasteriser above.
 pub mod text;
+/// Vector geometry: paths, semantic shapes and float-coverage rasterisation.
+pub mod vector;
 pub use image_processing::high_precision;
 /// Fixtures and metrics are public so benchmarks and integration tests can
 /// score restoration against known-clean images rather than against opinion.
@@ -41,11 +41,12 @@ use commands::{
     flatten_layer_document, generate_edit_plan, generate_histogram, generate_ollama_plan,
     get_batch_status, get_component_diagnostics, get_component_snapshot, get_mask_progress,
     get_ollama_diagnostics, get_render_backend_mode, import_inference_model, import_layer_image,
-    import_mask_file, import_mask_png, import_workflow, inference_status, inspect_image_pixel,
-    inspect_raw, inspect_selection_mask, layer_mask_from_selection, layer_store_report,
-    list_recovery_snapshots, load_layer_project, magic_wand_selection,
-    measure_component_performance, merge_layer_pixels, open_image, open_raw_image, open_raw_layer,
-    plan_layer_workflow, preview_batch_workflow, rasterize_layer_transform, rasterize_selection,
+    import_mask_file, import_mask_png, import_workflow, inference_status, inspect_document_fonts,
+    inspect_image_pixel, inspect_raw, inspect_selection_mask, layer_mask_from_selection,
+    layer_store_report, list_recovery_snapshots, list_system_fonts, load_layer_project,
+    magic_wand_selection, measure_component_performance, merge_layer_pixels, open_image,
+    open_raw_image, open_raw_layer, plan_layer_workflow, preview_batch_workflow,
+    rasterize_layer_transform, rasterize_selection, rasterize_semantic_layer,
     refine_selection_mask, refresh_ollama_models, relink_raw_source, remap_selection_masks,
     remove_inference_model, render_diagnostics, render_layer_composite, render_layer_thumbnail,
     render_preview, restore_recovery_snapshot, retain_layer_pixels, save_layer_project,
@@ -141,6 +142,9 @@ pub fn run() {
             merge_layer_pixels,
             flatten_layer_document,
             rasterize_layer_transform,
+            rasterize_semantic_layer,
+            list_system_fonts,
+            inspect_document_fonts,
             apply_operations_to_layer,
             render_layer_thumbnail,
             layer_mask_from_selection,

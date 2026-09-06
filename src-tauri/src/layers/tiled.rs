@@ -1385,7 +1385,12 @@ mod tests {
                         0.3 + rng.unit() * 0.7,
                     )),
                     stroke: (rng.below(2) == 0).then(|| {
-                        crate::layers::shape::ShapeColor::new(rng.unit(), rng.unit(), rng.unit(), 1.0)
+                        crate::layers::shape::ShapeColor::new(
+                            rng.unit(),
+                            rng.unit(),
+                            rng.unit(),
+                            1.0,
+                        )
                     }),
                     stroke_style: Some(crate::vector::StrokeStyle {
                         width: 1.0 + rng.unit() * 4.0,
@@ -1404,7 +1409,13 @@ mod tests {
                 // more intricate than any shape the generator builds, so if a
                 // tile boundary can split an outline differently from the whole
                 // frame, this is what finds it.
-                let words = ["Hg", "quip", "Wave", "\u{0633}\u{0644}\u{0627}\u{0645}", "\u{4F60}\u{597D}"];
+                let words = [
+                    "Hg",
+                    "quip",
+                    "Wave",
+                    "\u{0633}\u{0644}\u{0627}\u{0645}",
+                    "\u{4F60}\u{597D}",
+                ];
                 let mut text = crate::layers::text::TextContent::new(
                     words[rng.below(words.len() as u64) as usize],
                     rng.unit() * 40.0,

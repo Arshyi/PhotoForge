@@ -585,10 +585,7 @@ fn influence_of(
                 }
             }
         }
-        LayerContent::Group {
-            children,
-            isolated,
-        } => {
+        LayerContent::Group { children, isolated } => {
             let mut union: Option<Region> = None;
             for child in children {
                 match influence_of(child, source, scale, halo, canvas) {
@@ -802,4 +799,3 @@ mod tests {
         assert!((stats.hit_rate() - 0.5).abs() < 1e-9);
     }
 }
-
