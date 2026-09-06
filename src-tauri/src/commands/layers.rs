@@ -671,6 +671,36 @@ pub async fn render_layer_thumbnail(
                 height: 0,
             })
         }
+        // A shape has no buffer to crop a thumbnail from, so it is rendered on
+        // its own over the canvas and thumbnailed from that. Rendering the
+        // layer alone is what makes the thumbnail show the shape rather than
+        // whatever happens to sit behind it.
+        LayerKind::Shape => {
+            let mut solo = document.clone();
+            solo.layers = vec![layer.clone()];
+            solo.active_layer_id = None;
+            // One lock for both, released before rendering: holding the store
+            // across a render would block every other layer command for the
+            // duration of it.
+            let (resolved, scale) = {
+                let store = state.layers.lock().map_err(|_| {
+                    AppError::ProcessingFailure("layer store is unavailable".into())
+                })?;
+                (
+                    store.resolve(&solo.referenced_pixel_ids(), true)?,
+                    store.preview_scale(),
+                )
+            };
+            let typed = crate::layers::render_document_typed(
+                &solo,
+                &resolved,
+                RenderOptions {
+                    scale,
+                    cancel: None,
+                },
+            )?;
+            (*typed.encoded8()).clone()
+        }
         LayerKind::Pixel => {
             let pixel_id = layer.pixel_id().unwrap_or_default().to_string();
             let store = state

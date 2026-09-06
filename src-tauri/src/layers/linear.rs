@@ -117,6 +117,13 @@ fn composite_onto(
                 let pixels = context.source.resolve_linear(pixel_id)?;
                 draw(canvas, &pixels, layer, context)?;
             }
+            LayerContent::Shape { shape } => {
+                // Delegated to the tiled renderer's routine over a region
+                // covering the whole canvas. Two implementations of shape
+                // drawing would be two things to keep identical, and this
+                // module is the oracle the other one is checked against.
+                super::tiled::draw_shape_full_frame(canvas, shape, layer, context.options)?;
+            }
             LayerContent::Group { children, isolated } => {
                 if children.is_empty() {
                     continue;

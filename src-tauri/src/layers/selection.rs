@@ -31,7 +31,11 @@ pub fn mask_space(layer: &Layer, canvas_width: u32, canvas_height: u32) -> (u32,
         LayerKind::Pixel => layer
             .pixel_dimensions()
             .unwrap_or((canvas_width, canvas_height)),
-        LayerKind::Group | LayerKind::Adjustment => (canvas_width, canvas_height),
+        // A shape has no buffer of its own, so its mask lives on the canvas
+        // exactly as a group's or an adjustment's does.
+        LayerKind::Group | LayerKind::Adjustment | LayerKind::Shape => {
+            (canvas_width, canvas_height)
+        }
     }
 }
 

@@ -39,10 +39,15 @@ fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// Which kind of content a layer carries. Text, vector, smart-object,
-/// procedural, and neural layers are deliberately absent in this phase; adding
-/// one means adding a variant here and a branch in the compositor, without
-/// changing the tree, mask, transform, or project container.
+/// Which kind of content a layer carries.
+///
+/// Adding a kind means adding a variant here and a branch in the compositor,
+/// without changing the tree, mask, transform, or project container. Vector
+/// shapes arrived that way in 0.13.0; text and smart objects are still absent.
+///
+/// Every match over this enum is exhaustive on purpose. An unknown variant read
+/// from a project must fail the document rather than be reinterpreted as pixels,
+/// which is what a catch-all arm would quietly do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LayerContent {
@@ -70,11 +75,19 @@ pub enum LayerContent {
     /// type the destructive pipeline uses, so an adjustment layer never bakes
     /// pixels and always recomputes from its parameters.
     Adjustment { operation: Box<EditOperation> },
+    /// Vector content. Geometry, fill and stroke, rasterised on demand into
+    /// whatever rectangle is being rendered — never stored as pixels, so it
+    /// survives any number of transforms without resampling damage.
+    Shape {
+        #[serde(flatten)]
+        shape: Box<super::shape::ShapeContent>,
+    },
 }
 
 impl LayerContent {
     pub const fn kind(&self) -> LayerKind {
         match self {
+            Self::Shape { .. } => LayerKind::Shape,
             Self::Pixel { .. } => LayerKind::Pixel,
             Self::Group { .. } => LayerKind::Group,
             Self::Adjustment { .. } => LayerKind::Adjustment,
@@ -88,6 +101,7 @@ pub enum LayerKind {
     Pixel,
     Group,
     Adjustment,
+    Shape,
 }
 
 impl LayerKind {
@@ -96,6 +110,7 @@ impl LayerKind {
             Self::Pixel => "pixel",
             Self::Group => "group",
             Self::Adjustment => "adjustment",
+            Self::Shape => "shape",
         }
     }
 }
@@ -263,6 +278,7 @@ impl Layer {
         }
 
         match &self.content {
+            LayerContent::Shape { shape } => shape.validate()?,
             LayerContent::Pixel {
                 pixel_id,
                 width,

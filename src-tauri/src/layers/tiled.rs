@@ -718,6 +718,9 @@ fn composite_onto(
                     cross_fade(canvas, &reworked, layer, context)?;
                 }
             }
+            LayerContent::Shape { shape } => {
+                draw_shape(canvas, shape, layer, context)?;
+            }
             LayerContent::Adjustment { operation } => {
                 let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
                 mix_adjustment(canvas, &adjusted, layer, context)?;
@@ -725,6 +728,107 @@ fn composite_onto(
         }
     }
     high_precision::check_cancel(context.options.cancel)
+}
+
+/// Draws a shape layer into `canvas`, which holds `region` of the render canvas.
+///
+/// The geometry is mapped into device space and rasterised there, so a shape is
+/// never resampled: scaling one up draws it again at the new size rather than
+/// enlarging pixels. The resulting coverage goes through the same mask, opacity
+/// and blend path as every other layer.
+fn draw_shape(
+    canvas: &mut FloatImage,
+    shape: &crate::layers::shape::ShapeContent,
+    layer: &Layer,
+    context: &Context<'_>,
+) -> Result<(), AppError> {
+    let scale = context.options.scale;
+    let transform = render_transform(&layer.transform, scale);
+    let (canvas_width, canvas_height) = (context.canvas_width, context.canvas_height);
+    // Shape coordinates are document coordinates, so the render scale is
+    // applied first and the layer transform is then taken in the scaled frame,
+    // exactly as it is for a pixel layer's bounds.
+    let to_device = |(x, y): (f32, f32)| -> (f32, f32) {
+        let scaled = ((f64::from(x) * scale) as f32, (f64::from(y) * scale) as f32);
+        transform.forward(scaled, canvas_width, canvas_height)
+    };
+    let region = context.region;
+    let Some((colours, coverage)) = crate::layers::shape::render_shape(
+        shape,
+        to_device,
+        region.x as i32,
+        region.y as i32,
+        region.width,
+        region.height,
+    )?
+    else {
+        return Ok(());
+    };
+
+    let mask = decoded_mask(layer)?;
+    let inverted = mask_inverted(layer);
+    for y in 0..region.height {
+        high_precision::check_cancel(context.options.cancel)?;
+        for x in 0..region.width {
+            let index = (y * region.width + x) as usize;
+            if coverage[index] <= 0.0 {
+                continue;
+            }
+            let mut source = colours.pixels()[index];
+            // A shape has no buffer, so its mask lives on the canvas and is
+            // sampled in document coordinates.
+            source.alpha *= layer.opacity
+                * mask_coverage(
+                    mask.as_ref(),
+                    inverted,
+                    context.document_x(x) as f32,
+                    context.document_y(y) as f32,
+                    canvas_width,
+                    canvas_height,
+                    layer.transform.interpolation,
+                );
+            if source.alpha <= 0.0 {
+                continue;
+            }
+            canvas.pixels_mut()[index] =
+                source_over(canvas.pixels()[index], source, layer.blend_mode);
+        }
+    }
+    Ok(())
+}
+
+/// Draws a shape over a whole canvas, for the full-frame reference renderer.
+///
+/// A thin wrapper so `layers::linear` and the tiled path share one shape
+/// implementation. Two of them would be two things to keep identical, and one
+/// of those two is the oracle the other is checked against.
+pub(super) fn draw_shape_full_frame(
+    canvas: &mut FloatImage,
+    shape: &crate::layers::shape::ShapeContent,
+    layer: &Layer,
+    options: RenderOptions<'_>,
+) -> Result<(), AppError> {
+    let (width, height) = canvas.dimensions();
+    let context = Context {
+        source: &EmptySource,
+        options,
+        canvas_width: width,
+        canvas_height: height,
+        region: Region::whole(width, height),
+    };
+    draw_shape(canvas, shape, layer, &context)
+}
+
+/// A source that resolves nothing, for contexts where no pixel buffer is used.
+///
+/// Drawing a shape needs a `Context` for its region and options, and a shape
+/// has no pixel source; refusing every identifier is the honest implementation.
+struct EmptySource;
+
+impl PixelSource for EmptySource {
+    fn resolve(&self, pixel_id: &str) -> Result<Arc<image::RgbaImage>, AppError> {
+        Err(AppError::LayerPixelsMissing(pixel_id.to_string()))
+    }
 }
 
 /// The part of the canvas an isolated group must cover for this rectangle.

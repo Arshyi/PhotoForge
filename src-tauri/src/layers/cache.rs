@@ -435,6 +435,17 @@ fn digest_visible_sources(
         return Ok(());
     }
     match &layer.content {
+        LayerContent::Shape { shape } => {
+            // A shape's identity is entirely in its own description: geometry,
+            // paint and rule. There is no external buffer to fingerprint, so
+            // serialising it is both necessary and sufficient.
+            hasher.update(b"shape-content");
+            let encoded = serde_json::to_vec(shape.as_ref()).map_err(|_| {
+                AppError::InvalidLayerDocument("a shape could not be digested".into())
+            })?;
+            hasher.update((encoded.len() as u64).to_le_bytes());
+            hasher.update(&encoded);
+        }
         LayerContent::Pixel { pixel_id, .. } => {
             hasher.update(b"pixel-source");
             hasher.update((pixel_id.len() as u64).to_le_bytes());
@@ -493,6 +504,49 @@ fn influence_of(
         // Bounding that properly would mean tracking what is beneath it, which
         // is exactly the kind of narrowing this module refuses to guess at.
         LayerContent::Adjustment { .. } => Influence::Everywhere,
+        LayerContent::Shape { shape } => {
+            // A shape reaches exactly as far as it paints, which is what makes
+            // moving one invalidate the tiles it left and the tiles it arrived
+            // at, and nothing else.
+            let Some((min_x, min_y, max_x, max_y)) = shape.untransformed_bounds() else {
+                return Influence::Nowhere;
+            };
+            let scaled = |v: f32| (f64::from(v) * scale) as f32;
+            let corners = [
+                (scaled(min_x), scaled(min_y)),
+                (scaled(max_x), scaled(min_y)),
+                (scaled(min_x), scaled(max_y)),
+                (scaled(max_x), scaled(max_y)),
+            ];
+            let (mut low_x, mut low_y) = (f32::MAX, f32::MAX);
+            let (mut high_x, mut high_y) = (f32::MIN, f32::MIN);
+            for (x, y) in corners {
+                let (fx, fy) = transform.forward((x, y), canvas.width, canvas.height);
+                if !fx.is_finite() || !fy.is_finite() {
+                    return Influence::Everywhere;
+                }
+                low_x = low_x.min(fx);
+                low_y = low_y.min(fy);
+                high_x = high_x.max(fx);
+                high_y = high_y.max(fy);
+            }
+            let x = low_x.floor().max(0.0) as u32;
+            let y = low_y.floor().max(0.0) as u32;
+            let right = (high_x.ceil().max(0.0) as u64 + 1).min(u64::from(canvas.width));
+            let bottom = (high_y.ceil().max(0.0) as u64 + 1).min(u64::from(canvas.height));
+            if u64::from(x) >= right || u64::from(y) >= bottom {
+                return Influence::Nowhere;
+            }
+            Influence::Within(
+                Region::new(
+                    x,
+                    y,
+                    (right - u64::from(x)) as u32,
+                    (bottom - u64::from(y)) as u32,
+                )
+                .expanded(halo, canvas),
+            )
+        }
         LayerContent::Pixel { pixel_id, .. } => {
             // The renderer bounds this layer by the resolved buffer's size. If
             // that size is unknown the layer could be larger than the canvas

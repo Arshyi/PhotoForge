@@ -13,6 +13,7 @@ mod model;
 mod project;
 mod recovery;
 mod selection;
+pub mod shape;
 mod store;
 pub mod tiled;
 pub mod tiles;
@@ -46,6 +47,7 @@ pub use recovery::{
 pub use selection::{
     intersect_with_layer_bounds, layer_mask_to_selection, mask_space, selection_to_layer_mask,
 };
+pub use shape::{ShapeColor, ShapeContent};
 pub use store::{preview_dimensions, LayerPixelStore, ResolvedPixels, PREVIEW_MAX_DIMENSION};
 pub use tiled::{
     render_document_streaming, render_document_streaming_cached, render_document_tiled,

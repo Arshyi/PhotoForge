@@ -405,7 +405,10 @@ fn inspect_stack(layers: &[Layer], scale: f64) -> StackDependency {
                     result.through = result.through.saturating_add(child.through);
                 }
             }
-            LayerContent::Pixel { .. } => {}
+            // A shape is rasterised directly into the rectangle being
+            // rendered and reads no neighbouring pixels, so it needs no halo —
+            // the same as a pixel layer.
+            LayerContent::Shape { .. } | LayerContent::Pixel { .. } => {}
         }
     }
     result

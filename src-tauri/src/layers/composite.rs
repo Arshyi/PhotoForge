@@ -202,6 +202,17 @@ fn composite_onto(
                 let buffer = context.source.resolve(pixel_id)?;
                 draw_source(backdrop, buffer.as_ref(), layer, context)?;
             }
+            LayerContent::Shape { .. } => {
+                // The legacy encoded-8-bit renderer predates the linear
+                // pipeline and is kept working for pre-0.10.0 documents rather
+                // than extended. A shape's antialiased coverage is float, and
+                // compositing it through an 8-bit backdrop would throw that
+                // away silently; a document containing one is a 0.13.0 document
+                // and uses the high-precision renderer.
+                return Err(AppError::InvalidLayerDocument(
+                    "shape layers require a high-precision document".into(),
+                ));
+            }
             LayerContent::Group { children, isolated } => {
                 if children.is_empty() {
                     continue;
