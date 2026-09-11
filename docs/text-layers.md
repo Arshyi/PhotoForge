@@ -189,9 +189,10 @@ network.
 
 ## What is not implemented
 
-* **No on-canvas text editing or caret UI.** `caret_position` maps a byte offset
-  to a document position, including across bidirectional reordering, but no tool
-  drives it yet; text is edited through the panel.
+* **No full caret, hit-testing, or selection UI.** The canvas editor supports
+  click-to-place and a bounded modal text edit; `caret_position` is available
+  for future precise caret and selection interaction. Text can also be edited
+  through the panel.
 * **No text-on-a-path, no warped text.**
 * **No OpenType feature or variable-axis controls.**
 * **No vertical writing modes.**

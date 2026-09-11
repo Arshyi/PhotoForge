@@ -1,24 +1,23 @@
 # Layers
 
-PhotoForge 0.8.0 turns the editor into a layer-based, non-destructive system.
+PhotoForge 0.13.0 turns the editor into a layer-based, non-destructive system.
 This document describes the layer model, what each layer type does, how existing
 tools interact with layers, and what is deliberately out of scope.
 
 For the rendering mathematics see [compositing.md](compositing.md); for the
 on-disk format see [project-format.md](project-format.md).
 
-## 2026-09-04 continuation — 0.8.2 working source
+## 2026-09-11 continuation — 0.13.0 working source
 
-This guide includes current unbuilt 0.8.2 source changes continued from Claude's
-work. The available 0.8.1 packages and earlier benchmark/browser records do not
-contain or verify all of these changes. The current source-level evidence is
-722 Rust unit tests plus 39 IPC/integration tests passing, clean Rust formatting
-and Clippy, a successful Rust release build, and a clean `npx tsc --noEmit`.
-The frontend Vite/Svelte check and Vitest rerun is currently blocked in this
-sandbox by esbuild's directory-access denial; an earlier escalated run passed
-50 files and 814 tests before the latest merge-safety tests were added.
-That evidence is source-level, not packaged-app acceptance. Native Windows
-GUI/DPI acceptance, elevated MSI testing, and trusted signing are not claimed.
+This guide includes the current Phase 13 source continued from the previous
+handoffs. The available 0.12.0 packages and earlier browser records do not
+contain or verify all of these changes. Current source-level evidence is the
+complete offline Rust suite (1,068 library tests plus all integration suites),
+clean Rust formatting and Clippy, and clean TypeScript and direct Svelte-parser
+gates. The frontend Vite/Vitest/svelte-check/build commands are blocked in this
+sandbox by esbuild's directory-access denial before test execution. That
+evidence is source-level, not packaged-app acceptance. Native Windows GUI/DPI
+acceptance, elevated MSI testing, and trusted signing are not claimed.
 
 Automated real-App tests with mocked Tauri calls now cover correct backend
 project identities, zero-operation project compositing, replacement-buffer
@@ -37,6 +36,7 @@ LayerDocument
 ├── schemaVersion      1
 ├── canvasWidth/Height document canvas, independent of any layer's size
 ├── layers[]           root stack; index 0 is the BOTTOM
+├── smartSources       shared source stacks for smart-object instances
 └── activeLayerId      stable identifier, never an index
 ```
 
@@ -105,13 +105,22 @@ They carry the same identifier, visibility, lock, opacity, blend mode, transform
 and mask as every other layer, they nest in groups, and they composite through
 the same path. Neither becomes pixels except through an explicit rasterize.
 
-### Types designed for but not implemented
+### Smart-object layer (0.13.0)
 
-Smart-object/linked, procedural, and neural layers are **not** implemented. The
-model is shaped so that adding one means adding a `LayerContent` variant and a
-compositor branch, without changing the tree, the mask model, transforms,
-history, or the project container — which is exactly what shape and text layers
-did in 0.13.0. No stub or partial implementation of the remaining kinds ships.
+A smart-object layer is an instance of an editable source stack held in the
+document's `smartSources` registry. The source is composed at its native size
+and the instance's transform is applied to a fresh immutable composite on every
+render, so scaling down and back up does not resample the source. Several
+instances may share one source; editing the source updates all of them while
+each instance keeps its own placement, opacity, blend mode, visibility, lock,
+and mask. Use **Independent copy** when a separate source is wanted. A source
+may carry an inert local-file link for explicit hash checking and relinking;
+opening a project never reads that path. See [smart-objects.md](smart-objects.md).
+
+The model is shaped so that adding future kinds means adding a `LayerContent`
+variant and a compositor branch, without changing the tree, mask model,
+transforms, history, or project container. Procedural and neural layers remain
+out of scope.
 
 ## Layer properties
 
@@ -363,16 +372,16 @@ export, and fabricated identifiers. Both current backend planners still emit
 empty layer-step lists. Automatic natural-language layer-action generation is
 not implemented; validation/application support is not generation support.
 
-## Known limitations, including the 0.8.2 continuation
+## Known limitations, including the 0.13.0 continuation
 
 - **Blending is not linear-light and PhotoForge is not colour managed.** See
   [compositing.md](compositing.md#colour-space-honestly).
 - **Compositing is CPU-only.** There is no GPU acceleration in this release.
 - **Many translucent or blended layers have recorded latency.** See
-  [phase-8-results.md](phase-8-results.md) for historical measurements; changed
-  0.8.2 source has not yet been benchmarked as a release.
+  [phase-8-results.md](phase-8-results.md) for historical measurements; the
+  current 0.13.0 source has not yet been benchmarked as a packaged release.
 - **No PSD support.** PhotoForge cannot read or write Photoshop documents.
-- Text, vector, smart-object, procedural, and neural layers are not implemented.
+- Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is
   trimmed back, because only siblings can be grouped.

@@ -2,11 +2,11 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through Phase 12 restoration and
-optional local inference. The target version is **0.12.0**. See
-[Phase 12 results](docs/phase-12-results.md) for current verification and release
-limits; Phase 10 remains the precision and colour baseline and Phase 11 the
-render baseline.
+This repository contains the Phase 0 foundation through Phase 13 semantic layer
+editing and optional local inference. The target version is **0.13.0**. See
+[Phase 13 results](docs/phase-13-results.md) for current verification and
+release limits; Phase 10 remains the precision and colour baseline and Phase 11
+the tiled-render baseline.
 
 ## Restoration (Phase 12)
 
@@ -86,10 +86,11 @@ would exceed those budgets. See
 [docs/raw-development.md](docs/raw-development.md) and
 [docs/color-pipeline.md](docs/color-pipeline.md).
 
-## Layers and non-destructive editing (0.8.0 baseline, 0.8.2 continuation)
+## Layers and non-destructive editing (0.13.0; 0.8.x baseline retained)
 
 PhotoForge is now a layer-based editor. Documents hold a real layer tree — pixel
-layers, nestable groups, and parametric adjustment layers — composited by a
+layers, nestable groups, parametric adjustments, editable shapes and text, and
+shared smart-object instances — composited by a
 deterministic renderer with sixteen blend modes, correct straight-alpha
 compositing, per-layer non-destructive transforms, and layer masks that reuse
 the existing Phase 7 mask engine unchanged.
@@ -121,16 +122,23 @@ the existing Phase 7 mask engine unchanged.
 - **Batch rendering of `.photoforge` projects** without modifying the project
   file
 - **Sibling multi-selection and grouping** in the Layers panel
+- **Editable vector shapes and text** with explicit rasterization when pixels
+  are wanted
+- **Smart objects** with shared native-size source stacks, nested validation,
+  independent copies, explicit local link checks, and relinking
 
 Opening an ordinary photo produces a single background layer in the linear
 document renderer. Older byte projects keep their compatibility path.
 See [docs/layers.md](docs/layers.md),
 [docs/compositing.md](docs/compositing.md), and
-[docs/project-format.md](docs/project-format.md).
+[docs/project-format.md](docs/project-format.md). The smart-object boundary is
+documented in [docs/smart-objects.md](docs/smart-objects.md).
 
 PhotoForge does not support PSD, general GPU compositing, general TIFF import, CMYK,
 printer proofing or proprietary RAW formats. Earlier phase reports remain
-historical evidence; [Phase 11 results](docs/phase-11-results.md) records current limits.
+historical evidence; [Phase 13 results](docs/phase-13-results.md) records current
+verification, the packaged 0.13.0 artifacts and their checksums, and what is
+still not claimed.
 
 ## What works
 
@@ -257,6 +265,7 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [Layers](docs/layers.md)
 - [Vector shape layers](docs/vector-layers.md)
 - [Text layers](docs/text-layers.md)
+- [Smart objects](docs/smart-objects.md)
 - [Compositing](docs/compositing.md)
 - [Project format](docs/project-format.md)
 - [Phase 8 results](docs/phase-8-results.md)
@@ -268,12 +277,14 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 - [GPU and tiled rendering](docs/gpu-rendering.md)
 - [Phase 11 results](docs/phase-11-results.md)
 - [Phase 12 results](docs/phase-12-results.md)
+- [Phase 13 results](docs/phase-13-results.md)
 
 ## Honest scope
 
-PhotoForge 0.8.0 adds deterministic local layers, editable projects, bounded local
-recovery, layer-aware workflows, and project batch rendering while preserving the
-Phase 7.1 mask boundary. Rule Planner remains the default; optional Ollama remains
+PhotoForge 0.13.0 adds deterministic local layers, editable projects, bounded local
+recovery, layer-aware workflows, semantic text/vector layers, bounded smart
+objects, and project batch rendering while preserving the Phase 7.1 mask
+boundary. Rule Planner remains the default; optional Ollama remains
 a text-only local planning adapter and receives no image, mask, layer tree, or
 path. The Deterministic Engine remains the only component that changes pixels.
 PhotoForge does not install or download models, execute model-supplied code, call
@@ -284,9 +295,10 @@ Phase 10 adds float compositing, RGB ICC input, sRGB/P3/Adobe RGB output and
 batch RAW. Phase 11 adds bounded CPU tiles, an in-memory render cache, and
 optional Vulkan acceleration for eligible wide Gaussian blur only. Arbitrary
 output ICC, printer proofing, PSD, general GPU compositing,
-semantic selection, OCR, neural restoration, super-resolution, inpainting
-and generative editing remain outside this release. Native/package validation
-limits are listed separately in the Phase 11 report.
+semantic selection, OCR, neural restoration, super-resolution, inpainting,
+generative editing, procedural/neural layer kinds, PSD, and general GPU
+compositing remain outside this release. Native/package validation limits are
+listed separately in the Phase 13 report.
 
 ## License
 

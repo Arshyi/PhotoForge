@@ -20,6 +20,19 @@ because it is the oracle the tiled path is checked against and two
 implementations would be two things to keep identical. See
 [vector-layers.md](vector-layers.md) and [text-layers.md](text-layers.md).
 
+`layers/smart.rs` adds the Phase 13 source registry and smart-object instances.
+An instance stores only a source identifier; the source owns an ordinary layer
+stack and is composed once at native size before the instance transform is
+applied. Shared instances therefore remain linked to the same editable content
+without sharing transforms, opacity, blend mode, or masks. Nested sources are
+validated as a bounded DAG, then lowered to immutable native float composites
+for the render. The outer renderer still tiles and streams its output, while a
+source composite is currently a deliberately bounded full-frame CPU fallback;
+it is reported in `TiledStats` and is not an out-of-core smart-source claim.
+Links are inert metadata until an explicit Check Links or Relink action. A link
+stores an absolute local path, byte count, and SHA-256 digest; loading a project
+never follows that path. See [smart-objects.md](smart-objects.md).
+
 ## Phase 10 typed precision boundary
 
 `src-tauri/src/color.rs` holds the bounded `FloatImage` representation. Encoded

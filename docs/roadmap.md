@@ -110,7 +110,7 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Batch rendering of `.photoforge` projects without modifying their source files
 - Sibling multi-selection and grouping in the Layers panel
 - Deterministic row-band compositor parallelism across at most eight CPU threads
-- Not implemented: pass-through groups, GPU acceleration, colour management, PSD support, text/vector/smart-object/procedural/neural layers
+- Not implemented: pass-through groups, GPU acceleration, colour management, PSD support, procedural/neural layers
 
 ## Phase 9 — RAW development and high-precision colour (0.9.0, delivered)
 
@@ -133,6 +133,27 @@ Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighte
 - Not implemented: formats other than DNG (a licensing constraint), sensors
   above 40 megapixels, float compositing, ICC profiles, Display P3, Adobe RGB,
   and batch RAW development
+
+## Phase 13 — Semantic layers and smart objects (0.13.0, source-complete)
+
+- Editable text and vector shape layers share one float-coverage rasteriser and
+  remain parametric until an explicit rasterize action
+- Smart-object instances reference bounded, editable source layer stacks held
+  in a document registry; shared instances update together and Independent copy
+  creates a separate source dependency graph
+- Native-size source compositing supports nested sources, masks, transforms,
+  tiled output, streamed output, deterministic cache invalidation, and bounded
+  full-frame CPU fallback for each required source
+- Project save/load, recovery, undo/redo, thumbnails, merge, flatten, and export
+  preserve or explicitly bake semantic content with fail-closed validation
+- Linked sources record a local path, size, and SHA-256 digest; links are never
+  followed on open and are checked/relinked only by explicit user actions
+- Blank high-precision documents and semantic authoring controls are available
+  from the desktop UI
+
+The Rust and frontend source gates pass, including svelte-check, Vitest and the
+Vite production build. Native packaged GUI/DPI/UAC/signing acceptance is not
+claimed; see [Phase 13 results](phase-13-results.md).
 
 ## Later, optional AI work
 

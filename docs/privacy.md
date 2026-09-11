@@ -52,9 +52,9 @@ project save and load are entirely local and deterministic. Phase 8 adds no
 network request, telemetry, account, cloud autosave, model download, neural
 inference, or generative feature.
 
-## Phase 13 text and vector layers
+## Phase 13 semantic layers and smart links
 
-Text and shape layers add no network access. PhotoForge reads the fonts already
+Text, shape, and smart-object layers add no network access. PhotoForge reads the fonts already
 installed on the machine through a pure-Rust discovery path; it downloads no
 font, contacts no font service, and bundles none of its own — copying a face out
 of Windows into an installer would be redistributing someone else's licensed
@@ -63,12 +63,14 @@ sent nowhere.
 
 `.photoforge` project files contain the canvas, the layer tree, layer pixel data
 as embedded PNGs, mask coverage as embedded PNGs, adjustment parameters, shape
-geometry, text characters and their requested font names, layer names and
-timestamps, and the document operation pipeline. They contain no
-source file path, no credentials, no code, no command, and no URL. Reading one
-performs no network access, executable loading, script execution, plugin
-loading, or shell command; every payload is a bounded PNG decoded through the
-same limits as an ordinary image import.
+geometry, text characters and their requested font names, smart-source stacks,
+and the document operation pipeline. A linked smart source additionally stores
+the user-selected local path, byte count, and SHA-256 digest; that metadata is
+inert until an explicit Check Links or Relink action. Projects contain no
+credentials, code, command, or URL. Reading one performs no network access,
+executable loading, script execution, plugin loading, or shell command; every
+embedded payload is bounded and decoded through the same limits as an ordinary
+image import.
 
 Projects are written only to a location the user picks through the native save
 dialog, and only with the `.photoforge` extension. Saving is atomic — a
@@ -144,7 +146,7 @@ Local model discovery reads file names, extensions, sizes, and paths in explicit
 
 Any future cloud integration must be visibly identified, disabled by default, and explicitly opted into. Any future local model download must show its source, size, resource requirements, and obtain approval before downloading. See [local-ai-privacy.md](local-ai-privacy.md) for the focused policy.
 
-## Local inference (0.12.0)
+## Local inference (0.13.0)
 
 PhotoForge can run a neural model **you install yourself**. It ships none and
 downloads none — not on first run, not on first use of a capability, not ever.

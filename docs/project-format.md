@@ -59,13 +59,13 @@ fail immediately instead of decoding into nonsense.
 
 ```json
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "application": "PhotoForge",
-  "applicationVersion": "0.8.0",
+  "applicationVersion": "0.13.0",
   "createdAt": "...",
   "modifiedAt": "...",
   "document": { "schemaVersion": 1, "canvasWidth": 0, "canvasHeight": 0,
-                "layers": [], "activeLayerId": null },
+                "layers": [], "smartSources": {}, "activeLayerId": null },
   "masks":  [ { "layerId": "...", "entry": "masks/....png",
                 "width": 0, "height": 0, "enabled": true, "inverted": false } ],
   "pixels": [ { "pixelId": "...", "entry": "layers/....png",
@@ -96,7 +96,10 @@ pipeline; the writing application version; and creation and modification times.
 Since 0.13.0 it also preserves **semantic layer content**: a shape layer's
 geometry, fill, stroke and fill rule, and a text layer's characters, requested
 font family, size, weight, style, alignment, line height, letter spacing,
-origin, wrapping width and paint.
+origin, wrapping width and paint. Smart-object instances preserve their source
+identifier, while `smartSources` preserves each source's native dimensions,
+editable layer stack, and optional inert local link (path, byte count, and
+SHA-256 digest).
 
 Text is stored as characters, never as glyph indices and never as a rendered
 bitmap. A glyph index names a slot in one font file on one machine, so a project
@@ -107,8 +110,9 @@ the intended setting rather than a record of another machine's gap. A project
 names the fonts it wants; it does not carry them.
 
 A project never stores only flattened pixels. Exporting a flattened image does
-not flatten the project, and rendering a document never rasterizes its text or
-shape layers.
+not flatten the project, and rendering a document never rasterizes its text,
+shape, or smart-object layers. Smart source composites are render-time buffers,
+not replacement content in the manifest.
 
 ## Entry names
 
