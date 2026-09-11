@@ -182,7 +182,7 @@ async function walk(
         if (backend) assertPixels(result, current.canvasWidth, current.canvasHeight);
         current = createDocument(current.canvasWidth, current.canvasHeight, [
           createPixelLayer('Background', result.pixelId, result.width, result.height)
-        ]);
+        ], current.precision ?? 'legacy_srgb8');
         break;
       }
       case 'export_composite':

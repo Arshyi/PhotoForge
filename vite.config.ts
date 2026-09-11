@@ -9,6 +9,12 @@ export default defineConfig({
   clearScreen: false,
   server: {
     strictPort: true,
+    // Keep Vite's file traversal inside this checkout. Besides being a safer
+    // desktop default, this avoids probing unrelated parent directories when
+    // the app is run from a locked-down Windows profile.
+    fs: {
+      allow: [process.cwd()]
+    },
     watch: {
       ignored: ['**/src-tauri/**']
     }

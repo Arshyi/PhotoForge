@@ -408,8 +408,10 @@ fn inspect_stack(layers: &[Layer], scale: f64) -> StackDependency {
             // Shapes and text are rasterised directly into the rectangle
             // being rendered and read no neighbouring pixels, so they need no
             // halo — the same as a pixel layer.
-            LayerContent::Shape { .. } | LayerContent::Text { .. } | LayerContent::Pixel { .. } => {
-            }
+            LayerContent::Shape { .. }
+            | LayerContent::Text { .. }
+            | LayerContent::Pixel { .. }
+            | LayerContent::SmartObject { .. } => {}
         }
     }
     result

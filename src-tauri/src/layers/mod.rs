@@ -14,6 +14,7 @@ mod project;
 mod recovery;
 mod selection;
 pub mod shape;
+pub mod smart;
 mod store;
 pub mod text;
 pub mod tiled;
@@ -46,7 +47,8 @@ pub use recovery::{
     RECOVERY_EXTENSION,
 };
 pub use selection::{
-    intersect_with_layer_bounds, layer_mask_to_selection, mask_space, selection_to_layer_mask,
+    intersect_with_layer_bounds, layer_mask_to_selection, mask_geometry_layer, mask_space,
+    selection_to_layer_mask,
 };
 pub use shape::{ShapeColor, ShapeContent};
 pub use store::{preview_dimensions, LayerPixelStore, ResolvedPixels, PREVIEW_MAX_DIMENSION};

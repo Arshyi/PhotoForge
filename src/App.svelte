@@ -141,6 +141,15 @@
   import { developRawLayer, isRawPath, metadataRows } from './lib/utils/raw';
   import type { ColorExportOptions, OpenRawImageResult, RawDevelopmentParameters, RawLayerSource } from './lib/types/editor';
   import LayersPanel from './lib/components/LayersPanel.svelte';
+  import TextPanel from './lib/components/TextPanel.svelte';
+  import ShapePanel from './lib/components/ShapePanel.svelte';
+  import SemanticCanvas from './lib/components/SemanticCanvas.svelte';
+  import SmartObjectPanel from './lib/components/SmartObjectPanel.svelte';
+  import SmartContentsEditor from './lib/components/SmartContentsEditor.svelte';
+  import { sourceDimensions, replaceSmartSourceDocument } from './lib/layers/smart';
+  import { convertLayersToSmartObject, updateSmartSource, inspectSmartLinks, relinkSmartSource, importSmartObject, createBlankLayerDocument } from './lib/layers/commands';
+  import { createTextLayer, createShapeLayer } from './lib/layers/tree';
+  import type { TextContent, ShapeContent, ShapeGeometry } from './lib/layers/types';
   import TransformOverlay from './lib/components/TransformOverlay.svelte';
   import TransformPanel from './lib/components/TransformPanel.svelte';
   import {
@@ -166,6 +175,7 @@
     createDocument,
     createGroupLayer,
     createPixelLayer,
+    duplicateSmartObjectIndependent,
     duplicateLayer,
     eachLayer,
     findLayer,
@@ -214,6 +224,10 @@
   } from './lib/layers/types';
 
   const history = new EditHistory();
+  let semanticTool: 'none' | 'text' | 'rectangle' | 'ellipse' | 'line' | 'polygon' | 'star' = 'none';
+  let textEdit: { id: string; content: TextContent; layer: Layer; isNew: boolean } | null = null;
+  let smartEditing: { sourceId: string; document: LayerDocument; revision: number } | null = null;
+  let smartLinkStatuses: import('./lib/layers/types').SmartLinkStatus[] = [];
   const selectionHistory = new SelectionHistory();
   const layerHistory = new LayerHistory();
   const thumbnailCache = new ThumbnailCache();
@@ -243,6 +257,9 @@
   let exporting = false;
   let settingsOpen = false;
   let settingsPage: 'general' | 'workspace' | 'components' | 'diagnostics' | 'privacy' = 'general';
+  let newDocumentOpen = false;
+  let newDocumentWidth = 1920;
+  let newDocumentHeight = 1080;
   let componentConfigurationRevision = 0;
   let guidedSettings: GuidedSettings = { ...defaultGuidedSettings };
   let toast = '';
@@ -342,9 +359,10 @@
   // Only unlocked pixel layers can be transformed: a group owns no pixels and an
   // adjustment layer already covers the whole canvas.
   $: transformableLayer =
-    selectedLayer && selectedLayer.content.type === 'pixel' && !selectedLayer.locked
+    selectedLayer && !['group', 'adjustment'].includes(selectedLayer.content.type) && !selectedLayer.locked
       ? selectedLayer
       : null;
+  $: transformSize = transformableLayer && layerDocument ? sourceDimensions(transformableLayer, layerDocument) : null;
   // The box follows a drag from the preview; everything else reads the committed
   // transform, so a cancelled gesture leaves nothing behind.
   $: displayedTransform =
@@ -413,7 +431,7 @@
           selectionTool: selectionState.tool,
           settingsOpen,
           // The Refine Selection dialog owns the keyboard while it is open.
-          modalOpen: Boolean(refineOriginalMask),
+          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen),
           bindings: shortcuts
         }
       );
@@ -549,6 +567,57 @@
       opening = false;
     }
     if (chosen) await loadPath(chosen);
+  }
+
+  async function openNewDocument() {
+    if (!allowWorkspaceMutation()) return;
+    newDocumentOpen = true;
+    await tick();
+    document.querySelector<HTMLInputElement>('#new-document-width')?.focus();
+  }
+
+  function closeNewDocument() {
+    if (opening) return;
+    newDocumentOpen = false;
+  }
+
+  async function createNewDocument() {
+    if (!allowWorkspaceMutation()) return;
+    const width = Math.floor(Number(newDocumentWidth));
+    const height = Math.floor(Number(newDocumentHeight));
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+      notify('Canvas width and height must be positive whole numbers.', 'error');
+      return;
+    }
+    if (!confirmDiscardChanges()) return;
+    newDocumentOpen = false;
+    cancelTransformGesture();
+    persistSelectionState();
+    closeRefineState();
+    invalidateGeometryCommits();
+    const ownRequest = ++requestId;
+    activeOpenRequest = ownRequest;
+    opening = true;
+    processing = true;
+    previewCurrent = false;
+    previewQueued = false;
+    if (renderTimer) clearTimeout(renderTimer);
+    try {
+      const result = await createBlankLayerDocument(width, height, ownRequest);
+      if (!result.isCurrent || activeOpenRequest !== ownRequest) return;
+      rawSource = null;
+      rawDevelopment = null;
+      installProject(result, null);
+      projectDirty = true;
+      notify(`Created a ${width} × ${height} blank document`);
+    } catch (error) {
+      if (activeOpenRequest === ownRequest) notify(errorMessage(error), 'error');
+    } finally {
+      if (activeOpenRequest === ownRequest) {
+        opening = false;
+        processing = renderInFlight;
+      }
+    }
   }
 
   async function loadPath(path: string) {
@@ -1073,6 +1142,7 @@
   }
 
   function allowWorkspaceMutation(allowGeometryCoalescing = false): boolean {
+    if (smartEditing) { notify('Save or cancel smart contents before editing the parent document.', 'error'); return false; }
     if (opening || exporting || layerBusy || recoveryBusy) {
       notify('Wait for the current file or layer operation to finish.', 'error');
       return false;
@@ -1098,6 +1168,10 @@
 
   /** Binds the session to a new layer document and clears layer-side caches. */
   function startLayerDocument(next: LayerDocument, path: string | null, createdAt = timestamp()) {
+    semanticTool = 'none';
+    textEdit = null;
+    smartEditing = null;
+    smartLinkStatuses = [];
     layerRevision += 1;
     recoveryPaths = new Set();
     transformPreview = null;
@@ -1139,6 +1213,147 @@
     void refreshThumbnails();
     void releaseUnreferencedPixels();
     return true;
+  }
+
+  function chooseSemanticTool(tool: typeof semanticTool) {
+    if (!allowWorkspaceMutation()) return;
+    if (tool !== 'none' && layerDocument?.precision !== 'linear_srgb_f32') {
+      notify('Convert the document to linear float in Color and precision before adding semantic layers.', 'error');
+      return;
+    }
+    if (extractGeometryOperations(operations).length) {
+      notify('Canvas authoring requires an unrotated, uncropped document pipeline. Reset document geometry first; layer transforms remain supported.', 'error');
+      return;
+    }
+    cancelTransformGesture();
+    transformActive = false;
+    textEdit = null;
+    semanticTool = tool;
+    selectionState = { ...selectionState, tool: 'none' };
+  }
+
+  function beginText(point?: { x: number; y: number }) {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    if (layerDocument.precision !== 'linear_srgb_f32') { notify('Convert to linear float before creating editable text.', 'error'); return; }
+    const existing = !point ? activeLayerOf(layerDocument) : null;
+    if (existing?.locked) return;
+    const layer = existing?.content.type === 'text' ? existing : createTextLayer('Text', '', point?.x ?? 20, point?.y ?? 20, 48);
+    if (layer.content.type !== 'text') return;
+    transformActive = false;
+    semanticTool = 'text';
+    textEdit = { id: layer.id, content: layer.content, layer, isNew: layer !== existing };
+  }
+
+  function commitCanvasText(text: string) {
+    if (!layerDocument || !textEdit || !allowWorkspaceMutation()) return;
+    const draft = textEdit;
+    if (new TextEncoder().encode(text).length > 16_384) { notify('Text is limited to 16 KiB per layer.', 'error'); return; }
+    if (draft.isNew && text.length === 0) { textEdit = null; return; }
+    const content = { ...draft.content, type: 'text' as const, text };
+    const next = draft.isNew
+      ? insertLayer(layerDocument, { ...draft.layer, content }, null, layerDocument.layers.length)
+      : updateLayer(layerDocument, draft.id, (layer) => ({ ...layer, content }));
+    if (commitLayers(next, draft.isNew ? 'Create text layer' : 'Edit text')) textEdit = null;
+  }
+
+  function addShape(geometry: ShapeGeometry) {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    if (layerDocument.precision !== 'linear_srgb_f32') return;
+    const layer = createShapeLayer(geometry.type, geometry);
+    if (layer.content.type === 'shape' && geometry.type === 'line') {
+      layer.content.fill = null;
+      layer.content.stroke = { red: 0, green: 0, blue: 0, alpha: 1 };
+      layer.content.strokeStyle = { width: 2, cap: 'round', join: 'round', miterLimit: 4 };
+    }
+    commitLayers(insertLayer(layerDocument, layer, null, layerDocument.layers.length), 'Create shape layer');
+  }
+
+  function updateText(id: string, content: TextContent) {
+    if (!layerDocument || !allowWorkspaceMutation() || findLayer(layerDocument, id)?.locked) return;
+    commitLayers(updateLayer(layerDocument, id, (layer) => ({ ...layer, content: { ...content, type: 'text' } })), 'Text settings', `text:${id}`);
+  }
+
+  function updateShape(id: string, content: ShapeContent) {
+    if (!layerDocument || !allowWorkspaceMutation() || findLayer(layerDocument, id)?.locked) return;
+    commitLayers(updateLayer(layerDocument, id, (layer) => ({ ...layer, content: { ...content, type: 'shape' } })), 'Shape settings', `shape:${id}`);
+  }
+
+  async function rasterizeSemantic(id: string) {
+    if (!layerDocument || !allowWorkspaceMutation() || findLayer(layerDocument, id)?.locked) return;
+    const source = layerDocument, revision = layerRevision;
+    layerBusy = true;
+    try {
+      const baked = await invoke<import('./lib/layers/types').LayerPixelsResult>('rasterize_semantic_layer', { document: source, layerId: id });
+      if (revision !== layerRevision) return;
+      commitLayers(updateLayer(source, id, (layer) => ({ ...layer, raw: null, transform: resetTransform(), mask: null,
+        content: { type: 'pixel', pixelId: baked.pixelId, width: baked.width, height: baked.height } })), 'Rasterize semantic layer');
+    } catch (error) { notify(errorMessage(error), 'error'); }
+    finally { layerBusy = false; }
+  }
+
+  async function smartMutation(run: (document: LayerDocument) => Promise<LayerDocument>, label: string) {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    const source = layerDocument, revision = layerRevision;
+    layerBusy = true;
+    try {
+      const next = await run(source);
+      if (revision !== layerRevision) { notify('The document changed; this result was not applied.', 'error'); return; }
+      if (commitLayers(next, label)) smartLinkStatuses = [];
+    } catch (error) { notify(errorMessage(error), 'error'); }
+    finally { layerBusy = false; }
+  }
+
+  function editSmart(id: string) {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    const layer = findLayer(layerDocument, id);
+    if (layer?.content.type !== 'smart_object' || layer.locked) return;
+    textEdit = null;
+    semanticTool = 'none';
+    cancelTransformGesture();
+    transformActive = false;
+    smartEditing = { sourceId: layer.content.sourceId, document: layerDocument, revision: layerRevision };
+  }
+
+  async function saveSmartContents(edited: LayerDocument) {
+    if (!smartEditing || smartEditing.revision !== layerRevision || layerBusy) throw new Error('The parent document changed; reopen its smart contents.');
+    const edit = smartEditing;
+    const next = replaceSmartSourceDocument(edit.document, edit.sourceId, edited);
+    layerBusy = true;
+    try {
+      const validated = await updateSmartSource(next, edit.sourceId, next.smartSources![edit.sourceId]);
+      if (smartEditing !== edit || layerRevision !== edit.revision) throw new Error('The parent document changed during validation.');
+      if (!commitLayers(validated, 'Edit smart contents')) throw new Error('The edited contents could not be applied.');
+      smartEditing = null;
+      smartLinkStatuses = [];
+    } finally { layerBusy = false; }
+  }
+
+  async function checkSmartLinks() {
+    if (!layerDocument || !allowWorkspaceMutation()) return;
+    const source = layerDocument, revision = layerRevision;
+    layerBusy = true;
+    try { const result = await inspectSmartLinks(source); if (revision === layerRevision) smartLinkStatuses = result.links; }
+    catch (error) { notify(errorMessage(error), 'error'); }
+    finally { layerBusy = false; }
+  }
+
+  async function relinkSmart(id: string, acceptChanged: boolean) {
+    const layer = layerDocument && findLayer(layerDocument, id);
+    if (layer?.content.type !== 'smart_object' || layer.locked) return;
+    const sourceId = layer.content.sourceId;
+    await smartMutation(async (document) => {
+      const path = await open({ title: acceptChanged ? 'Replace source for all shared instances' : 'Locate the original linked file', multiple: false,
+        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
+      return typeof path === 'string' ? relinkSmartSource(document, sourceId, path, acceptChanged) : document;
+    }, acceptChanged ? 'Replace smart source' : 'Relink smart source');
+  }
+
+  async function placeSmart(linked: boolean) {
+    await smartMutation(async (document) => {
+      const path = await open({ title: linked ? 'Place linked smart image' : 'Place embedded smart image', multiple: false,
+        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
+      return typeof path === 'string' ? importSmartObject(document, path, linked) : document;
+    }, linked ? 'Place linked smart object' : 'Place embedded smart object');
   }
 
   /**
@@ -1350,6 +1565,22 @@
     if (!layer && action !== 'flatten') return;
 
     switch (action) {
+      case 'edit_text': selectLayer(layerId as string); beginText(); return;
+      case 'rasterize_semantic': await rasterizeSemantic(layerId as string); return;
+      case 'convert_smart':
+        await smartMutation((document) => convertLayersToSmartObject(document, selectedLayerIds.length > 1 ? selectedLayerIds : [layerId as string]), 'Convert to smart object'); return;
+      case 'edit_smart': editSmart(layerId as string); return;
+      case 'duplicate_smart_independent': {
+        if (layer?.content.type !== 'smart_object') return;
+        try {
+          const result = duplicateSmartObjectIndependent(document, layer.id);
+          if (!result.layer) return;
+          if (commitLayers(result.document, 'Make independent smart copy')) selectLayer(result.layer.id);
+        } catch (error) {
+          notify(errorMessage(error), 'error');
+        }
+        return;
+      }
       case 'duplicate': {
         const { document: next } = duplicateLayer(document, layerId as string);
         commitLayers(next, 'Duplicate layer');
@@ -1535,7 +1766,7 @@
           const masked = { ...layer, mask: layer.mask };
           const isolated = createDocument(document.canvasWidth, document.canvasHeight, [
             { ...masked, transform: masked.transform, opacity: 1, blendMode: 'normal' }
-          ]);
+          ], document.precision ?? 'legacy_srgb8');
           const baked = await mergeLayerPixels(isolated, [masked.id]);
           commitLayers(
             updateLayer(document, layerId, (entry) => ({
@@ -1573,7 +1804,7 @@
    */
   function transformTarget(): Layer | null {
     const layer = selectedLayer;
-    if (!layer || layer.content.type !== 'pixel' || layer.locked) return null;
+    if (!layer || ['group', 'adjustment'].includes(layer.content.type) || layer.locked) return null;
     return layer;
   }
 
@@ -1584,10 +1815,12 @@
       return;
     }
     if (!transformActive && !transformTarget()) {
-      notify('Select an unlocked pixel layer to transform it.', 'error');
+      notify('Select an unlocked pixel, text, shape or smart layer to transform it.', 'error');
       return;
     }
     cancelTransformGesture();
+    semanticTool = 'none';
+    textEdit = null;
     transformActive = !transformActive;
   }
 
@@ -1637,8 +1870,8 @@
     const document = requireLayerDocument();
     const layer = document ? findLayer(document, layerId) : null;
     if (!document || !layer) return;
-    if (layer.content.type !== 'pixel') {
-      notify('Only pixel layers can be flipped.', 'error');
+    if (['group', 'adjustment'].includes(layer.content.type) || layer.locked) {
+      notify('Select an unlocked pixel, text, shape or smart layer to flip it.', 'error');
       return;
     }
     commitLayers(
@@ -1705,7 +1938,12 @@
         flattened.height
       );
       commitLayers(
-        createDocument(document.canvasWidth, document.canvasHeight, [replacement]),
+        createDocument(
+          document.canvasWidth,
+          document.canvasHeight,
+          [replacement],
+          document.precision ?? 'legacy_srgb8'
+        ),
         'Flatten image'
       );
     } catch (error) {
@@ -1716,6 +1954,7 @@
   }
 
   async function rasterizeTransform(document: LayerDocument, layerId: string) {
+    if (findLayer(document, layerId)?.content.type !== 'pixel') { await rasterizeSemantic(layerId); return; }
     layerBusy = true;
     // A rasterize renders on a worker thread. If the document changed while it
     // ran, the buffer it produced describes a document that no longer exists,
@@ -1939,6 +2178,8 @@
     maskRequestId += 1;
     analysisRequestId += 1;
     analyzing = false;
+    rawSource = null;
+    rawDevelopment = null;
     stopMaskProgress();
     documentId = result.documentId;
     metadata = result.metadata;
@@ -3155,8 +3396,8 @@
   <title>{metadata ? `${metadata.filename} — PhotoForge` : 'PhotoForge'}</title>
 </svelte:head>
 
-<div class="app-shell" inert={settingsOpen} aria-hidden={settingsOpen}>
-  <header class="topbar">
+<div class="app-shell" inert={settingsOpen || Boolean(smartEditing) || newDocumentOpen} aria-hidden={settingsOpen || Boolean(smartEditing) || newDocumentOpen}>
+  <header class="topbar" inert={Boolean(textEdit)}>
     <div class="brand" aria-label="PhotoForge">
       <span class="brand-mark" aria-hidden="true"><b></b><i></i></span>
       <span><strong>Photo</strong>Forge</span>
@@ -3164,6 +3405,7 @@
     </div>
 
     <nav class="primary-actions" aria-label="File actions">
+      <ToolButton label="New" icon="□" disabled={fileMutationBusy} title="Create a blank linear-float document" onclick={openNewDocument} />
       <ToolButton label="Open" icon="＋" primary disabled={fileMutationBusy} onclick={chooseImage} />
       <ToolButton
         label={exporting ? 'Exporting' : 'Export'}
@@ -3224,7 +3466,7 @@
       oncomparisonchange={(value) => (comparisonPosition = value)}
       imageWidth={selectionCanvasWidth}
       imageHeight={selectionCanvasHeight}
-      selectionTool={comparisonUsesSplitView || fileMutationBusy || geometryMutationBusy || transformActive
+      selectionTool={comparisonUsesSplitView || fileMutationBusy || geometryMutationBusy || transformActive || semanticTool !== 'none' || textEdit
         ? 'none'
         : selectionState.tool}
       activeMask={selectionState.activeMask}
@@ -3243,11 +3485,19 @@
       onselectioncancel={() => undefined}
     >
       <div slot="overlay" class="transform-slot">
-        {#if transformActive && transformableLayer && displayedTransform && transformableLayer.content.type === 'pixel' && !comparisonUsesSplitView}
+        {#key documentId}
+          {#if !comparisonUsesSplitView}
+            <SemanticCanvas tool={semanticTool} canvasWidth={layerDocument?.canvasWidth ?? selectionCanvasWidth}
+              canvasHeight={layerDocument?.canvasHeight ?? selectionCanvasHeight}
+              disabled={fileMutationBusy || geometryMutationBusy || selectionBusy || Boolean(smartEditing)} edit={textEdit}
+              ontext={beginText} onshape={addShape} oncommittext={commitCanvasText} oncanceltext={() => textEdit = null} />
+          {/if}
+        {/key}
+        {#if transformActive && transformableLayer && displayedTransform && transformSize && !comparisonUsesSplitView}
           <TransformOverlay
             transform={displayedTransform}
-            layerWidth={transformableLayer.content.width}
-            layerHeight={transformableLayer.content.height}
+            layerWidth={transformSize.width}
+            layerHeight={transformSize.height}
             canvasWidth={layerDocument?.canvasWidth ?? selectionCanvasWidth}
             canvasHeight={layerDocument?.canvasHeight ?? selectionCanvasHeight}
             aspectLocked={transformAspectLocked}
@@ -3261,7 +3511,7 @@
       </div>
     </ImageStage>
 
-    <aside aria-label="Editing controls">
+    <aside aria-label="Editing controls" inert={Boolean(textEdit)}>
       <div class="inspector-title">
         <div>
           <span>Adjustments</span>
@@ -3326,6 +3576,18 @@
         aria-disabled={!metadata || fileMutationBusy}
       >
         {#if layerDocument}
+          <fieldset disabled={fileMutationBusy || geometryMutationBusy || selectionBusy || Boolean(refineOriginalMask)} aria-label="Semantic layer tools">
+            <legend>Text, shapes and smart objects</legend>
+            <label>Canvas tool<select aria-label="Semantic canvas tool" value={semanticTool}
+              on:change={(event) => chooseSemanticTool(event.currentTarget.value as typeof semanticTool)}>
+              <option value="none">Select / other tools</option><option value="text">Text</option>
+              <option value="rectangle">Rectangle / rounded rectangle</option><option value="ellipse">Ellipse</option>
+              <option value="line">Line</option><option value="polygon">Polygon</option><option value="star">Star</option>
+            </select></label>
+            <p>Text: click to place. Shapes: drag to create. Use layer transforms to move, scale and rotate. Requires linear float precision.</p>
+            <button on:click={() => placeSmart(false)}>Place embedded smart image</button>
+            <button on:click={() => placeSmart(true)}>Place linked smart image</button>
+          </fieldset>
           <LayersPanel
             document={layerDocument}
             thumbnails={layerThumbnails}
@@ -3343,14 +3605,30 @@
             onreorder={reorderLayer}
             oncreate={createLayer}
             onaction={handleLayerAction}
+            {smartLinkStatuses}
             ontargetchange={(target) => (editTarget = target)}
             onadjustmenttargetchange={(target) => (adjustmentTarget = target)}
           />
-          {#if transformableLayer && transformableLayer.content.type === 'pixel'}
+          {#if selectedLayer?.content.type === 'text'}
+            <TextPanel content={selectedLayer.content} layerId={selectedLayer.id}
+              disabled={selectedLayer.locked || fileMutationBusy || selectionBusy || geometryMutationBusy}
+              onchange={updateText} onrasterize={rasterizeSemantic} />
+            <button disabled={selectedLayer.locked || fileMutationBusy} on:click={() => beginText()}>Edit text on canvas</button>
+          {:else if selectedLayer?.content.type === 'shape'}
+            <ShapePanel content={selectedLayer.content} disabled={selectedLayer.locked || fileMutationBusy || selectionBusy || geometryMutationBusy}
+              onchange={(content) => updateShape(selectedLayer!.id, content)} onrasterize={() => rasterizeSemantic(selectedLayer!.id)} />
+          {:else if selectedLayer?.content.type === 'smart_object'}
+            <SmartObjectPanel document={layerDocument} layer={selectedLayer} disabled={selectionBusy || geometryMutationBusy} busy={fileMutationBusy}
+              linkStatus={smartLinkStatuses.find((entry) => selectedLayer?.content.type === 'smart_object' && entry.sourceId === selectedLayer.content.sourceId) ?? null}
+              onedit={() => editSmart(selectedLayer!.id)} onchecklinks={checkSmartLinks}
+              onrelink={(accept) => relinkSmart(selectedLayer!.id, accept)} onrasterize={() => rasterizeSemantic(selectedLayer!.id)}
+              onduplicateindependent={() => handleLayerAction('duplicate_smart_independent', selectedLayer!.id)} />
+          {/if}
+          {#if transformableLayer && transformSize}
             <TransformPanel
               transform={displayedTransform ?? transformableLayer.transform}
-              layerWidth={transformableLayer.content.width}
-              layerHeight={transformableLayer.content.height}
+              layerWidth={transformSize.width}
+              layerHeight={transformSize.height}
               canvasWidth={layerDocument.canvasWidth}
               canvasHeight={layerDocument.canvasHeight}
               layerName={transformableLayer.name}
@@ -3610,6 +3888,42 @@
   <div class="toast" class:error={toastKind === 'error'} role="status">
     <span>{toastKind === 'error' ? '!' : '✓'}</span>{toast}
     <button type="button" aria-label="Dismiss message" on:click={() => (toast = '')}>×</button>
+  </div>
+{/if}
+
+{#if smartEditing}
+  {#key smartEditing.sourceId}
+    <SmartContentsEditor parentDocument={smartEditing.document} sourceId={smartEditing.sourceId} {documentId}
+      nextRequestId={() => ++requestId} onsave={saveSmartContents}
+      oncancel={() => { smartEditing = null; schedulePreview(); }} />
+  {/key}
+{/if}
+
+{#if newDocumentOpen}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    on:click={(event) => event.target === event.currentTarget && closeNewDocument()}
+  >
+    <dialog open class="modal new-document-modal" aria-labelledby="new-document-title">
+      <div class="modal-heading">
+        <div><span>New document</span><h1 id="new-document-title">Start with a blank canvas</h1></div>
+        <button type="button" aria-label="Close new document dialog" on:click={closeNewDocument}>×</button>
+      </div>
+      <p class="modal-footnote">The canvas is created as linear-float content so text, shapes, masks and smart objects remain editable.</p>
+      <form on:submit|preventDefault={createNewDocument}>
+        <label>Width (px)
+          <input id="new-document-width" type="number" min="1" max="32768" step="1" bind:value={newDocumentWidth} />
+        </label>
+        <label>Height (px)
+          <input type="number" min="1" max="32768" step="1" bind:value={newDocumentHeight} />
+        </label>
+        <div class="modal-actions">
+          <button type="button" on:click={closeNewDocument}>Cancel</button>
+          <button type="submit" class="primary">Create document</button>
+        </div>
+      </form>
+    </dialog>
   </div>
 {/if}
 

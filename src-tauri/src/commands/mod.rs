@@ -9,6 +9,7 @@ mod professional;
 mod raw;
 mod render;
 mod sampling;
+mod smart;
 mod text;
 
 pub use components::{
@@ -23,12 +24,12 @@ pub use editor::{
 pub use inference::{import_inference_model, inference_status, remove_inference_model};
 pub use layers::register_layer_commands;
 pub use layers::{
-    apply_operations_to_layer, create_layer_mask, create_layer_pixels, discard_recovery_snapshot,
-    export_layer_composite, flatten_layer_document, import_layer_image, layer_mask_from_selection,
-    layer_store_report, list_recovery_snapshots, load_layer_project, merge_layer_pixels,
-    plan_layer_workflow, rasterize_layer_transform, render_layer_composite, render_layer_thumbnail,
-    restore_recovery_snapshot, retain_layer_pixels, save_layer_project, selection_from_layer_mask,
-    validate_layer_document, write_recovery_snapshot,
+    apply_operations_to_layer, create_blank_layer_document, create_layer_mask, create_layer_pixels,
+    discard_recovery_snapshot, export_layer_composite, flatten_layer_document, import_layer_image,
+    layer_mask_from_selection, layer_store_report, list_recovery_snapshots, load_layer_project,
+    merge_layer_pixels, plan_layer_workflow, rasterize_layer_transform, render_layer_composite,
+    render_layer_thumbnail, restore_recovery_snapshot, retain_layer_pixels, save_layer_project,
+    selection_from_layer_mask, validate_layer_document, write_recovery_snapshot,
 };
 pub use mask::{
     cancel_mask_operation, color_range_selection, compose_selection_masks, export_mask_file,
@@ -55,6 +56,10 @@ pub use raw::{
 pub use render::{
     clear_render_cache, default_render_cache_budget, get_render_backend_mode, render_diagnostics,
     set_render_backend_mode, set_render_cache_budget,
+};
+pub use smart::{
+    convert_layers_to_smart_object, import_smart_object, inspect_smart_links, relink_smart_source,
+    update_smart_source, SmartLinkStatus, SmartLinksResult,
 };
 pub use text::{
     inspect_document_fonts, list_system_fonts, rasterize_semantic_layer, FontListResult,

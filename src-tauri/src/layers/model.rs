@@ -31,7 +31,7 @@ const fn default_isolated() -> bool {
     true
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_LAYER_ID_CHARS
         && value
@@ -43,7 +43,7 @@ fn valid_identifier(value: &str) -> bool {
 ///
 /// Adding a kind means adding a variant here and a branch in the compositor,
 /// without changing the tree, mask, transform, or project container. Vector
-/// shapes arrived that way in 0.13.0; text and smart objects are still absent.
+/// shapes, text and smart objects arrived that way in 0.13.0.
 ///
 /// Every match over this enum is exhaustive on purpose. An unknown variant read
 /// from a project must fail the document rather than be reinterpreted as pixels,
@@ -89,6 +89,17 @@ pub enum LayerContent {
         #[serde(flatten)]
         text: Box<super::text::TextContent>,
     },
+    /// An instance of content held in the document's smart source registry.
+    ///
+    /// The layer holds only the reference. The content is composed at its own
+    /// native size and this layer's transform is applied to that composite
+    /// afresh on every render, which is what lets an instance be scaled down
+    /// and back up without loss — and what separates a smart object from a
+    /// raster layer that merely remembers a filename.
+    SmartObject {
+        #[serde(flatten)]
+        smart: Box<super::smart::SmartObjectContent>,
+    },
 }
 
 impl LayerContent {
@@ -96,6 +107,7 @@ impl LayerContent {
         match self {
             Self::Shape { .. } => LayerKind::Shape,
             Self::Text { .. } => LayerKind::Text,
+            Self::SmartObject { .. } => LayerKind::SmartObject,
             Self::Pixel { .. } => LayerKind::Pixel,
             Self::Group { .. } => LayerKind::Group,
             Self::Adjustment { .. } => LayerKind::Adjustment,
@@ -111,6 +123,7 @@ pub enum LayerKind {
     Adjustment,
     Shape,
     Text,
+    SmartObject,
 }
 
 impl LayerKind {
@@ -121,6 +134,7 @@ impl LayerKind {
             Self::Adjustment => "adjustment",
             Self::Shape => "shape",
             Self::Text => "text",
+            Self::SmartObject => "smart_object",
         }
     }
 }
@@ -290,6 +304,7 @@ impl Layer {
         match &self.content {
             LayerContent::Shape { shape } => shape.validate()?,
             LayerContent::Text { text } => text.validate()?,
+            LayerContent::SmartObject { smart } => smart.validate()?,
             LayerContent::Pixel {
                 pixel_id,
                 width,
@@ -378,6 +393,14 @@ pub struct LayerDocument {
     pub canvas_height: u32,
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// Content that smart object layers are instances of, keyed by identifier.
+    ///
+    /// Held on the document rather than on the layers so that several instances
+    /// genuinely share one thing: editing the source changes every instance,
+    /// while each instance keeps its own transform, opacity, blend mode and
+    /// mask. Absent in projects written before 0.13.0, which had none.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub smart_sources: super::smart::SmartSources,
     #[serde(default)]
     pub active_layer_id: Option<String>,
 }
@@ -390,6 +413,7 @@ impl LayerDocument {
             canvas_width,
             canvas_height,
             layers: Vec::new(),
+            smart_sources: super::smart::SmartSources::new(),
             active_layer_id: None,
         }
     }
@@ -404,9 +428,26 @@ impl LayerDocument {
 
         let mut seen: HashSet<&str> = HashSet::new();
         let mut count = 0_usize;
-        let mut stack: Vec<(&Layer, usize)> =
-            self.layers.iter().rev().map(|layer| (layer, 1)).collect();
-        while let Some((layer, depth)) = stack.pop() {
+        let mut stack: Vec<(&Layer, usize, u32, u32)> = self
+            .layers
+            .iter()
+            .rev()
+            .map(|layer| (layer, 1, self.canvas_width, self.canvas_height))
+            .collect();
+        // Source trees participate in the same identifier and layer-count
+        // budget. Validate all groups iteratively before traversing the smart
+        // reference graph, including sources that are not currently placed.
+        for source in self.smart_sources.values() {
+            source.validate()?;
+            stack.extend(
+                source
+                    .layers
+                    .iter()
+                    .rev()
+                    .map(|layer| (layer, 1, source.width, source.height)),
+            );
+        }
+        while let Some((layer, depth, canvas_width, canvas_height)) = stack.pop() {
             if depth > MAX_GROUP_DEPTH {
                 return Err(AppError::LayerDepthExceeded {
                     depth,
@@ -427,26 +468,35 @@ impl LayerDocument {
             // A group or adjustment layer has no pixels of its own, so its mask
             // lives in canvas space and has to match the canvas exactly.
             if layer.kind() != LayerKind::Pixel {
+                let (mask_width, mask_height) = match &layer.content {
+                    LayerContent::SmartObject { smart } => self
+                        .smart_sources
+                        .get(&smart.source_id)
+                        .map_or((canvas_width, canvas_height), |s| (s.width, s.height)),
+                    _ => (canvas_width, canvas_height),
+                };
                 if let Some(mask) = &layer.mask {
-                    if (mask.snapshot.width, mask.snapshot.height)
-                        != (self.canvas_width, self.canvas_height)
-                    {
+                    if (mask.snapshot.width, mask.snapshot.height) != (mask_width, mask_height) {
                         return Err(AppError::MaskDimensionMismatch {
                             mask_width: mask.snapshot.width,
                             mask_height: mask.snapshot.height,
-                            image_width: self.canvas_width,
-                            image_height: self.canvas_height,
+                            image_width: mask_width,
+                            image_height: mask_height,
                         });
                     }
                 }
             }
             for child in layer.children().iter().rev() {
-                stack.push((child, depth + 1));
+                stack.push((child, depth + 1, canvas_width, canvas_height));
             }
         }
 
+        // Every smart object has to resolve, and no source may contain itself
+        // at any depth. Checked after the tree so that a malformed layer is
+        // reported as a malformed layer rather than as a broken reference.
+        super::smart::validate_sources(&self.layers, &self.smart_sources)?;
         if let Some(active) = &self.active_layer_id {
-            if !seen.contains(active.as_str()) {
+            if !self.contains(active) {
                 return Err(AppError::LayerNotFound(active.clone()));
             }
         }
@@ -480,18 +530,38 @@ impl LayerDocument {
         self.iter().find(|layer| layer.id == id)
     }
 
+    /// Every stored layer, including each smart source tree exactly once.
+    /// Main-document editing uses `iter`; persistence and resource accounting
+    /// use this iterator so shared instances do not duplicate source content.
+    pub fn iter_all(&self) -> impl Iterator<Item = &Layer> {
+        let mut ordered: Vec<&Layer> = self.iter().collect();
+        let mut source_ids: Vec<_> = self.smart_sources.keys().collect();
+        source_ids.sort_unstable();
+        for id in source_ids {
+            let mut stack: Vec<&Layer> = self.smart_sources[id].layers.iter().rev().collect();
+            while let Some(layer) = stack.pop() {
+                ordered.push(layer);
+                stack.extend(layer.children().iter().rev());
+            }
+        }
+        ordered.into_iter()
+    }
+
     pub fn contains(&self, id: &str) -> bool {
         self.find(id).is_some()
     }
 
     /// Every pixel buffer identifier the document currently references.
     pub fn referenced_pixel_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
+        let mut set: HashSet<String> = self
             .iter()
             .filter_map(|layer| layer.pixel_id().map(str::to_string))
             .collect();
+        // Content inside a smart source is not in the tree, and it still has to
+        // be resolved or every instance of that source renders blank.
+        super::smart::referenced_pixel_ids(&self.smart_sources, &mut set);
+        let mut ids: Vec<String> = set.into_iter().collect();
         ids.sort_unstable();
-        ids.dedup();
         ids
     }
 
@@ -726,6 +796,7 @@ pub(crate) mod fixtures {
             canvas_width: 16,
             canvas_height: 16,
             layers,
+            smart_sources: Default::default(),
             active_layer_id: None,
         }
     }

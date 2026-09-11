@@ -254,6 +254,7 @@ impl LayerPixelStore {
     /// session lock before doing any pixel work.
     pub fn resolve(&self, pixel_ids: &[String], preview: bool) -> Result<ResolvedPixels, AppError> {
         let mut resolved = HashMap::with_capacity(pixel_ids.len());
+        let mut native = HashMap::with_capacity(pixel_ids.len());
         let mut fingerprints = HashMap::with_capacity(pixel_ids.len());
         for id in pixel_ids {
             let stored = self
@@ -271,10 +272,15 @@ impl LayerPixelStore {
                 stored.full_fingerprint
             };
             resolved.insert(id.clone(), buffer);
+            // Smart sources composite in their own native coordinate space,
+            // even when their instances are being drawn in a small preview.
+            // These are shared Arc handles, never another copy of the pixels.
+            native.insert(id.clone(), stored.full.clone());
             fingerprints.insert(id.clone(), fingerprint);
         }
         Ok(ResolvedPixels {
             buffers: resolved,
+            native,
             fingerprints,
             resident_bytes: self.total_bytes(),
         })
@@ -299,6 +305,7 @@ impl LayerPixelStore {
 /// alive without holding the session lock.
 pub struct ResolvedPixels {
     buffers: HashMap<String, PixelBuffer>,
+    native: HashMap<String, PixelBuffer>,
     fingerprints: HashMap<String, [u8; 32]>,
     resident_bytes: u64,
 }
@@ -342,6 +349,13 @@ impl PixelSource for ResolvedPixels {
 
     fn resolve_linear(&self, pixel_id: &str) -> Result<Arc<FloatImage>, AppError> {
         self.buffers
+            .get(pixel_id)
+            .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))?
+            .linear()
+    }
+
+    fn resolve_native_linear(&self, pixel_id: &str) -> Result<Arc<FloatImage>, AppError> {
+        self.native
             .get(pixel_id)
             .ok_or_else(|| AppError::LayerPixelsMissing(pixel_id.to_string()))?
             .linear()

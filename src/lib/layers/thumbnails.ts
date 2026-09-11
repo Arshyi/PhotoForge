@@ -18,11 +18,15 @@ export interface ThumbnailEntry {
  */
 export function thumbnailKey(layer: Layer, document: LayerDocument): string {
   const parts: string[] = [layer.id, document.precision ?? 'legacy_srgb8'];
+  const sourceIds = new Set<string>();
+  const gatherSource = (entry: Layer) => {
+    if (entry.content.type === 'smart_object') sourceIds.add(entry.content.sourceId);
+  };
   const content = layer.content;
   if (content.type === 'pixel') {
     parts.push('p', content.pixelId, String(content.width), String(content.height));
   } else if (content.type === 'adjustment') {
-    parts.push('a', content.operation.type);
+    parts.push('a', JSON.stringify(content.operation));
   } else if (content.type === 'shape' || content.type === 'text') {
     // Semantic content is its own identity: there is no buffer behind it, so
     // everything that could change the thumbnail is in the content itself.
@@ -30,14 +34,18 @@ export function thumbnailKey(layer: Layer, document: LayerDocument): string {
     // would have treated a shape or a text layer as a group with no children
     // and produced the same key for every one of them.
     parts.push(content.type === 'shape' ? 's' : 't', JSON.stringify(content));
+  } else if (content.type === 'smart_object') {
+    parts.push('smart', content.sourceId);
+    sourceIds.add(content.sourceId);
   } else if (content.type === 'group') {
     // A group thumbnail is the composite of its children, so every visible
     // property of every descendant contributes to the key.
-    parts.push('g');
+    parts.push('g', String(content.isolated));
     const stack = [...childrenOf(layer)];
     while (stack.length) {
       const child = stack.pop() as Layer;
       parts.push(childSignature(child));
+      gatherSource(child);
       stack.push(...childrenOf(child));
     }
   } else {
@@ -47,9 +55,27 @@ export function thumbnailKey(layer: Layer, document: LayerDocument): string {
     const unhandled: never = content;
     parts.push('?', JSON.stringify(unhandled));
   }
+  // A source edit invalidates every instance and every enclosing group, even
+  // though none of their layer metadata changed. Traverse each dependency once
+  // so shared instances cannot multiply the work; broken cycles also terminate.
+  const visited = new Set<string>();
+  for (const sourceId of sourceIds) {
+    if (visited.has(sourceId)) continue;
+    visited.add(sourceId);
+    const source = document.smartSources?.[sourceId];
+    if (!source) { parts.push('missing-source', sourceId); continue; }
+    parts.push('source', sourceId, `${source.width}x${source.height}`);
+    const pending = [...source.layers];
+    while (pending.length) {
+      const child = pending.pop()!;
+      parts.push(childSignature(child));
+      gatherSource(child);
+      pending.push(...childrenOf(child));
+    }
+  }
   parts.push(
     layer.visible ? 'v' : '-',
-    layer.opacity.toFixed(3),
+    String(layer.opacity),
     layer.blendMode,
     transformSignature(layer),
     maskSignature(layer),
@@ -66,13 +92,13 @@ function childSignature(layer: Layer): string {
       : content.type === 'adjustment'
         ? JSON.stringify(content.operation)
         : content.type === 'group'
-          ? 'group'
+          ? `group:${content.isolated}`
           : JSON.stringify(content);
   return [
     layer.id,
     identity,
     layer.visible ? 'v' : '-',
-    layer.opacity.toFixed(3),
+    String(layer.opacity),
     layer.blendMode,
     transformSignature(layer),
     maskSignature(layer)

@@ -1,4 +1,4 @@
-use super::model::{Layer, LayerKind};
+use super::model::{Layer, LayerContent, LayerDocument, LayerKind};
 use super::transform::LayerTransform;
 use crate::error::AppError;
 use crate::mask::MaskBitmap;
@@ -36,7 +36,39 @@ pub fn mask_space(layer: &Layer, canvas_width: u32, canvas_height: u32) -> (u32,
         LayerKind::Group | LayerKind::Adjustment | LayerKind::Shape | LayerKind::Text => {
             (canvas_width, canvas_height)
         }
+        // Commands must resolve smart geometry with `mask_geometry_layer`.
+        // An existing mask still supplies a correct read-only local extent.
+        LayerKind::SmartObject => layer
+            .mask
+            .as_ref()
+            .map_or((canvas_width, canvas_height), |mask| {
+                (mask.snapshot.width, mask.snapshot.height)
+            }),
     }
+}
+
+/// Resolves the native coordinate system needed by mask tools without
+/// rendering or modifying semantic content. Smart instance masks follow the
+/// source's dimensions, not the outer canvas dimensions.
+pub fn mask_geometry_layer(document: &LayerDocument, layer: &Layer) -> Result<Layer, AppError> {
+    let mut geometry = layer.clone();
+    if let LayerContent::SmartObject { smart } = &layer.content {
+        let source = document
+            .smart_sources
+            .get(&smart.source_id)
+            .ok_or_else(|| {
+                AppError::InvalidLayerDocument(format!(
+                    "smart source '{}' is missing",
+                    smart.source_id
+                ))
+            })?;
+        geometry.content = LayerContent::Pixel {
+            pixel_id: "mask_geometry_only".into(),
+            width: source.width,
+            height: source.height,
+        };
+    }
+    Ok(geometry)
 }
 
 /// Projects a canvas-space selection into a layer's own mask space.

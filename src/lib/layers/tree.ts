@@ -1,4 +1,5 @@
 import type { BaseEditOperation } from '../types/editor';
+import { validateSmartSources } from './smart';
 import {
   identityTransform,
   LAYER_SCHEMA_VERSION,
@@ -152,7 +153,11 @@ export function textContentOf(layer: Layer): TextContent | null {
 
 /** True for a layer whose content is geometry or characters, not pixels. */
 export function isSemanticLayer(layer: Layer): boolean {
-  return layer.content.type === 'text' || layer.content.type === 'shape';
+  return layer.content.type === 'text' || layer.content.type === 'shape' || layer.content.type === 'smart_object';
+}
+
+export function createSmartObjectLayer(name: string, sourceId: string, now?: Date): Layer {
+  return baseLayer(name, { type: 'smart_object', sourceId }, now);
 }
 
 export function createDocument(
@@ -228,7 +233,10 @@ export function parentOf(document: LayerDocument, id: string): string | null {
 
 export function referencedPixelIds(document: LayerDocument): string[] {
   const ids = new Set<string>();
-  for (const layer of eachLayer(document)) {
+  const sourceLayers = Object.values(document.smartSources ?? {}).flatMap((source) =>
+    eachLayer({ ...document, layers: source.layers })
+  );
+  for (const layer of [...eachLayer(document), ...sourceLayers]) {
     if (layer.content.type === 'pixel') ids.add(layer.content.pixelId);
   }
   return [...ids].sort();
@@ -634,7 +642,50 @@ export function validateDocument(document: LayerDocument): string[] {
   if (document.activeLayerId && !seen.has(document.activeLayerId)) {
     problems.push('The selected layer no longer exists.');
   }
+  problems.push(...validateSmartSources(document));
   return problems;
+}
+
+/**
+ * A normal duplicate keeps its smart source. This explicit alternative clones
+ * the entire referenced source DAG so editing the copy cannot change the original.
+ * Pixel buffers remain immutable and shared until a pixel edit replaces them.
+ */
+export function duplicateSmartObjectIndependent(
+  document: LayerDocument,
+  id: string,
+  now?: Date
+): { document: LayerDocument; layer: Layer | null } {
+  const original = findLayer(document, id);
+  if (!original || original.content.type !== 'smart_object') return { document, layer: null };
+  const problems = validateSmartSources(document);
+  if (problems.length) throw new Error(problems[0]);
+  const sources = { ...document.smartSources };
+  const copied = new Map<string, string>();
+  const copyLayer = (layer: Layer): Layer => {
+    const copy = withNewIds(layer, null, now);
+    if (copy.content.type === 'smart_object') copy.content = { type: 'smart_object', sourceId: copySource(copy.content.sourceId) };
+    else if (copy.content.type === 'group') copy.content = { ...copy.content, children: layer.content.type === 'group' ? layer.content.children.map(copyLayer) : [] };
+    return copy;
+  };
+  const copySource = (sourceId: string): string => {
+    const known = copied.get(sourceId);
+    if (known) return known;
+    const source = sources[sourceId];
+    if (!source) throw new Error(`Smart source ${sourceId} is missing.`);
+    const newId = newLayerId('s');
+    copied.set(sourceId, newId);
+    sources[newId] = { ...source, layers: source.layers.map(copyLayer) };
+    return newId;
+  };
+  const sourceId = copySource(original.content.sourceId);
+  const result = duplicateLayer({ ...document, smartSources: sources }, id, now);
+  if (!result.layer) return { document, layer: null };
+  const layer = { ...result.layer, content: { type: 'smart_object' as const, sourceId } };
+  const next = updateLayer(result.document, layer.id, () => layer, now);
+  const finalProblems = validateSmartSources(next);
+  if (finalProblems.length) throw new Error(finalProblems[0]);
+  return { document: next, layer };
 }
 
 function validTransform(transform: LayerTransform): boolean {

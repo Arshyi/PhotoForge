@@ -49,6 +49,13 @@ pub struct TiledStats {
     pub workers: u32,
     /// Tiles this render took from the cache instead of computing.
     pub cached_tiles: u64,
+    /// Native smart source stacks use the full-frame CPU oracle before the
+    /// outer instance is tiled. This is distinct from an outer-frame fallback.
+    pub smart_source_full_frame_fallback: bool,
+    /// Sum of native-size smart composites retained, shared by all instances.
+    pub smart_source_composite_bytes: u64,
+    /// Conservative peak work reservation for composing one smart source.
+    pub smart_source_peak_bytes: u64,
 }
 
 struct Context<'a> {
@@ -99,6 +106,9 @@ pub fn render_region(
 ) -> Result<FloatImage, AppError> {
     document.validate()?;
     validate_scale(options.scale)?;
+    if let Some(prepared) = super::smart::prepare_render(document, source, options)? {
+        return render_region(&prepared.document, &prepared.pixels, options, region);
+    }
     let (canvas_width, canvas_height) = render_dimensions(document, options.scale);
     let clipped = region.intersect(&Region::whole(canvas_width, canvas_height));
     if clipped != region || region.is_empty() {
@@ -166,6 +176,18 @@ pub fn render_document_tiled_cached(
     max_threads: usize,
     cache: Option<&TileCache>,
 ) -> Result<(FloatImage, TiledStats), AppError> {
+    if let Some(prepared) = super::smart::prepare_render(document, source, options)? {
+        let (image, mut stats) = render_document_tiled_cached(
+            &prepared.document,
+            &prepared.pixels,
+            options,
+            tile_size,
+            max_threads,
+            cache,
+        )?;
+        smart_stats(&mut stats, &prepared);
+        return Ok((image, stats));
+    }
     let Some((plan, mut stats)) = Plan::new(document, source, options, tile_size, cache)? else {
         // A statistical operation reads the whole image by definition. Saying
         // so and rendering the frame whole is honest; quietly producing tiles
@@ -282,6 +304,19 @@ pub fn render_document_streaming_cached(
     cache: Option<&TileCache>,
     emit: &mut dyn FnMut(u32, &FloatImage) -> Result<(), AppError>,
 ) -> Result<TiledStats, AppError> {
+    if let Some(prepared) = super::smart::prepare_render(document, source, options)? {
+        let mut stats = render_document_streaming_cached(
+            &prepared.document,
+            &prepared.pixels,
+            options,
+            tile_size,
+            max_threads,
+            cache,
+            emit,
+        )?;
+        smart_stats(&mut stats, &prepared);
+        return Ok(stats);
+    }
     let Some((plan, mut stats)) = Plan::new(document, source, options, tile_size, cache)? else {
         let image = super::linear::render_document_float(document, source, options)?;
         emit(0, &image)?;
@@ -319,7 +354,14 @@ fn full_frame_stats(document: &LayerDocument, options: RenderOptions<'_>) -> Til
         peak_region_bytes: Region::whole(width, height).float_bytes(),
         workers: 1,
         cached_tiles: 0,
+        ..TiledStats::default()
     }
+}
+
+fn smart_stats(stats: &mut TiledStats, prepared: &super::smart::PreparedRender<'_>) {
+    stats.smart_source_full_frame_fallback = prepared.native_composite_bytes > 0;
+    stats.smart_source_composite_bytes = prepared.native_composite_bytes;
+    stats.smart_source_peak_bytes = prepared.peak_source_bytes;
 }
 
 /// Locks a mutex, accepting a poisoned one rather than panicking a worker.
@@ -378,6 +420,7 @@ impl<'a> Plan<'a> {
             fell_back_to_full_frame: false,
             workers: 1,
             cached_tiles: 0,
+            ..TiledStats::default()
         };
         let cache = cache
             .map(|cache| {
@@ -678,6 +721,11 @@ fn composite_onto(
             continue;
         }
         match &layer.content {
+            LayerContent::SmartObject { .. } => {
+                return Err(AppError::InvalidLayerDocument(
+                    "smart content was not prepared for rendering".into(),
+                ));
+            }
             LayerContent::Pixel { pixel_id, .. } => {
                 let pixels = context.source.resolve_linear(pixel_id)?;
                 draw(canvas, &pixels, layer, context)?;

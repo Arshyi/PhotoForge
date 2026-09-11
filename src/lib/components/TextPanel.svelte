@@ -7,6 +7,7 @@
   /** The text layer being edited, or null when the selection is not one. */
   export let content: TextContent | null = null;
   export let layerId = '';
+  export let disabled = false;
   /** Raised with the changed content; the host applies it to the document. */
   export let onchange: (layerId: string, content: TextContent) => void = () => {};
   /** Raised when the user asks to turn this layer into pixels. */
@@ -41,7 +42,7 @@
   );
 
   function update(patch: Partial<TextContent>) {
-    if (!content) return;
+    if (!content || disabled) return;
     onchange(layerId, { ...content, ...patch });
   }
 
@@ -61,6 +62,7 @@
 </script>
 
 <section class="text-panel" aria-label="Text layer">
+  <fieldset {disabled} style="border: 0; padding: 0; display: contents;">
   {#if !content}
     <p class="empty">Select a text layer to edit its words and setting.</p>
   {:else}
@@ -195,6 +197,20 @@
       <span>Italic</span>
     </label>
 
+    <label class="field">Wrap width (blank for point text)
+      <input aria-label="Text wrap width" type="number" min="1" max="1000000" value={content.wrapWidth ?? ''}
+        on:change={(event) => update({ wrapWidth: event.currentTarget.value === '' ? null : Number(event.currentTarget.value) })} />
+    </label>
+    {#each ['originX', 'originY'] as coordinate}
+      <label class="field">{coordinate}<input aria-label={`Text ${coordinate}`} type="number" step="any" value={content[coordinate as 'originX' | 'originY']}
+        on:change={(event) => setNumber(coordinate as 'originX' | 'originY', event.currentTarget.value, 0)} /></label>
+    {/each}
+    {#each ['red', 'green', 'blue', 'alpha'] as channel}
+      <label class="field">Fill {channel}<input aria-label={`Text fill ${channel}`} type="number" step="0.01" min="0" max="1"
+        value={content.fill[channel as keyof typeof content.fill]}
+        on:change={(event) => update({ fill: { ...content.fill, [channel]: Number(event.currentTarget.value) } })} /></label>
+    {/each}
+
     <p class="note">
       This layer stays editable text. Nothing in PhotoForge turns it into pixels unless you
       ask here.
@@ -204,6 +220,7 @@
       Rasterize to pixels
     </button>
   {/if}
+  </fieldset>
 </section>
 
 <style>

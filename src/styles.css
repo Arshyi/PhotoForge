@@ -433,6 +433,14 @@ aside {
 .guided-settings small { color: var(--ink-faint); font-size: 0.6rem; line-height: 1.35; }
 .guided-settings input { width: 17px; height: 17px; accent-color: var(--accent); }
 .modal-footnote { margin: 0; padding: 14px 21px; color: var(--ink-faint); font-size: 0.62rem; line-height: 1.5; }
+.new-document-modal { width: min(440px, 100%); }
+.new-document-modal form { display: grid; gap: 12px; padding: 0 21px 21px; }
+.new-document-modal form > label { display: grid; grid-template-columns: 1fr 150px; gap: 12px; align-items: center; color: var(--ink-soft); font-size: 0.68rem; font-weight: 700; }
+.new-document-modal input { min-width: 0; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: var(--surface-soft); font: 0.68rem/1.35 var(--font-sans); }
+.new-document-modal input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px var(--accent-dim); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+.modal-actions button { padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink-soft); background: var(--surface-raised); font-size: 0.62rem; font-weight: 700; cursor: pointer; }
+.modal-actions button.primary { color: #152012; border-color: var(--accent); background: var(--accent); }
 .settings-tabs { position: sticky; z-index: 2; top: 0; display: flex; gap: 5px; padding: 8px 21px; border-bottom: 1px solid var(--line); background: rgba(24,27,22,0.96); backdrop-filter: blur(7px); }
 .settings-tabs button { padding: 7px 12px; border: 1px solid transparent; border-radius: 7px; color: var(--ink-faint); background: transparent; font: 700 0.62rem/1 var(--font-sans); cursor: pointer; }
 .settings-tabs button:hover, .settings-tabs button.active { border-color: var(--line-strong); color: var(--ink); background: var(--surface-raised); }

@@ -235,6 +235,20 @@ fn detach_masks(document: &mut LayerDocument) -> Vec<(ProjectMaskEntry, LayerMas
     }
     let mut detached = Vec::new();
     walk(&mut document.layers, &mut detached);
+    // Each source is stored once, independent of how many instances refer to
+    // it. Layer IDs are globally unique, including inside source trees.
+    let mut source_ids: Vec<_> = document.smart_sources.keys().cloned().collect();
+    source_ids.sort_unstable();
+    for id in source_ids {
+        walk(
+            &mut document
+                .smart_sources
+                .get_mut(&id)
+                .expect("known source")
+                .layers,
+            &mut detached,
+        );
+    }
     detached
 }
 
@@ -334,7 +348,7 @@ fn encode_project_sources(
             ProjectPixelRef::Linear(image) => (image.width(), image.height(), 16),
         };
         super::model::validate_dimensions(w, h)?;
-        if document.iter().any(|layer| {
+        if document.iter_all().any(|layer| {
             layer.pixel_id() == Some(id.as_str()) && layer.pixel_dimensions() != Some((w, h))
         }) {
             return Err(AppError::ProjectFormat(
@@ -345,17 +359,14 @@ fn encode_project_sources(
             .checked_add(u64::from(w) * u64::from(h) * bpp)
             .ok_or(AppError::OutOfMemoryRisk)?;
     }
-    let mask_bytes =
-        document
-            .iter()
-            .filter_map(|l| l.mask.as_ref())
-            .try_fold(0_u64, |total, mask| {
-                total
-                    .checked_add(
-                        u64::from(mask.snapshot.width) * u64::from(mask.snapshot.height) * 10,
-                    )
-                    .ok_or(AppError::OutOfMemoryRisk)
-            })?;
+    let mask_bytes = document
+        .iter_all()
+        .filter_map(|l| l.mask.as_ref())
+        .try_fold(0_u64, |total, mask| {
+            total
+                .checked_add(u64::from(mask.snapshot.width) * u64::from(mask.snapshot.height) * 10)
+                .ok_or(AppError::OutOfMemoryRisk)
+        })?;
     crate::resources::ResourceEstimate::new(
         source_bytes,
         source_bytes
@@ -623,6 +634,9 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
     if manifest.format_version != version {
         return Err(AppError::UnsupportedProjectVersion(manifest.format_version));
     }
+    // Reject malformed or cyclic semantic trees before allocating/decompressing
+    // their pixel entries. Detached masks are checked after restoration below.
+    manifest.document.validate()?;
     if version == 1
         && (manifest.document.precision != DocumentPrecision::LegacySrgb8
             || manifest
@@ -754,7 +768,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         }
         let entry = find(&pixel.entry)?;
         super::model::validate_dimensions(pixel.width, pixel.height)?;
-        if document.iter().any(|layer| {
+        if document.iter_all().any(|layer| {
             layer.pixel_id() == Some(pixel.pixel_id.as_str())
                 && layer.pixel_dimensions() != Some((pixel.width, pixel.height))
         }) {
@@ -818,7 +832,22 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         }
     }
 
+    let mut masked_ids = std::collections::HashSet::new();
     for mask in &manifest.masks {
+        if !masked_ids.insert(mask.layer_id.as_str()) {
+            return Err(AppError::ProjectFormat(
+                "duplicate mask layer identifiers".into(),
+            ));
+        }
+        if !document
+            .iter_all()
+            .any(|layer| layer.id == mask.layer_id && layer.mask.is_none())
+        {
+            return Err(AppError::ProjectFormat(format!(
+                "mask target {} is missing or already has inline coverage",
+                mask.layer_id
+            )));
+        }
         let entry = find(&mask.entry)?;
         if entry.encoding != ENCODING_PNG {
             return Err(AppError::ProjectFormat(format!(
@@ -834,7 +863,12 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             enabled: mask.enabled,
             inverted: mask.inverted,
         };
-        if !attach_mask(&mut document.layers, &mask.layer_id, restored) {
+        let attached = attach_mask(&mut document.layers, &mask.layer_id, restored.clone())
+            || document
+                .smart_sources
+                .values_mut()
+                .any(|source| attach_mask(&mut source.layers, &mask.layer_id, restored.clone()));
+        if !attached {
             return Err(AppError::ProjectFormat(format!(
                 "the manifest stores a mask for the unknown layer {}",
                 mask.layer_id
@@ -973,6 +1007,7 @@ mod tests {
     use super::*;
     use crate::layers::model::fixtures::*;
     use crate::layers::model::{LayerContent, LAYER_SCHEMA_VERSION};
+    use crate::layers::smart::{SmartLink, SmartObjectContent, SmartSource};
     use image::Rgba;
 
     fn image(width: u32, height: u32, value: u8) -> RgbaImage {
@@ -1069,6 +1104,51 @@ mod tests {
             let original = pixels.iter().find(|(name, _)| name == id).unwrap();
             assert_eq!(restored.as_raw(), original.1.as_raw());
         }
+    }
+
+    #[test]
+    fn smart_sources_links_masks_and_pixels_survive_a_project_round_trip() {
+        let mut document = LayerDocument::new(8, 8);
+        document.precision = DocumentPrecision::LinearSrgbF32;
+        let mut source_layer = pixel_layer("source-pixels", 4, 4);
+        let mut mask = MaskBitmap::empty(4, 4).unwrap();
+        mask.set(1, 1, 200);
+        source_layer.mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&mask),
+            enabled: true,
+            inverted: false,
+        });
+        let mut source = SmartSource::new(4, 4, vec![source_layer]);
+        source.link = Some(SmartLink {
+            path: "C:/photos/logo.png".into(),
+            digest: "a".repeat(64),
+            bytes: 123,
+        });
+        document.smart_sources.insert("logo-source".into(), source);
+        let mut instance = pixel_layer("logo-instance", 4, 4);
+        instance.content = LayerContent::SmartObject {
+            smart: Box::new(SmartObjectContent::new("logo-source")),
+        };
+        document.layers = vec![instance];
+        document.active_layer_id = Some("logo-instance".into());
+
+        let pixels = vec![("pxsource-pixels".to_string(), image(4, 4, 180))];
+        let loaded = decode_project(&encode(&document, &pixels)).unwrap();
+
+        assert_eq!(loaded.document, document);
+        assert_eq!(
+            loaded.document.smart_sources["logo-source"].link,
+            document.smart_sources["logo-source"].link
+        );
+        assert_eq!(loaded.pixels.len(), 1);
+        let restored_mask = loaded.document.smart_sources["logo-source"].layers[0]
+            .mask
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .decode()
+            .unwrap();
+        assert_eq!(restored_mask.get(1, 1), 200);
     }
 
     #[test]

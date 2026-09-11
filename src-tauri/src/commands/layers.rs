@@ -248,7 +248,10 @@ pub async fn export_layer_composite(
     let started = Instant::now();
     let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        for layer in document.iter() {
+        // Protect both RAW inputs and explicit smart links, including content
+        // nested inside a source stack. An export must never replace a file
+        // that the current project still treats as an input authority.
+        for layer in document.iter_all() {
             if let Some(raw) = &layer.raw {
                 if let Some(path) = raw.linked_path() {
                     if std::fs::canonicalize(path).ok() == std::fs::canonicalize(&output_path).ok()
@@ -256,6 +259,16 @@ pub async fn export_layer_composite(
                     {
                         return Err(AppError::InvalidOutputPath);
                     }
+                }
+            }
+        }
+        for source in document.smart_sources.values() {
+            if let Some(link) = &source.link {
+                if std::fs::canonicalize(&link.path).ok()
+                    == std::fs::canonicalize(&output_path).ok()
+                    && output_path.exists()
+                {
+                    return Err(AppError::InvalidOutputPath);
                 }
             }
         }
@@ -468,7 +481,10 @@ pub(super) async fn render_subset_into_buffer(
 /// source-over range is associative and can be rendered against transparency;
 /// a range that omits its backdrop cannot safely bake blend-dependent layers,
 /// adjustments, or pass-through groups.
-fn merge_targets(document: &LayerDocument, layer_ids: &[String]) -> Result<Vec<Layer>, AppError> {
+pub(super) fn merge_targets(
+    document: &LayerDocument,
+    layer_ids: &[String],
+) -> Result<Vec<Layer>, AppError> {
     if layer_ids.is_empty() {
         return Err(AppError::InvalidLayerDocument(
             "merging requires at least one layer".into(),
@@ -675,7 +691,7 @@ pub async fn render_layer_thumbnail(
         // from, so each is rendered on its own over the canvas and thumbnailed
         // from that. Rendering the layer alone is what makes the thumbnail show
         // the layer rather than whatever happens to sit behind it.
-        LayerKind::Shape | LayerKind::Text => {
+        LayerKind::Shape | LayerKind::Text | LayerKind::SmartObject => {
             let mut solo = document.clone();
             solo.layers = vec![layer.clone()];
             solo.active_layer_id = None;
@@ -769,6 +785,7 @@ pub async fn layer_mask_from_selection(
     document.validate()?;
     let layer = find_layer(&document, &layer_id)?;
     let decoded = selection.decode()?;
+    let layer = crate::layers::mask_geometry_layer(&document, &layer)?;
     let mask = tauri::async_runtime::spawn_blocking(move || {
         selection_to_layer_mask(
             &decoded,
@@ -794,6 +811,7 @@ pub async fn selection_from_layer_mask(
 ) -> Result<LayerMaskResult, AppError> {
     document.validate()?;
     let layer = find_layer(&document, &layer_id)?;
+    let layer = crate::layers::mask_geometry_layer(&document, &layer)?;
     let mask = layer
         .mask
         .as_ref()
@@ -821,6 +839,7 @@ pub async fn create_layer_mask(
 ) -> Result<LayerMaskResult, AppError> {
     document.validate()?;
     let layer = find_layer(&document, &layer_id)?;
+    let layer = crate::layers::mask_geometry_layer(&document, &layer)?;
     let (width, height) =
         crate::layers::mask_space(&layer, document.canvas_width, document.canvas_height);
     let mask = if filled {
@@ -1076,6 +1095,49 @@ pub async fn load_layer_project(
     open_project(path, request_id, false, &state).await
 }
 
+/// Opens a new transparent, high-precision document without creating a file.
+/// Like project loading, the replacement is staged before the session changes,
+/// and a superseded request never replaces a more recent open/new operation.
+#[tauri::command]
+pub async fn create_blank_layer_document(
+    width: u32,
+    height: u32,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ProjectLoadResult, AppError> {
+    crate::layers::validate_dimensions(width, height)?;
+    let started = Instant::now();
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let mut document = LayerDocument::new(width, height);
+        document.precision = crate::pixel::DocumentPrecision::LinearSrgbF32;
+        let loaded = LoadedProject {
+            document,
+            document_operations: Vec::new(),
+            pixels: Vec::new(),
+            linear_pixels: Vec::new(),
+            application_version: env!("CARGO_PKG_VERSION").into(),
+            created_at: String::new(),
+            modified_at: String::new(),
+        };
+        // An empty path denotes an unsaved source, not a real input file.
+        let mut prepared = prepare_project(loaded, PathBuf::new(), request_id)?;
+        prepared.source.metadata.filename = "Untitled".into();
+        prepared.result.metadata.filename = "Untitled".into();
+        Ok::<_, AppError>(prepared)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("new document worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(prepared.result)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryListResult {
@@ -1208,6 +1270,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         layer_store_report,
         save_layer_project,
         load_layer_project,
+        create_blank_layer_document,
         write_recovery_snapshot,
         list_recovery_snapshots,
         restore_recovery_snapshot,
@@ -1221,7 +1284,14 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         super::professional::create_point_operation,
         super::mask::magic_wand_selection,
         super::mask::color_range_selection,
-        super::mask::refine_selection_mask
+        super::mask::refine_selection_mask,
+        super::smart::convert_layers_to_smart_object,
+        super::smart::import_smart_object,
+        super::smart::update_smart_source,
+        super::smart::inspect_smart_links,
+        super::smart::relink_smart_source,
+        super::text::inspect_document_fonts,
+        super::text::rasterize_semantic_layer
     ])
 }
 
@@ -1239,6 +1309,7 @@ mod project_session_tests {
                 canvas_height: 2,
                 layers: vec![test_pixel_layer("background", pixel_id, 2, 2)],
                 active_layer_id: Some("background".into()),
+                smart_sources: Default::default(),
             },
             document_operations: vec![],
             linear_pixels: vec![],

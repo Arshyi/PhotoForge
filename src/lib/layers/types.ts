@@ -46,7 +46,7 @@ export const blendModes: { id: BlendMode; label: string; group: string }[] = [
   { id: 'luminosity', label: 'Luminosity', group: 'Component' }
 ];
 
-export type LayerKind = 'pixel' | 'group' | 'adjustment' | 'shape' | 'text';
+export type LayerKind = 'pixel' | 'group' | 'adjustment' | 'shape' | 'text' | 'smart_object';
 
 /** Mirrors `layers::LayerInterpolation`. */
 export type LayerInterpolation = 'bilinear' | 'nearest';
@@ -177,12 +177,42 @@ export interface TextContent {
   strokeStyle?: StrokeStyle | null;
 }
 
+/** A placement references editable source content, never an intermediate raster. */
+export interface SmartObjectContent {
+  type: 'smart_object';
+  sourceId: string;
+}
+
+export interface SmartLink {
+  path: string;
+  /** SHA-256 of the original external file, not a timestamp or rendered image. */
+  digest: string;
+  bytes: number;
+}
+
+export interface SmartSource {
+  width: number;
+  height: number;
+  layers: Layer[];
+  link?: SmartLink | null;
+}
+
+export type SmartSources = Record<string, SmartSource>;
+export type SmartLinkState = 'embedded' | 'available' | 'missing' | 'changed';
+
+export interface SmartLinkStatus {
+  sourceId: string;
+  state: SmartLinkState;
+  detail?: string | null;
+}
+
 export type LayerContent =
   | { type: 'pixel'; pixelId: string; width: number; height: number }
   | { type: 'group'; children: Layer[]; isolated: boolean }
   | { type: 'adjustment'; operation: BaseEditOperation }
   | ({ type: 'shape' } & ShapeContent)
-  | ({ type: 'text' } & TextContent);
+  | ({ type: 'text' } & TextContent)
+  | SmartObjectContent;
 
 export interface Layer {
   id: string;
@@ -212,6 +242,8 @@ export interface LayerDocument {
   /** Index 0 is the bottom of the stack; the panel displays this reversed. */
   layers: Layer[];
   activeLayerId: string | null;
+  /** Absent in older projects. Shared sources are part of document undo state. */
+  smartSources?: SmartSources;
 }
 
 /** What a keyboard or tool gesture currently edits. */
@@ -284,7 +316,8 @@ export const layerKindLabels: Record<LayerKind, string> = {
   group: 'Group',
   adjustment: 'Adjustment layer',
   shape: 'Shape layer',
-  text: 'Text layer'
+  text: 'Text layer',
+  smart_object: 'Smart object'
 };
 
 export const layerKindIcons: Record<LayerKind, string> = {
@@ -292,7 +325,8 @@ export const layerKindIcons: Record<LayerKind, string> = {
   group: '▤',
   adjustment: '◐',
   shape: '◇',
-  text: 'T'
+  text: 'T',
+  smart_object: '▧'
 };
 
 /** Actions the Layers panel raises for the host application to carry out. */
@@ -313,6 +347,9 @@ export type LayerPanelAction =
   | 'mask_load_selection'
   | 'edit_adjustment'
   | 'edit_text'
+  | 'convert_smart'
+  | 'edit_smart'
+  | 'duplicate_smart_independent'
   | 'rasterize_semantic'
   | 'reset_transform'
   | 'rasterize_transform'

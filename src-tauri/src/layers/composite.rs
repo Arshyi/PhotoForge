@@ -42,6 +42,15 @@ pub trait PixelSource: Sync {
         let image = self.resolve(pixel_id)?;
         Ok(Arc::new(crate::color::FloatImage::from_rgba8(&image)?))
     }
+    /// Original-sized immutable pixels, even when `resolve_linear` supplies a
+    /// preview. Smart contents are composed in their own native coordinate
+    /// system before the finished instance is scaled for the outer preview.
+    fn resolve_native_linear(
+        &self,
+        pixel_id: &str,
+    ) -> Result<Arc<crate::color::FloatImage>, AppError> {
+        self.resolve_linear(pixel_id)
+    }
     fn resident_bytes(&self) -> u64 {
         0
     }
@@ -202,7 +211,9 @@ fn composite_onto(
                 let buffer = context.source.resolve(pixel_id)?;
                 draw_source(backdrop, buffer.as_ref(), layer, context)?;
             }
-            LayerContent::Shape { .. } | LayerContent::Text { .. } => {
+            LayerContent::Shape { .. }
+            | LayerContent::Text { .. }
+            | LayerContent::SmartObject { .. } => {
                 // The legacy encoded-8-bit renderer predates the linear
                 // pipeline and is kept working for pre-0.10.0 documents rather
                 // than extended. Antialiased glyph and shape coverage is
@@ -210,7 +221,7 @@ fn composite_onto(
                 // throw that away silently; a document containing either is a
                 // 0.13.0 document and uses the high-precision renderer.
                 return Err(AppError::InvalidLayerDocument(
-                    "shape and text layers require a high-precision document".into(),
+                    "semantic layers require a high-precision document".into(),
                 ));
             }
             LayerContent::Group { children, isolated } => {
@@ -908,6 +919,7 @@ mod tests {
             canvas_width: width,
             canvas_height: height,
             layers,
+            smart_sources: Default::default(),
             active_layer_id: None,
         }
     }

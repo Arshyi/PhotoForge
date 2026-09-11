@@ -1,6 +1,6 @@
 <script lang="ts">
   import MaskThumbnail from './MaskThumbnail.svelte';
-  import { activeLayer, childrenOf, countLayers, displayRows, isPassThrough } from '../layers/tree';
+  import { activeLayer, childrenOf, countLayers, displayRows, isPassThrough, isSemanticLayer } from '../layers/tree';
   import {
     blendModes,
     layerKindIcons,
@@ -11,7 +11,8 @@
     type Layer,
     type LayerDocument,
     type LayerPanelAction,
-    type LayerRow
+    type LayerRow,
+    type SmartLinkStatus
   } from '../layers/types';
 
   export let document: LayerDocument;
@@ -23,6 +24,8 @@
   export let hasSelection = false;
   /** Layers selected alongside the active one, for acting on several at once. */
   export let selectedIds: string[] = [];
+  /** Only explicit link checks populate this; opening a project never probes its paths. */
+  export let smartLinkStatuses: SmartLinkStatus[] = [];
 
   export let onselect: (id: string, additive: boolean) => void;
   export let ontoggle: (id: string, field: 'visible' | 'locked' | 'collapsed') => void;
@@ -45,6 +48,7 @@
   $: selectedIsGroup = selected?.content.type === 'group';
   $: selectedIsPassThrough = Boolean(selected && isPassThrough(selected));
   $: selectedIsAdjustment = selected?.content.type === 'adjustment';
+  $: selectedIsSemantic = Boolean(selected && isSemanticLayer(selected));
   $: selectedHasMask = Boolean(selected?.mask);
   $: totalLayers = countLayers(document);
   $: locked = Boolean(selected?.locked);
@@ -219,7 +223,7 @@
         type="button"
         class:active={editTarget === 'layer'}
         aria-pressed={editTarget === 'layer'}
-        disabled={disabled || selectedIsAdjustment}
+        disabled={disabled || selectedIsAdjustment || selectedIsSemantic}
         title="Tools paint into the selected layer's pixels"
         on:click={() => ontargetchange('layer')}>Layer</button
       >
@@ -244,6 +248,8 @@
   <p class="target-note" data-target={editTarget}>
     {#if editTarget === 'mask'}
       Painting changes the mask on <strong>{selected?.name ?? 'this layer'}</strong>, not its pixels.
+    {:else if editTarget === 'layer' && selectedIsSemantic}
+      This layer keeps editable content. Edit its contents or rasterize explicitly before painting pixels.
     {:else if editTarget === 'layer'}
       Painting changes the pixels of <strong>{selected?.name ?? 'the selected layer'}</strong>.
     {:else}
@@ -263,7 +269,7 @@
         )}
     >
       <option value="document">The whole document (as before)</option>
-      <option value="layer">The selected layer, applied directly</option>
+      <option value="layer" disabled={selectedIsSemantic}>The selected layer, applied directly</option>
       <option value="adjustmentLayer">A new adjustment layer</option>
     </select>
   </div>
@@ -382,7 +388,11 @@
             on:dblclick={() =>
               row.layer.content.type === 'adjustment'
                 ? onaction('edit_adjustment', row.layer.id)
-                : beginRename(row.layer)}
+                : row.layer.content.type === 'text'
+                  ? onaction('edit_text', row.layer.id)
+                  : row.layer.content.type === 'smart_object'
+                    ? onaction('edit_smart', row.layer.id)
+                    : beginRename(row.layer)}
           >
             <span class="thumbnail" data-kind={row.layer.content.type}>
               {#if thumbnails[row.layer.id]}
@@ -408,6 +418,12 @@
               <small>
                 <i aria-hidden="true">{layerKindIcons[row.layer.content.type]}</i>
                 {layerKindLabels[row.layer.content.type]}
+                {#if row.layer.content.type === 'smart_object' && document.smartSources?.[row.layer.content.sourceId]?.link}
+                  {@const status = smartLinkStatuses.find((entry) => row.layer.content.type === 'smart_object' && entry.sourceId === row.layer.content.sourceId)}
+                  <span title={status?.detail ?? 'Stored content is used until you explicitly check or update the link.'}>
+                    · Linked{status ? ` (${status.state})` : ' (not checked)'}
+                  </span>
+                {/if}
                 {#if row.layer.blendMode !== 'normal'}
                   · {blendModes.find((mode) => mode.id === row.layer.blendMode)?.label}
                 {/if}
@@ -517,7 +533,7 @@
           <button
             type="button"
             title="Bake the mask into the layer's pixels"
-            disabled={disabled || selectedIsAdjustment}
+            disabled={disabled || selectedIsAdjustment || selectedIsSemantic}
             on:click={() => onaction('mask_apply', selected?.id)}>Apply</button
           >
           <button type="button" {disabled} on:click={() => onaction('mask_delete', selected?.id)}
@@ -573,6 +589,15 @@
           >Edit adjustment</button
         >
       {/if}
+      {#if selected.content.type === 'text'}
+        <button type="button" disabled={disabled || locked} on:click={() => onaction('edit_text', selected?.id)}>Edit text</button>
+      {/if}
+      {#if selected.content.type === 'smart_object'}
+        <button type="button" disabled={disabled || busy || locked} on:click={() => onaction('edit_smart', selected?.id)}>Edit contents</button>
+        <button type="button" disabled={disabled || busy || locked} on:click={() => onaction('duplicate_smart_independent', selected?.id)}>Independent copy</button>
+      {:else}
+        <button type="button" disabled={disabled || busy || locked} title="Keep the selected stack editable inside a shared source" on:click={() => onaction('convert_smart', selected?.id)}>Convert to smart object</button>
+      {/if}
       <button
         type="button"
         disabled={disabled || selectedIsAdjustment}
@@ -582,8 +607,8 @@
       <button
         type="button"
         disabled={disabled || busy || selectedIsAdjustment}
-        title="Bake the transform into the layer's pixels"
-        on:click={() => onaction('rasterize_transform', selected?.id)}>Rasterize</button
+        title={selectedIsSemantic ? 'Explicitly replace editable content with rendered pixels (undoable)' : "Bake the transform into the layer's pixels"}
+        on:click={() => onaction(selectedIsSemantic ? 'rasterize_semantic' : 'rasterize_transform', selected?.id)}>Rasterize</button
       >
     </div>
   {/if}

@@ -7,6 +7,10 @@ use image::{DynamicImage, GenericImageView};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+// Layered carries the validated document tree and resolved store handles. It
+// is intentionally kept by value so sampling workers own a stable snapshot;
+// the larger variant is bounded by the layer/document trust limits.
+#[allow(clippy::large_enum_variant)]
 enum Pixels {
     Opened(Arc<DynamicImage>),
     Working(Arc<crate::color::FloatImage>),

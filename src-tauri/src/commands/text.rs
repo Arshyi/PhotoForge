@@ -66,6 +66,9 @@ pub async fn inspect_document_fonts(
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut requirements: Vec<FontRequirement> = Vec::new();
         collect(&document.layers, &mut requirements);
+        for source in document.smart_sources.values() {
+            collect(&source.layers, &mut requirements);
+        }
         for requirement in &mut requirements {
             requirement.available =
                 requirement.family.is_empty() || text::family_is_available(&requirement.family);
@@ -99,12 +102,13 @@ fn collect(layers: &[crate::layers::Layer], out: &mut Vec<FontRequirement>) {
             LayerContent::Group { children, .. } => collect(children, out),
             LayerContent::Pixel { .. }
             | LayerContent::Shape { .. }
+            | LayerContent::SmartObject { .. }
             | LayerContent::Adjustment { .. } => {}
         }
     }
 }
 
-/// Renders one text or shape layer into a pixel buffer, so the caller can
+/// Renders one text, shape or smart layer into a pixel buffer, so the caller can
 /// replace it with an ordinary pixel layer.
 ///
 /// This is the only way semantic content becomes pixels, and it happens because
@@ -123,8 +127,11 @@ pub async fn rasterize_semantic_layer(
 ) -> Result<LayerPixelsResult, AppError> {
     document.validate()?;
     let mut layer = find_layer(&document, &layer_id)?;
+    if layer.locked {
+        return Err(AppError::LayerLocked(layer.id));
+    }
     match layer.kind() {
-        LayerKind::Text | LayerKind::Shape => {}
+        LayerKind::Text | LayerKind::Shape | LayerKind::SmartObject => {}
         other => {
             return Err(AppError::InvalidLayerDocument(format!(
                 "a {} layer has no semantic content to rasterize",

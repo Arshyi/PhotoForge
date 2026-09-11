@@ -57,6 +57,10 @@ use commands::{
     validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
     validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
 };
+use commands::{
+    convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
+    inspect_smart_links, relink_smart_source, update_smart_source,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -69,6 +73,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_image,
+            create_blank_layer_document,
             render_preview,
             analyze_image,
             get_component_snapshot,
@@ -145,6 +150,11 @@ pub fn run() {
             rasterize_semantic_layer,
             list_system_fonts,
             inspect_document_fonts,
+            convert_layers_to_smart_object,
+            import_smart_object,
+            inspect_smart_links,
+            relink_smart_source,
+            update_smart_source,
             apply_operations_to_layer,
             render_layer_thumbnail,
             layer_mask_from_selection,

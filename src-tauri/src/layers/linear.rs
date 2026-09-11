@@ -63,6 +63,9 @@ pub fn render_document_float(
     options: RenderOptions<'_>,
 ) -> Result<FloatImage, AppError> {
     document.validate()?;
+    if let Some(prepared) = super::smart::prepare_render(document, source, options)? {
+        return render_document_float(&prepared.document, &prepared.pixels, options);
+    }
     if !options.scale.is_finite() || options.scale <= 0.0 || options.scale > 1.0 {
         return Err(AppError::InvalidLayerDocument(
             "render scale must be greater than zero and no larger than one".into(),
@@ -113,6 +116,11 @@ fn composite_onto(
             continue;
         }
         match &layer.content {
+            LayerContent::SmartObject { .. } => {
+                return Err(AppError::InvalidLayerDocument(
+                    "smart content was not prepared for rendering".into(),
+                ));
+            }
             LayerContent::Pixel { pixel_id, .. } => {
                 let pixels = context.source.resolve_linear(pixel_id)?;
                 draw(canvas, &pixels, layer, context)?;

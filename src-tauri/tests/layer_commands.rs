@@ -202,6 +202,7 @@ fn document(canvas: (u32, u32), layers: Vec<Layer>) -> LayerDocument {
         canvas_width: canvas.0,
         canvas_height: canvas.1,
         layers,
+        smart_sources: Default::default(),
         active_layer_id: active,
     }
 }

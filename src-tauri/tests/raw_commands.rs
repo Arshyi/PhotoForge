@@ -778,6 +778,7 @@ fn complex_raw_document(
         canvas_width: width,
         canvas_height: height,
         layers: vec![base("plain"), group],
+        smart_sources: Default::default(),
         active_layer_id: Some("rawlayer".into()),
     };
     (document, opened, buffers)

@@ -356,6 +356,17 @@ impl DocumentFingerprint {
         tile_size: u32,
         halo: u32,
     ) -> Result<Self, AppError> {
+        // Direct callers receive the same dependency-aware keys as rendering.
+        if let Some(prepared) = super::smart::prepare_render(
+            document,
+            source,
+            super::RenderOptions {
+                scale,
+                cancel: None,
+            },
+        )? {
+            return Self::new(&prepared.document, &prepared.pixels, scale, tile_size, halo);
+        }
         let (canvas_width, canvas_height) = super::tiled::render_dimensions(document, scale);
         let canvas = Region::whole(canvas_width, canvas_height);
         let mut base = Sha256::new();
@@ -435,6 +446,11 @@ fn digest_visible_sources(
         return Ok(());
     }
     match &layer.content {
+        LayerContent::SmartObject { .. } => {
+            return Err(AppError::InvalidLayerDocument(
+                "smart source fingerprints require the containing document".into(),
+            ));
+        }
         LayerContent::Shape { shape } => {
             // A shape's identity is entirely in its own description: geometry,
             // paint and rule. There is no external buffer to fingerprint, so
@@ -514,7 +530,7 @@ fn influence_of(
         // An adjustment reads and rewrites everything beneath it in its scope.
         // Bounding that properly would mean tracking what is beneath it, which
         // is exactly the kind of narrowing this module refuses to guess at.
-        LayerContent::Adjustment { .. } => Influence::Everywhere,
+        LayerContent::Adjustment { .. } | LayerContent::SmartObject { .. } => Influence::Everywhere,
         LayerContent::Shape { .. } | LayerContent::Text { .. } => {
             // A shape or a text block reaches exactly as far as it paints,
             // which is what makes moving one invalidate the tiles it left and

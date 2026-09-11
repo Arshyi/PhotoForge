@@ -8,7 +8,9 @@ import type {
   LayerStoreReport,
   LayerThumbnailResult,
   ProjectLoadResult,
-  ProjectSaveResult
+  ProjectSaveResult,
+  SmartLinkStatus,
+  SmartSource
 } from './types';
 
 export function renderLayerComposite(
@@ -47,6 +49,14 @@ export function importLayerImage(path: string): Promise<LayerPixelsResult> {
 
 export function createLayerPixels(width: number, height: number): Promise<LayerPixelsResult> {
   return invoke<LayerPixelsResult>('create_layer_pixels', { width, height });
+}
+
+export function createBlankLayerDocument(
+  width: number,
+  height: number,
+  requestId: number
+): Promise<ProjectLoadResult> {
+  return invoke<ProjectLoadResult>('create_blank_layer_document', { width, height, requestId });
 }
 
 export function mergeLayerPixels(
@@ -185,4 +195,28 @@ export function planLayerWorkflowSteps(
   steps: unknown[]
 ): Promise<{ targets: string[]; steps: number }> {
   return invoke<{ targets: string[]; steps: number }>('plan_layer_workflow', { document, steps });
+}
+
+export function convertLayersToSmartObject(document: LayerDocument, layerIds: string[]): Promise<LayerDocument> {
+  return invoke<LayerDocument>('convert_layers_to_smart_object', { document, layerIds });
+}
+
+export function updateSmartSource(document: LayerDocument, sourceId: string, source: SmartSource): Promise<LayerDocument> {
+  return invoke<LayerDocument>('update_smart_source', { document, sourceId, source });
+}
+
+/** Explicit user action only: opening a project must not probe external paths. */
+export function inspectSmartLinks(document: LayerDocument): Promise<{ links: SmartLinkStatus[] }> {
+  return invoke<{ links: SmartLinkStatus[] }>('inspect_smart_links', { document });
+}
+
+/** acceptChanged must come from an explicit Replace with different file choice. */
+export function relinkSmartSource(
+  document: LayerDocument, sourceId: string, path: string, acceptChanged = false
+): Promise<LayerDocument> {
+  return invoke<LayerDocument>('relink_smart_source', { document, sourceId, path, acceptChanged });
+}
+
+export function importSmartObject(document: LayerDocument, path: string, linked: boolean): Promise<LayerDocument> {
+  return invoke<LayerDocument>('import_smart_object', { document, path, linked });
 }

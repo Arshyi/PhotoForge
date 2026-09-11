@@ -99,6 +99,7 @@ fn document(width: u32, height: u32, layers: Vec<Layer>) -> LayerDocument {
         canvas_width: width,
         canvas_height: height,
         layers,
+        smart_sources: Default::default(),
         active_layer_id: None,
     }
 }
