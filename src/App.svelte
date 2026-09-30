@@ -46,6 +46,7 @@
     ,ShortcutBinding
   } from './lib/types/editor';
   import { errorMessage, formatBytes } from './lib/utils/format';
+  import { closeOnFailure, decideClose } from './lib/utils/close';
   import {
     defaultGuidedSettings,
     loadGuidedSettings,
@@ -258,6 +259,18 @@
   let settingsOpen = false;
   let settingsPage: 'general' | 'workspace' | 'components' | 'diagnostics' | 'privacy' = 'general';
   let newDocumentOpen = false;
+  /**
+   * Which close confirmation is on screen, if any.
+   *
+   * Tauri vetoes the window close as soon as the frontend registers a
+   * close-requested listener and hands the decision entirely to us, so the
+   * confirmation has to be in-app. A native `window.confirm()` here is a modal
+   * raised from inside the close handler: if it fails to surface, the close
+   * button silently does nothing and there is no way out but Task Manager.
+   */
+  let closePrompt: 'dirty' | 'busy' | null = null;
+  /** Whether a close has already been refused because an operation was busy. */
+  let closeWarned = false;
   let newDocumentWidth = 1920;
   let newDocumentHeight = 1080;
   let componentConfigurationRevision = 0;
@@ -352,6 +365,9 @@
   $: selectionPanelHistory = selectionPanelHistoryAvailability(historyEvents, redoEvents);
   $: geometryMutationBusy = geometryTransactionRunning || Boolean(pendingGeometryCommit);
   $: fileMutationBusy = opening || exporting || layerBusy || recoveryBusy;
+  // Once nothing is busy, a later close request deserves its own warning
+  // rather than inheriting permission from an operation that has since ended.
+  $: if (!fileMutationBusy && closeWarned) closeWarned = false;
   // A document that is still one plain full-canvas layer keeps using the
   // original render and export path, so ordinary photo editing behaves exactly
   // as it did before layers existed.
@@ -395,13 +411,27 @@
         event.returnValue = '';
       }
     };
+    // Tauri prevents the close itself the moment this listener is registered
+    // and closes the window only if this handler declines to prevent it. This
+    // handler is therefore the sole authority on whether PhotoForge can be
+    // quit, and every path out of it must either close the window or leave a
+    // visible way to. Anything else is a close button that does nothing.
     getCurrentWindow().onCloseRequested((event) => {
-      if (layerBusy || recoveryBusy || exporting || opening) {
-        event.preventDefault();
-        notify('Wait for the current file or layer operation before closing.', 'error');
-      } else if (!confirmDiscardChanges()) {
-        event.preventDefault();
+      let decision = closeOnFailure;
+      try {
+        decision = decideClose({
+          busy: layerBusy || recoveryBusy || exporting || opening,
+          dirty: projectDirty,
+          alreadyWarned: closeWarned
+        });
+      } catch {
+        // Already `closeOnFailure`. Working out whether to warn about unsaved
+        // changes is not worth trapping the user in the application for.
       }
+      if (decision.action === 'close') return;
+      if (decision.prompt === 'busy') closeWarned = true;
+      event.preventDefault();
+      closePrompt = decision.prompt;
     }).then((cleanup) => (unlistenClose = cleanup)).catch(() => undefined);
     getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -2206,6 +2236,25 @@
   }
 
   /** Returns false when the user chooses to keep unsaved layer work. */
+  function cancelClose() {
+    closePrompt = null;
+  }
+
+  /**
+   * Closes the window past the confirmation.
+   *
+   * `destroy` rather than `close`, because `close` raises another close request
+   * and would land back in the handler above.
+   */
+  async function confirmClose() {
+    closePrompt = null;
+    try {
+      await getCurrentWindow().destroy();
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    }
+  }
+
   function confirmDiscardChanges(): boolean {
     if (!projectDirty) return true;
     return window.confirm(
@@ -3897,6 +3946,37 @@
       nextRequestId={() => ++requestId} onsave={saveSmartContents}
       oncancel={() => { smartEditing = null; schedulePreview(); }} />
   {/key}
+{/if}
+
+{#if closePrompt}
+  <div class="modal-backdrop" role="presentation">
+    <dialog open class="modal close-modal" aria-labelledby="close-prompt-title">
+      <div class="modal-heading">
+        <div>
+          <span>Close PhotoForge</span>
+          <h1 id="close-prompt-title">
+            {closePrompt === 'busy' ? 'An operation is still running' : 'This document has unsaved changes'}
+          </h1>
+        </div>
+        <button type="button" aria-label="Cancel closing PhotoForge" on:click={cancelClose}>×</button>
+      </div>
+      <p class="modal-footnote">
+        {#if closePrompt === 'busy'}
+          A file or layer operation has not finished. Closing now abandons it. If nothing appears to be
+          happening, the operation has stalled and closing again from the title bar will quit immediately.
+        {:else}
+          Closing now discards every change since the last save. Recovery snapshots are taken
+          periodically, so some work may be recoverable, but the unsaved document itself is not kept.
+        {/if}
+      </p>
+      <div class="modal-actions">
+        <button type="button" on:click={cancelClose}>Keep working</button>
+        <button type="button" class="primary" on:click={confirmClose}>
+          {closePrompt === 'busy' ? 'Close anyway' : 'Discard and close'}
+        </button>
+      </div>
+    </dialog>
+  </div>
 {/if}
 
 {#if newDocumentOpen}
