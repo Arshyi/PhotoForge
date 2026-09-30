@@ -39,9 +39,9 @@ out-of-core smart-source rendering or GPU compositing.
 
 | Artifact | Size |
 | --- | --- |
-| `nsis/PhotoForge_0.13.0_x64-setup.exe` | 10,171,365 bytes |
+| `nsis/PhotoForge_0.13.0_x64-setup.exe` | 10,166,286 bytes |
 | `msi/PhotoForge_0.13.0_x64_en-US.msi` | 21,004,288 bytes |
-| `photoforge.exe` | 45,270,528 bytes |
+| `photoforge.exe` | 45,271,040 bytes |
 
 `SHA256SUMS.txt` records the SHA-256 of all three and verifies against the files
 on disk. The build was checked by its output files rather than by its exit
