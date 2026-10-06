@@ -88,7 +88,12 @@ async function saveCurrentProject(expectedCount: number) {
   return argsFor('save_layer_project');
 }
 
-describe('App document lifecycle', () => {
+// These mount the whole App against its full mock set and legitimately take
+// 3-10 s each, which is most of vitest's 5 s default. Five of them used to fail
+// whenever the machine was busy and pass when it was idle, so the suite total
+// depended on load rather than on the code. The bound is raised for this block
+// only: a global timeout would hide a genuinely slow unit test elsewhere.
+describe('App document lifecycle', { timeout: 30_000 }, () => {
   let snapshots: RecoveryRecord[];
   let failSave: boolean;
   let failPixelWorker: boolean;
