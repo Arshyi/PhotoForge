@@ -59,6 +59,28 @@ use commands::{
     validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
     validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
 };
+
+/// Registers the commands of the RAW flow — probe, preview, open (whole or as a
+/// region), develop, verify, relink — so integration tests can drive an oversized
+/// sensor through the real IPC boundary. The shipped binary registers its commands
+/// in `run` and never calls this.
+#[doc(hidden)]
+pub fn register_raw_flow_commands<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        inspect_raw,
+        open_raw_layer,
+        develop_raw_layer,
+        verify_raw_source,
+        relink_raw_source,
+        export_raw_layer_png16,
+        open_raw_image,
+        probe_image_source,
+        source_preview_image,
+        cancel_source_preview
+    ])
+}
 use commands::{
     cancel_source_preview, inspect_source_origin, open_image_selection, probe_image_source,
     source_preview_image,

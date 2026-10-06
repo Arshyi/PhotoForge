@@ -18,6 +18,12 @@
   /** Injectable so the dialog can be driven without a backend. */
   export let loadPreview: (path: string, maxEdge: number) => Promise<SourcePreview> = sourcePreviewImage;
   export let cancelPreview: () => Promise<void> = cancelSourcePreview;
+  /**
+   * Go straight to choosing a region, with this one selected. Used by "Change
+   * Source Region", where the user already has a region and wants a different one.
+   */
+  export let startInRegion = false;
+  export let initialRect: Rect | null = null;
 
   type Phase = 'choose' | 'region' | 'reduced';
   let phase: Phase = 'choose';
@@ -127,6 +133,10 @@
   // The first thing on offer is the safest to land on: Enter does what the
   // interface recommends, and Escape still cancels.
   onMount(() => {
+    if (startInRegion && optionOf(report, 'openRegion')) {
+      void enterRegion();
+      return;
+    }
     (dialogElement?.querySelector('.choice, .modal-actions button') as HTMLElement | null)?.focus();
   });
   onDestroy(() => {
@@ -178,6 +188,9 @@
                 {(regionOption.maxRegionPixels / 1_000_000).toFixed(1)} MP.
                 {#if regionOption.decode.kind === 'transientFull'}
                   This format has to be read whole to cut a region out, so opening takes as long as reading the file.
+                {:else if regionOption.decode.kind === 'segments'}
+                  Only the strips or tiles that cover the region are decoded. The compressed file is still read
+                  whole, and a camera RAW has no reduced copy.
                 {/if}
               </span>
             </button>
@@ -204,7 +217,14 @@
         </div>
       </div>
     {:else if phase === 'region'}
+      {#if startInRegion}
+        <p class="change-note" data-testid="change-note">
+          This opens the file again as a new document at the region you choose. Edits made to the
+          current document are not carried across, and you will be asked before it is replaced.
+        </p>
+      {/if}
       <RegionSelector
+        initial={initialRect}
         {admission}
         {previewState}
         {preview}
@@ -251,6 +271,7 @@
   .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 0.68rem; }
   .facts dt { color: var(--ink-faint); }
   .facts dd { margin: 0; color: var(--ink); }
+  .change-note { margin: 0 0 8px; color: var(--ink-soft); font-size: 0.66rem; line-height: 1.5; }
   .explain { margin: 0; color: var(--ink-soft); font-size: 0.68rem; line-height: 1.55; }
   .choices { display: grid; gap: 8px; }
   .choice { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink); background: var(--surface-raised); text-align: left; cursor: pointer; }

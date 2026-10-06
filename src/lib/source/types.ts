@@ -12,7 +12,7 @@ export type SourceKind = 'png' | 'jpeg' | 'webP' | 'dng';
 
 export type RegionDecode =
   | { kind: 'rows' }
-  | { kind: 'segments' }
+  | { kind: 'segments'; fixedBytes: number; bytesPerPixel: number }
   | { kind: 'transientFull'; bytesPerPixel: number }
   | { kind: 'none' };
 

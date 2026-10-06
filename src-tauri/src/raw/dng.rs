@@ -13,6 +13,7 @@
 use super::ljpeg;
 use super::tiff::{self, Ifd, TiffFile};
 use super::{raw_max_pixels, RawCaptureMetadata, RawError};
+use crate::source::Rect;
 
 // Baseline TIFF tags.
 const TAG_NEW_SUBFILE_TYPE: u16 = 254;
@@ -178,7 +179,30 @@ pub struct SensorImage {
     pub linear: bool,
 }
 
+/// What a caller needs to know about a sensor once its samples are gone.
+///
+/// Development consumes the samples; a layer then needs the camera's description
+/// of itself, not two bytes per photosite it will never read again.
+#[derive(Debug, Clone)]
+pub struct SensorSummary {
+    pub metadata: RawCaptureMetadata,
+    pub cfa_name: String,
+    pub bits_per_sample: u8,
+    pub black_level: [f32; 4],
+    pub white_level: f32,
+}
+
 impl SensorImage {
+    pub fn summary(&self) -> SensorSummary {
+        SensorSummary {
+            metadata: self.metadata.clone(),
+            cfa_name: self.cfa.name().to_string(),
+            bits_per_sample: self.bits_per_sample,
+            black_level: self.black_level,
+            white_level: self.white_level,
+        }
+    }
+
     pub fn sample(&self, x: u32, y: u32) -> u16 {
         let index = y as usize * self.width as usize + x as usize;
         self.data.get(index).copied().unwrap_or(0)
@@ -200,8 +224,96 @@ pub fn is_dng(data: &[u8]) -> bool {
         .any(|ifd| ifd.get(TAG_DNG_VERSION).is_some())
 }
 
-/// Decodes a DNG buffer into its sensor image.
+/// Decodes a DNG buffer into its whole sensor image.
 pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
+    decode_inner(data, None)
+}
+
+/// Decodes only the part of the sensor inside `window`.
+///
+/// Segments that do not overlap the window are never decoded, so decoded memory
+/// follows the window and, for a tiled file, so does the work. The origin must be
+/// even in both directions: the Bayer pattern repeats every two photosites, so an
+/// even origin keeps every photosite's colour the same inside the window as it is
+/// on the sensor.
+///
+/// What this does **not** save is the file itself. The caller holds the compressed
+/// bytes, so a region bounds the *decoded* sensor and everything developed from it,
+/// not the read of the file.
+pub fn decode_window(data: &[u8], window: Rect) -> Result<SensorImage, RawError> {
+    decode_inner(data, Some(window))
+}
+
+/// How the sensor image of a DNG is divided up, without decoding any of it.
+pub fn inspect_layout(data: &[u8]) -> Result<SegmentLayout, RawError> {
+    let file = tiff::parse(data).map_err(|error| RawError::Malformed(error.to_string()))?;
+    let raw_index = choose_raw_ifd(&file).ok_or_else(|| {
+        RawError::Malformed("the file contains no full-resolution sensor image".into())
+    })?;
+    let raw = &file.ifds[raw_index];
+    let width = raw
+        .u32(TAG_IMAGE_WIDTH)
+        .ok_or_else(|| RawError::Malformed("the sensor image declares no width".into()))?;
+    let height = raw
+        .u32(TAG_IMAGE_LENGTH)
+        .ok_or_else(|| RawError::Malformed("the sensor image declares no height".into()))?;
+    if width == 0
+        || height == 0
+        || u64::from(width) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+        || u64::from(height) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+    {
+        return Err(RawError::InvalidMetadata(
+            "the sensor image has implausible dimensions".into(),
+        ));
+    }
+    let bits = u8::try_from(raw.u32(TAG_BITS_PER_SAMPLE).unwrap_or(16))
+        .map_err(|_| RawError::Unsupported("invalid BitsPerSample".into()))?;
+    segment_layout(
+        data,
+        raw,
+        width,
+        height,
+        bits,
+        raw.u32(TAG_COMPRESSION).unwrap_or(COMPRESSION_NONE),
+    )
+}
+
+/// Calls `visit(x, y, width, height, samples)` for every segment of the sensor,
+/// one at a time, so a statistic over the whole sensor needs only one segment
+/// in memory.
+pub fn visit_sensor(
+    data: &[u8],
+    visit: impl FnMut(u32, u32, u32, u32, &[u16]),
+) -> Result<(), RawError> {
+    visit_sensor_until(data, None, visit)
+}
+
+/// As `visit_sensor`, stopping with `RawError::Cancelled` between segments once
+/// `cancel` is set.
+pub fn visit_sensor_until(
+    data: &[u8],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut visit: impl FnMut(u32, u32, u32, u32, &[u16]),
+) -> Result<(), RawError> {
+    let layout = inspect_layout(data)?;
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: layout.width,
+        height: layout.height,
+    };
+    visit_segments(data, &layout, &whole, cancel, |segment| {
+        visit(
+            segment.x,
+            segment.y,
+            segment.width,
+            segment.height,
+            &segment.samples,
+        );
+    })
+}
+
+fn decode_inner(data: &[u8], window: Option<Rect>) -> Result<SensorImage, RawError> {
     let file = tiff::parse(data).map_err(|error| RawError::Malformed(error.to_string()))?;
     if !file
         .ifds
@@ -223,8 +335,43 @@ pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
     let height = raw
         .u32(TAG_IMAGE_LENGTH)
         .ok_or_else(|| RawError::Malformed("the sensor image declares no height".into()))?;
-    super::validate_dimensions(width, height)?;
-    crate::resources::ResourceEstimate::decode(width, height, data.len() as u64)
+    // A whole decode is bounded by the pixel limit. A window decode is bounded by
+    // the window, and the sensor it is cut from need only be a plausible size.
+    let area = match window {
+        None => {
+            super::validate_dimensions(width, height)?;
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }
+        }
+        Some(window) => {
+            if u64::from(width) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+                || u64::from(height) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+                || width == 0
+                || height == 0
+            {
+                return Err(RawError::InvalidMetadata(
+                    "the sensor image has implausible dimensions".into(),
+                ));
+            }
+            if !window.is_within(width, height) {
+                return Err(RawError::InvalidMetadata(
+                    "the requested window lies outside the sensor".into(),
+                ));
+            }
+            if window.x % 2 != 0 || window.y % 2 != 0 {
+                return Err(RawError::InvalidMetadata(
+                    "a window must start on an even photosite to keep the Bayer phase".into(),
+                ));
+            }
+            super::validate_dimensions(window.width, window.height)?;
+            window
+        }
+    };
+    crate::resources::ResourceEstimate::decode(area.width, area.height, data.len() as u64)
         .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
 
     let photometric = raw.u32(TAG_PHOTOMETRIC).unwrap_or(PHOTOMETRIC_CFA);
@@ -249,7 +396,8 @@ pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
     }
 
     let compression = raw.u32(TAG_COMPRESSION).unwrap_or(COMPRESSION_NONE);
-    let samples = decode_samples(data, raw, width, height, bits_per_sample, compression)?;
+    let layout = segment_layout(data, raw, width, height, bits_per_sample, compression)?;
+    let samples = decode_samples(data, &layout, &area)?;
 
     let cfa = if linear {
         CfaPattern::RGGB
@@ -272,14 +420,20 @@ pub fn decode(data: &[u8]) -> Result<SensorImage, RawError> {
 
     Ok(SensorImage {
         data: samples,
-        width,
-        height,
+        width: area.width,
+        height: area.height,
         cfa,
         black_level,
         white_level,
         bits_per_sample,
-        active_area,
-        default_crop,
+        // These describe the whole sensor, so for a window they would point at
+        // the wrong place. The window *is* the picture it carries.
+        active_area: if window.is_some() {
+            (0, 0, area.width, area.height)
+        } else {
+            active_area
+        },
+        default_crop: if window.is_some() { None } else { default_crop },
         as_shot_neutral,
         camera_to_srgb,
         orientation: read_orientation(&file),
@@ -561,20 +715,59 @@ fn read_metadata(file: &TiffFile) -> RawCaptureMetadata {
     }
 }
 
-/// Reads the pixel payload, whether it is stored in strips or tiles.
-fn decode_samples(
+/// Bytes held per photosite of the segment being decoded: the decoded samples
+/// and, for lossless JPEG, the decoder's own frame of the same samples.
+pub const SEGMENT_TRANSIENT_BYTES_PER_PHOTOSITE: u64 = 4;
+
+/// How the pixel payload of a sensor image is divided up.
+///
+/// Every strip or tile is compressed on its own, which is the property that makes
+/// reading part of the sensor possible at all: a segment that lies outside the
+/// window wanted is never decoded.
+#[derive(Debug, Clone)]
+pub struct SegmentLayout {
+    pub width: u32,
+    pub height: u32,
+    pub bits: u8,
+    pub compression: u32,
+    pub tiled: bool,
+    pub segment_width: u32,
+    pub segment_height: u32,
+    pub across: u32,
+    offsets: Vec<u32>,
+    counts: Vec<u32>,
+    little_endian: bool,
+}
+
+impl SegmentLayout {
+    pub fn segment_count(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Samples in one segment, the most that is ever decoded at once.
+    pub fn segment_pixels(&self) -> u64 {
+        u64::from(self.segment_width) * u64::from(self.segment_height)
+    }
+}
+
+/// One decoded strip or tile, clipped to the sensor.
+struct Segment {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    /// `width * height` samples, row-major.
+    samples: Vec<u16>,
+}
+
+fn segment_layout(
     data: &[u8],
     ifd: &Ifd,
     width: u32,
     height: u32,
     bits: u8,
     compression: u32,
-) -> Result<Vec<u16>, RawError> {
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels > raw_max_pixels() {
-        return Err(RawError::FileTooLarge);
-    }
-
+) -> Result<SegmentLayout, RawError> {
     let tiled = ifd.get(TAG_TILE_OFFSETS).is_some();
     let (offsets, counts) = if tiled {
         (
@@ -614,13 +807,20 @@ fn decode_samples(
         1
     };
     let down = height.div_ceil(segment_height);
-    let expected_segments = u64::from(across) * u64::from(down);
-    if expected_segments != offsets.len() as u64
-        || u64::from(segment_width) * u64::from(segment_height) > raw_max_pixels()
-    {
+    if u64::from(across) * u64::from(down) != offsets.len() as u64 {
         return Err(RawError::Malformed(
             "strip/tile dimensions and segment count disagree".into(),
         ));
+    }
+    // One segment is decoded whole, so its size bounds the transient. A sensor
+    // stored as a single strip cannot be read in pieces, so the strip is the
+    // sensor. What is bounded is the *bytes* held at once, not the pixel count of
+    // a developed image: samples are two bytes each, so a segment can hold far
+    // more photosites than a working image could.
+    let transient = (u64::from(segment_width) * u64::from(segment_height))
+        .saturating_mul(SEGMENT_TRANSIENT_BYTES_PER_PHOTOSITE);
+    if transient > crate::resources::max_job_bytes() {
+        return Err(RawError::FileTooLarge);
     }
     for (tag, name) in [
         (317, "Predictor"),
@@ -638,113 +838,195 @@ fn decode_samples(
             "DNG LinearizationTable is not implemented".into(),
         ));
     }
+    Ok(SegmentLayout {
+        width,
+        height,
+        bits,
+        compression,
+        tiled,
+        segment_width,
+        segment_height,
+        across,
+        offsets,
+        counts,
+        little_endian: data.starts_with(b"II"),
+    })
+}
+
+/// Decodes segment `index`, or `None` for one that lies wholly below the sensor.
+fn decode_segment(
+    data: &[u8],
+    layout: &SegmentLayout,
+    index: usize,
+) -> Result<Option<Segment>, RawError> {
+    let start = layout.offsets[index] as usize;
+    let length = layout.counts[index] as usize;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| RawError::Malformed("a strip offset overflows".into()))?;
+    let payload = data
+        .get(start..end)
+        .ok_or_else(|| RawError::Malformed("a strip lies outside the file".into()))?;
+
+    let (origin_x, origin_y) = if layout.tiled {
+        let column = (index as u32) % layout.across;
+        let row = (index as u32) / layout.across;
+        (column * layout.segment_width, row * layout.segment_height)
+    } else {
+        (0, index as u32 * layout.segment_height)
+    };
+    if origin_y >= layout.height {
+        return Ok(None);
+    }
+    let width = layout.segment_width.min(layout.width - origin_x);
+    let height = layout.segment_height.min(layout.height - origin_y);
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(width as usize * height as usize)
+        .map_err(|_| RawError::FileTooLarge)?;
+    samples.resize(width as usize * height as usize, 0u16);
+
+    match layout.compression {
+        COMPRESSION_NONE => {
+            let rows_in_payload = if layout.tiled {
+                layout.segment_height
+            } else {
+                height
+            };
+            let needed = (u64::from(layout.segment_width) * u64::from(layout.bits))
+                .div_ceil(8)
+                .checked_mul(u64::from(rows_in_payload))
+                .ok_or(RawError::FileTooLarge)?;
+            if (payload.len() as u64) < needed {
+                return Err(RawError::Malformed(
+                    "uncompressed strip/tile payload is truncated".into(),
+                ));
+            }
+            // TIFF pads each row to a byte boundary, so rows are addressed by
+            // their own stride rather than by a running bit position.
+            let row_bytes = (u64::from(layout.segment_width) * u64::from(layout.bits)).div_ceil(8) as usize;
+            for row in 0..height as usize {
+                let Some(row_data) = payload.get(row * row_bytes..(row + 1) * row_bytes) else {
+                    break;
+                };
+                for column in 0..width as usize {
+                    samples[row * width as usize + column] =
+                        if layout.bits == 16 && !layout.little_endian {
+                            u16::from_be_bytes([row_data[column * 2], row_data[column * 2 + 1]])
+                        } else {
+                            read_packed(row_data, column, layout.bits)
+                        };
+                }
+            }
+        }
+        COMPRESSION_LOSSLESS_JPEG => {
+            let frame = ljpeg::decode(payload)
+                .map_err(|error| RawError::Malformed(error.to_string()))?;
+            if frame.width.checked_mul(frame.components) != Some(layout.segment_width as usize)
+                || frame.height < height as usize
+                || frame.height > layout.segment_height as usize
+            {
+                return Err(RawError::Malformed(
+                    "lossless JPEG frame dimensions disagree with its strip/tile".into(),
+                ));
+            }
+            let row_samples = frame.width * frame.components;
+            for row in 0..height as usize {
+                for column in 0..width as usize {
+                    let Some(value) = frame.samples.get(row * row_samples + column) else {
+                        return Ok(Some(Segment { x: origin_x, y: origin_y, width, height, samples }));
+                    };
+                    samples[row * width as usize + column] = *value;
+                }
+            }
+        }
+        other => {
+            return Err(RawError::Unsupported(format!(
+                "DNG compression {other} is not supported; this build reads uncompressed and lossless JPEG"
+            )))
+        }
+    }
+    Ok(Some(Segment {
+        x: origin_x,
+        y: origin_y,
+        width,
+        height,
+        samples,
+    }))
+}
+
+/// Whether a segment's rectangle overlaps the window at all.
+fn overlaps(layout: &SegmentLayout, index: usize, window: &Rect) -> bool {
+    let (x, y) = if layout.tiled {
+        (
+            u64::from((index as u32) % layout.across) * u64::from(layout.segment_width),
+            u64::from((index as u32) / layout.across) * u64::from(layout.segment_height),
+        )
+    } else {
+        (0, index as u64 * u64::from(layout.segment_height))
+    };
+    let (w, h) = (
+        u64::from(layout.segment_width),
+        u64::from(layout.segment_height),
+    );
+    x < window.right()
+        && x + w > u64::from(window.x)
+        && y < window.bottom()
+        && y + h > u64::from(window.y)
+}
+
+/// Calls `visit` for every segment that overlaps `window`, decoding no other.
+fn visit_segments(
+    data: &[u8],
+    layout: &SegmentLayout,
+    window: &Rect,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    mut visit: impl FnMut(&Segment),
+) -> Result<(), RawError> {
+    for index in 0..layout.segment_count() {
+        if !overlaps(layout, index, window) {
+            continue;
+        }
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            return Err(RawError::Cancelled);
+        }
+        if let Some(segment) = decode_segment(data, layout, index)? {
+            visit(&segment);
+        }
+    }
+    Ok(())
+}
+
+/// Reads the sensor samples inside `window` into a buffer of the window's size.
+fn decode_samples(
+    data: &[u8],
+    layout: &SegmentLayout,
+    window: &Rect,
+) -> Result<Vec<u16>, RawError> {
+    let pixels = window.pixels();
+    if pixels > raw_max_pixels() {
+        return Err(RawError::FileTooLarge);
+    }
     let mut out = Vec::new();
     out.try_reserve_exact(pixels as usize)
         .map_err(|_| RawError::FileTooLarge)?;
     out.resize(pixels as usize, 0u16);
-
-    for (index, (offset, count)) in offsets.iter().zip(counts.iter()).enumerate() {
-        let start = *offset as usize;
-        let length = *count as usize;
-        let end = start
-            .checked_add(length)
-            .ok_or_else(|| RawError::Malformed("a strip offset overflows".into()))?;
-        let payload = data
-            .get(start..end)
-            .ok_or_else(|| RawError::Malformed("a strip lies outside the file".into()))?;
-
-        let (origin_x, origin_y) = if tiled {
-            let column = (index as u32) % across;
-            let row = (index as u32) / across;
-            (column * segment_width, row * segment_height)
-        } else {
-            (0, index as u32 * segment_height)
-        };
-        if origin_y >= height {
-            continue;
+    let stride = window.width as usize;
+    visit_segments(data, layout, window, None, |segment| {
+        // Copy the overlap of the segment and the window, row by row.
+        let left = segment.x.max(window.x);
+        let right = (segment.x + segment.width).min(window.x + window.width);
+        let top = segment.y.max(window.y);
+        let bottom = (segment.y + segment.height).min(window.y + window.height);
+        for y in top..bottom {
+            let from =
+                (y - segment.y) as usize * segment.width as usize + (left - segment.x) as usize;
+            let to = (y - window.y) as usize * stride + (left - window.x) as usize;
+            let count = (right - left) as usize;
+            out[to..to + count].copy_from_slice(&segment.samples[from..from + count]);
         }
-
-        match compression {
-            COMPRESSION_NONE => {
-                let rows = if tiled { segment_height } else { segment_height.min(height-origin_y) };
-                let needed = (u64::from(segment_width)*u64::from(bits)).div_ceil(8).checked_mul(u64::from(rows)).ok_or(RawError::FileTooLarge)?;
-                if (payload.len() as u64) < needed {
-                    return Err(RawError::Malformed("uncompressed strip/tile payload is truncated".into()));
-                }
-                copy_uncompressed(
-                payload,
-                &mut out,
-                width,
-                height,
-                origin_x,
-                origin_y,
-                segment_width,
-                segment_height,
-                bits,
-                data.starts_with(b"II"),
-            )},
-            COMPRESSION_LOSSLESS_JPEG => {
-                let frame = ljpeg::decode(payload)
-                    .map_err(|error| RawError::Malformed(error.to_string()))?;
-                if frame.width.checked_mul(frame.components) != Some(segment_width as usize)
-                    || frame.height < segment_height.min(height-origin_y) as usize
-                    || frame.height > segment_height as usize {
-                    return Err(RawError::Malformed("lossless JPEG frame dimensions disagree with its strip/tile".into()));
-                }
-                copy_frame(&frame, &mut out, width, height, origin_x, origin_y);
-            }
-            other => {
-                return Err(RawError::Unsupported(format!(
-                    "DNG compression {other} is not supported; this build reads uncompressed and lossless JPEG"
-                )))
-            }
-        }
-    }
+    })?;
     Ok(out)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn copy_uncompressed(
-    payload: &[u8],
-    out: &mut [u16],
-    width: u32,
-    height: u32,
-    origin_x: u32,
-    origin_y: u32,
-    segment_width: u32,
-    segment_height: u32,
-    bits: u8,
-    little_endian: bool,
-) {
-    // TIFF pads each row to a byte boundary, so rows are addressed by their own
-    // stride rather than by a running bit position.
-    let row_bits = u64::from(segment_width) * u64::from(bits);
-    let row_bytes = row_bits.div_ceil(8) as usize;
-    for row in 0..segment_height {
-        let y = origin_y + row;
-        if y >= height {
-            break;
-        }
-        let row_start = row as usize * row_bytes;
-        let Some(row_data) = payload.get(row_start..row_start + row_bytes) else {
-            break;
-        };
-        for column in 0..segment_width {
-            let x = origin_x + column;
-            if x >= width {
-                break;
-            }
-            let value = if bits == 16 && !little_endian {
-                u16::from_be_bytes([
-                    row_data[column as usize * 2],
-                    row_data[column as usize * 2 + 1],
-                ])
-            } else {
-                read_packed(row_data, column as usize, bits)
-            };
-            out[y as usize * width as usize + x as usize] = value;
-        }
-    }
 }
 
 /// Reads the `index`-th sample of `bits` width, packed most significant first.
@@ -768,33 +1050,6 @@ fn read_packed(row: &[u8], index: usize, bits: u8) -> u16 {
                 value = (value << 1) | u32::from(taken);
             }
             value as u16
-        }
-    }
-}
-
-fn copy_frame(
-    frame: &ljpeg::Frame,
-    out: &mut [u16],
-    width: u32,
-    height: u32,
-    origin_x: u32,
-    origin_y: u32,
-) {
-    let row_samples = frame.width * frame.components;
-    for row in 0..frame.height {
-        let y = origin_y + row as u32;
-        if y >= height {
-            break;
-        }
-        for column in 0..row_samples {
-            let x = origin_x + column as u32;
-            if x >= width {
-                break;
-            }
-            let Some(value) = frame.samples.get(row * row_samples + column) else {
-                return;
-            };
-            out[y as usize * width as usize + x as usize] = *value;
         }
     }
 }

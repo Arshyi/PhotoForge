@@ -574,55 +574,105 @@ pub async fn export_developed_png16(
 pub async fn open_raw_image(
     path: String,
     request_id: u64,
+    region: Option<crate::source::Rect>,
     state: State<'_, AppState>,
 ) -> Result<OpenRawImageResult, AppError> {
+    // The same open boundary as every other open: refresh the limits for the
+    // document about to arrive, and put the old ones back if it does not.
+    let previous = crate::resources::snapshot();
+    crate::resources::refresh(&crate::resources::memory::OsProbe);
+    let outcome = open_raw_image_inner(path, request_id, region, &state).await;
+    if outcome.is_err() {
+        crate::resources::restore(previous);
+    }
+    outcome
+}
+
+async fn open_raw_image_inner(
+    path: String,
+    request_id: u64,
+    region: Option<crate::source::Rect>,
+    state: &State<'_, AppState>,
+) -> Result<OpenRawImageResult, AppError> {
     let started = Instant::now();
-    let request = OpenRequest::begin(&state, request_id)?;
+    let request = OpenRequest::begin(state, request_id)?;
 
     let source_path = PathBuf::from(&path);
+
+    // Whole or region, the planner decides, against the budget in force and the
+    // memory free now. A region is held to the same rule as one cut from a PNG.
+    let gate_path = source_path.clone();
+    let admitted = tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
+        let probed = crate::source::probe::probe_path(&gate_path)?;
+        match region {
+            Some(rect) => {
+                let planned = crate::source::probe::report(&probed, 0);
+                crate::source::open::gate_region(&probed, &planned, rect)
+            }
+            None => crate::source::probe::require_full_admission(&probed),
+        }
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("the RAW worker stopped".into()));
+    if let Err(error) = admitted.and_then(|result| result) {
+        clear_pending_open(state, request_id);
+        return Err(error);
+    }
+
     let bytes = match crate::raw::read_source_bytes(&source_path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(AppError::RawInspection(error.to_string()));
         }
     };
 
-    // Decoding and demosaicing a full sensor is CPU-bound and must not run on
-    // the interface thread.
+    // Decoding and demosaicing a sensor is CPU-bound and must not run on the
+    // interface thread.
+    let worker_path = source_path.clone();
     let developed = match tauri::async_runtime::spawn_blocking(move || {
-        let _job = crate::resources::acquire_job(None)
-            .map_err(|e| crate::raw::RawError::InvalidMetadata(e.to_string()))?;
-        let sensor = crate::raw::dng::decode(&bytes)?;
-        let developed = crate::raw::develop::develop_sensor(
-            &sensor,
-            &crate::color::DevelopmentParameters::default(),
-            crate::raw::develop::RenderScale::Full,
-        )?;
-        Ok::<_, crate::raw::RawError>((sensor, developed))
+        let _job = crate::resources::acquire_job(None)?;
+        let defaults = crate::color::DevelopmentParameters::default();
+        let (developed, summary) = match region {
+            None => {
+                let sensor =
+                    crate::raw::dng::decode(&bytes).map_err(crate::source::dng::map_raw)?;
+                let developed = crate::raw::develop::develop_sensor(
+                    &sensor,
+                    &defaults,
+                    crate::raw::develop::RenderScale::Full,
+                )
+                .map_err(crate::source::dng::map_raw)?;
+                (developed, sensor.summary())
+            }
+            Some(rect) => crate::raw::develop::develop_region_described(&bytes, rect, &defaults)
+                .map_err(crate::source::dng::map_raw)?,
+        };
+        // The identity recorded is that of the bytes just decoded, not of whatever
+        // is on disk by the time a second read would happen.
+        let (sensor_width, sensor_height) = developed.source_dimensions;
+        let reference = crate::raw::source_reference_for_bytes(
+            &worker_path,
+            &bytes,
+            sensor_width,
+            sensor_height,
+        )
+        .map_err(crate::source::dng::map_raw)?;
+        Ok::<_, AppError>((developed, summary, reference))
     })
     .await
     {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            clear_pending_open(&state, request_id);
-            return Err(AppError::RawInspection(error.to_string()));
+            clear_pending_open(state, request_id);
+            return Err(error);
         }
         Err(_) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
         }
     };
-    let (sensor, developed) = developed;
-
-    let reference =
-        match crate::raw::source_reference_for(&source_path, sensor.width, sensor.height) {
-            Ok(reference) => reference,
-            Err(error) => {
-                clear_pending_open(&state, request_id);
-                return Err(AppError::RawInspection(error.to_string()));
-            }
-        };
+    let (developed, sensor, reference) = developed;
 
     let rendered = developed.image.to_rgba8();
     let (width, height) = (rendered.width(), rendered.height());
@@ -658,14 +708,14 @@ pub async fn open_raw_image(
     let preview_data_url = match encode_preview(&preview) {
         Ok(preview) => preview,
         Err(error) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(error);
         }
     };
 
     let mut store = LayerPixelStore::default();
     if let Err(error) = store.reset(width, height) {
-        clear_pending_open(&state, request_id);
+        clear_pending_open(state, request_id);
         return Err(error);
     }
     let working = std::sync::Arc::new(developed.image);
@@ -674,7 +724,7 @@ pub async fn open_raw_image(
     )) {
         Ok(id) => id,
         Err(error) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(error);
         }
     };
@@ -696,9 +746,10 @@ pub async fn open_raw_image(
         decoder: crate::raw::DECODER_ID.to_string(),
         decoder_version: crate::raw::DECODER_VERSION.to_string(),
         capture: sensor.metadata.clone(),
+        view: region,
     };
     if let Err(error) = source.validate() {
-        clear_pending_open(&state, request_id);
+        clear_pending_open(state, request_id);
         return Err(AppError::RawInspection(error.to_string()));
     }
 
@@ -721,7 +772,7 @@ pub async fn open_raw_image(
         source: Some(source),
         multipliers: developed.multipliers,
         color_managed: developed.color_managed,
-        cfa_pattern: sensor.cfa.name().to_string(),
+        cfa_pattern: sensor.cfa_name.clone(),
         white_level: sensor.white_level,
     };
 

@@ -10,11 +10,14 @@
 //!   scale that never produces the whole frame.
 //! * [`webp`] decodes the whole frame, as the format's own decoder can do no
 //!   other, and says so.
-//! * [`png`] is the one format that supports true row-streaming region decoding.
+//! * [`png`] supports true row-streaming region decoding.
+//! * [`dng`] supports region decoding by segment, through the RAW pipeline, and has
+//!   no reduced copy.
 //!
 //! The decoders live beside it and each states, in its own header, exactly what
 //! it allocates — a decoder that decodes the whole frame and crops is called
 //! that, never "region decoding".
+pub mod dng;
 pub mod jpeg;
 pub mod model;
 pub mod open;

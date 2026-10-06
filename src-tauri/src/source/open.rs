@@ -15,14 +15,14 @@
 //! put when it does.
 use super::model::{Rect, SourceIdentity, SourceOrigin, SourceView};
 use super::probe::{image_format_of, probe_path, report, Probed, HARD_MAX_SOURCE_FILE_BYTES};
-use super::{jpeg, png, webp};
+use super::{dng, jpeg, png, webp};
 use crate::color::FloatImage;
 use crate::error::AppError;
 use crate::infrastructure::image_io::{
     assemble_loaded, assemble_reduced, encode_preview, LoadedImage, SourceTraits,
 };
 use crate::infrastructure::local_path::{check_local_absolute, hash_file};
-use crate::resources::admission::{AdmissionOption, SourceKind};
+use crate::resources::admission::{AdmissionOption, AdmissionReport, SourceKind};
 use image::DynamicImage;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,6 +82,47 @@ fn identity_of(probed: &Probed, stored_path: String, sha256: String) -> SourceId
     }
 }
 
+/// Refuses a region the planner would not have offered.
+///
+/// This is the same check whatever the format, so a camera RAW and a PNG are held
+/// to one rule: the rectangle lies on the source, and it is no larger than the
+/// planner's own answer for this source on this machine.
+pub fn gate_region(probed: &Probed, planned: &AdmissionReport, rect: Rect) -> Result<(), AppError> {
+    if !rect.is_within(probed.width, probed.height) {
+        return Err(AppError::InvalidOperation(
+            "the region lies outside the image".into(),
+        ));
+    }
+    let allowed = planned.options.iter().find_map(|option| match option {
+        AdmissionOption::OpenRegion {
+            max_region_pixels, ..
+        } => Some(*max_region_pixels),
+        _ => None,
+    });
+    // A source that opens whole may also be opened by region: the planner
+    // offers OpenFull, not OpenRegion, in that case, so the whole-file
+    // ceiling applies.
+    let limit = allowed.unwrap_or_else(crate::resources::max_working_pixels);
+    if allowed.is_none()
+        && !planned
+            .options
+            .iter()
+            .any(|option| matches!(option, AdmissionOption::OpenFull { .. }))
+    {
+        return Err(AppError::ImageTooLarge {
+            pixels: rect.pixels(),
+            limit,
+        });
+    }
+    if rect.pixels() > limit {
+        return Err(AppError::ImageTooLarge {
+            pixels: rect.pixels(),
+            limit,
+        });
+    }
+    Ok(())
+}
+
 /// Opens the part of `path` named by `selection` as a document-ready image, with
 /// its origin recorded.
 pub fn open_selection(
@@ -96,40 +137,7 @@ pub fn open_selection(
 
     // Gate on the same report the interface showed.
     match selection {
-        OpenSelection::Region(rect) => {
-            if !rect.is_within(probed.width, probed.height) {
-                return Err(AppError::InvalidOperation(
-                    "the region lies outside the image".into(),
-                ));
-            }
-            let allowed = planned.options.iter().find_map(|option| match option {
-                AdmissionOption::OpenRegion {
-                    max_region_pixels, ..
-                } => Some(*max_region_pixels),
-                _ => None,
-            });
-            // A source that opens whole may also be opened by region: the planner
-            // offers OpenFull, not OpenRegion, in that case, so the whole-file
-            // ceiling applies.
-            let limit = allowed.unwrap_or_else(crate::resources::max_working_pixels);
-            if allowed.is_none()
-                && !planned
-                    .options
-                    .iter()
-                    .any(|option| matches!(option, AdmissionOption::OpenFull { .. }))
-            {
-                return Err(AppError::ImageTooLarge {
-                    pixels: rect.pixels(),
-                    limit,
-                });
-            }
-            if rect.pixels() > limit {
-                return Err(AppError::ImageTooLarge {
-                    pixels: rect.pixels(),
-                    limit,
-                });
-            }
-        }
+        OpenSelection::Region(rect) => gate_region(&probed, &planned, rect)?,
         OpenSelection::Reduced { width, height } => {
             if width == 0 || height == 0 || width > probed.width || height > probed.height {
                 return Err(AppError::InvalidOperation(
@@ -255,6 +263,20 @@ pub fn source_preview(
     let longest = probed.width.max(probed.height);
     let scale = (f64::from(edge) / f64::from(longest)).min(1.0);
     let (width, height) = reduced_dimensions(probed.width, probed.height, scale);
+
+    // A DNG's preview is not a reduced *document*, so the reduced-copy option does
+    // not gate it. It is built a segment at a time and is as large as the picture
+    // and one segment, which the region the user will then choose has to fit in
+    // anyway; developing it still passes through the job-bytes check.
+    if probed.kind == SourceKind::Dng {
+        let picture = dng::preview(&probed.path, edge, cancel)?;
+        let (width, height) = (picture.width(), picture.height());
+        return Ok(SourcePreview {
+            data_url: encode_preview(&DynamicImage::ImageRgba8(picture.to_rgba8()))?,
+            width,
+            height,
+        });
+    }
 
     let planned = report(&probed, 0);
     let max_scale = planned.options.iter().find_map(|option| match option {

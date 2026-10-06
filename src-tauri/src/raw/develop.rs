@@ -30,6 +30,7 @@ use crate::color::{
     apply_development, ColorPipelineError, DevelopmentParameters, FloatImage, FloatRgba,
     WhiteBalance,
 };
+use crate::source::Rect;
 
 /// How large a preview may get before it is decimated.
 ///
@@ -131,40 +132,80 @@ pub fn resolve_multipliers(
     }
 }
 
-/// Grey-world estimate: the multipliers that make the average of each channel
-/// equal. Simple, deterministic, and honest about being an estimate.
+/// Running totals for the grey-world estimate, in **integers**.
+///
+/// Auto white balance is the one non-local step in development: it is a statistic
+/// over the whole sensor, so a region cannot compute it from itself and must be
+/// given the number the whole image would give. If the totals were floating point,
+/// summing the sensor in a different order — tile by tile instead of row by row —
+/// could differ in the last bit and tip the multipliers by an ulp, and a region
+/// would then not equal the crop of a full render. Fixed-point integer sums are
+/// exact and independent of order, so a streamed pass and a whole-frame pass agree
+/// to the bit.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AutoBalanceStats {
+    sums: [u64; 3],
+    counts: [u64; 3],
+}
+
+impl AutoBalanceStats {
+    /// Normalised samples sit in `0.001..=0.99`, so a value times 2^24 fits 25
+    /// bits, and a sensor of 2^35 photosites cannot overflow a `u64`.
+    const SCALE: f32 = 16_777_216.0;
+
+    /// `channel` is 0 red, 1 green, 2 blue.
+    pub fn add(&mut self, channel: usize, value: f32) {
+        // Saturated photosites carry no colour information.
+        if !(0.001..=0.99).contains(&value) {
+            return;
+        }
+        self.sums[channel] += (value * Self::SCALE).round() as u64;
+        self.counts[channel] += 1;
+    }
+
+    /// Grey-world: the multipliers that make the average of each channel equal.
+    /// Simple, deterministic, and honest about being an estimate.
+    pub fn multipliers(&self) -> [f32; 3] {
+        let mut averages = [0.0f64; 3];
+        for (average, (sum, count)) in averages
+            .iter_mut()
+            .zip(self.sums.iter().zip(self.counts.iter()))
+        {
+            *average = if *count > 0 {
+                *sum as f64 / f64::from(Self::SCALE) / *count as f64
+            } else {
+                0.0
+            };
+        }
+        // With no usable sample in a channel there is nothing to balance towards.
+        if averages.iter().any(|value| *value <= 0.0) {
+            return [1.0, 1.0, 1.0];
+        }
+        [
+            (averages[1] / averages[0]) as f32,
+            1.0,
+            (averages[1] / averages[2]) as f32,
+        ]
+    }
+}
+
+fn channel_index(color: dng::CfaColor) -> usize {
+    match color {
+        dng::CfaColor::Red => 0,
+        dng::CfaColor::Green => 1,
+        dng::CfaColor::Blue => 2,
+    }
+}
+
 fn auto_multipliers(cfa: &demosaic::NormalizedCfa) -> [f32; 3] {
-    let mut sums = [0.0f64; 3];
-    let mut counts = [0u64; 3];
+    let mut stats = AutoBalanceStats::default();
     for y in 0..cfa.height {
         for x in 0..cfa.width {
             let value = cfa.data[y as usize * cfa.width as usize + x as usize];
-            // Saturated photosites carry no colour information.
-            if !(0.001..=0.99).contains(&value) {
-                continue;
-            }
-            let channel = match cfa.cfa.color_at(x, y) {
-                dng::CfaColor::Red => 0,
-                dng::CfaColor::Green => 1,
-                dng::CfaColor::Blue => 2,
-            };
-            sums[channel] += f64::from(value);
-            counts[channel] += 1;
+            stats.add(channel_index(cfa.cfa.color_at(x, y)), value);
         }
     }
-    let mut averages = [0.0f32; 3];
-    for index in 0..3 {
-        averages[index] = if counts[index] > 0 {
-            (sums[index] / counts[index] as f64) as f32
-        } else {
-            0.0
-        };
-    }
-    // With no usable sample in a channel there is nothing to balance towards.
-    if averages.iter().any(|value| *value <= 0.0) {
-        return [1.0, 1.0, 1.0];
-    }
-    [averages[1] / averages[0], 1.0, averages[1] / averages[2]]
+    stats.multipliers()
 }
 
 /// Decimates a CFA plane by whole two-pixel blocks, preserving its phase.
@@ -213,6 +254,18 @@ pub fn develop_sensor(
     sensor: &dng::SensorImage,
     parameters: &DevelopmentParameters,
     scale: RenderScale,
+) -> Result<DevelopedRaw, RawError> {
+    develop_with(sensor, parameters, scale, None)
+}
+
+/// As `develop_sensor`, with the white-balance gains fixed by the caller instead
+/// of resolved from the sensor given. A region needs this: its own pixels are not
+/// the whole sensor, so an Auto balance has to be supplied from outside.
+fn develop_with(
+    sensor: &dng::SensorImage,
+    parameters: &DevelopmentParameters,
+    scale: RenderScale,
+    fixed_multipliers: Option<[f32; 3]>,
 ) -> Result<DevelopedRaw, RawError> {
     parameters
         .validate()
@@ -279,7 +332,8 @@ pub fn develop_sensor(
     }
 
     // 3. White balance, on the CFA, before interpolation.
-    let multipliers = resolve_multipliers(&parameters.white_balance, sensor, &cfa);
+    let multipliers = fixed_multipliers
+        .unwrap_or_else(|| resolve_multipliers(&parameters.white_balance, sensor, &cfa));
     demosaic::apply_white_balance(&mut cfa, multipliers);
 
     // 4. Demosaic.
@@ -325,6 +379,255 @@ pub fn develop_sensor(
         demosaic: quality,
         source_dimensions: (sensor.width, sensor.height),
     })
+}
+
+/// How many photosites of context each side of a region demosaicing reads.
+///
+/// Malvar-He-Cutler reads a 5x5 neighbourhood, so a pixel needs two photosites in
+/// every direction; bilinear needs one. A region decoded without this margin would
+/// be wrong along its edges, by an amount that depends on the picture.
+pub const fn demosaic_margin(quality: Quality) -> u32 {
+    match quality {
+        Quality::Fast => 1,
+        Quality::High => 2,
+    }
+}
+
+/// The sensor window a region needs: the region grown by the demosaic margin,
+/// clipped to the sensor, and moved out to an even origin so the Bayer phase is
+/// the same inside the window as on the sensor.
+pub fn region_window(rect: &Rect, sensor_width: u32, sensor_height: u32, quality: Quality) -> Rect {
+    let margin = demosaic_margin(quality);
+    let left = rect.x.saturating_sub(margin) & !1;
+    let top = rect.y.saturating_sub(margin) & !1;
+    let right =
+        (rect.right().saturating_add(u64::from(margin))).min(u64::from(sensor_width)) as u32;
+    let bottom =
+        (rect.bottom().saturating_add(u64::from(margin))).min(u64::from(sensor_height)) as u32;
+    Rect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    }
+}
+
+/// The white-balance gains for a development, computed from the *whole* sensor
+/// when the mode asks for it, one segment at a time.
+fn region_multipliers(
+    data: &[u8],
+    window: &dng::SensorImage,
+    parameters: &DevelopmentParameters,
+) -> Result<[f32; 3], RawError> {
+    if !matches!(parameters.white_balance, WhiteBalance::Auto) {
+        // Every other mode is a function of the file's metadata, which a window
+        // carries in full.
+        let cfa = demosaic::normalize(window);
+        return Ok(resolve_multipliers(&parameters.white_balance, window, &cfa));
+    }
+    let mut stats = AutoBalanceStats::default();
+    dng::visit_sensor(data, |x, y, width, height, samples| {
+        for row in 0..height {
+            for column in 0..width {
+                let (gx, gy) = (x + column, y + row);
+                let raw = f32::from(samples[(row * width + column) as usize]);
+                let black = window.black_level[dng::CfaPattern::cell_index(gx, gy)];
+                let range = window.white_level - black;
+                // The same arithmetic as `demosaic::normalize`, so the values the
+                // statistic sees are the values a full development would see.
+                let value = if range > 0.0 {
+                    (raw - black) / range
+                } else {
+                    0.0
+                };
+                let value = if value.is_finite() {
+                    value.max(0.0)
+                } else {
+                    0.0
+                };
+                stats.add(channel_index(window.cfa.color_at(gx, gy)), value);
+            }
+        }
+    })?;
+    Ok(resolve_multipliers_from_stats(&stats))
+}
+
+fn resolve_multipliers_from_stats(stats: &AutoBalanceStats) -> [f32; 3] {
+    // `resolve_multipliers` normalises to green; do the same to the raw estimate.
+    let raw = stats.multipliers();
+    let green = if raw[1].is_finite() && raw[1] > 0.0 {
+        raw[1]
+    } else {
+        1.0
+    };
+    let mut out = [1.0f32; 3];
+    for (index, value) in raw.iter().enumerate() {
+        let scaled = value / green;
+        out[index] = if scaled.is_finite() {
+            scaled.clamp(0.01, 16.0)
+        } else {
+            1.0
+        };
+    }
+    out
+}
+
+/// Develops one rectangle of a DNG without decoding the rest of the sensor.
+///
+/// The result is **identical** to the same rectangle cut from a development of the
+/// whole sensor. That is a property the tests assert bit for bit, and it rests on
+/// three things: the sensor window includes enough context for the demosaic; the
+/// window starts on an even photosite so the Bayer phase is unchanged; and the
+/// white balance, the one whole-image statistic, is computed over the whole sensor
+/// by an order-independent accumulation and handed in.
+///
+/// Memory follows the window, apart from one segment at a time while an Auto
+/// balance is measured. The compressed file is held by the caller.
+pub fn develop_region(
+    data: &[u8],
+    rect: Rect,
+    parameters: &DevelopmentParameters,
+) -> Result<DevelopedRaw, RawError> {
+    develop_region_described(data, rect, parameters).map(|(developed, _)| developed)
+}
+
+/// As `develop_region`, and also the camera's description of the sensor, which a
+/// layer keeps.
+pub fn develop_region_described(
+    data: &[u8],
+    rect: Rect,
+    parameters: &DevelopmentParameters,
+) -> Result<(DevelopedRaw, dng::SensorSummary), RawError> {
+    parameters
+        .validate()
+        .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
+    let layout = dng::inspect_layout(data)?;
+    if !rect.is_within(layout.width, layout.height) {
+        return Err(RawError::InvalidMetadata(
+            "the region lies outside the sensor".into(),
+        ));
+    }
+    let quality = RenderScale::Full.quality();
+    let window = region_window(&rect, layout.width, layout.height, quality);
+    let sensor = dng::decode_window(data, window)?;
+    let summary = sensor.summary();
+    // A one-channel LinearRaw file is not balanced at all.
+    let multipliers = if sensor.linear {
+        [1.0; 3]
+    } else {
+        region_multipliers(data, &sensor, parameters)?
+    };
+    let developed = develop_with(&sensor, parameters, RenderScale::Full, Some(multipliers))?;
+    // The window's samples have been consumed; free them before the cut is made.
+    drop(sensor);
+
+    // Cut the region out of the developed window.
+    let offset_x = rect.x - window.x;
+    let offset_y = rect.y - window.y;
+    let mut image = FloatImage::blank(rect.width, rect.height, FloatRgba::TRANSPARENT)
+        .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
+    let source_width = developed.image.width() as usize;
+    for row in 0..rect.height as usize {
+        let from = (offset_y as usize + row) * source_width + offset_x as usize;
+        let to = row * rect.width as usize;
+        image.pixels_mut()[to..to + rect.width as usize]
+            .copy_from_slice(&developed.image.pixels()[from..from + rect.width as usize]);
+    }
+    Ok((
+        DevelopedRaw {
+            image,
+            multipliers: developed.multipliers,
+            color_managed: developed.color_managed,
+            demosaic: developed.demosaic,
+            source_dimensions: (layout.width, layout.height),
+        },
+        summary,
+    ))
+}
+
+/// Bytes held per photosite of the window while a region is developed: the
+/// decoded samples (2), the normalised plane (4), the demosaiced RGB (12) and the
+/// float image built from it (16), all alive together at the step that builds the
+/// image. Counted from the stages in `develop_with`; checked against a measured
+/// peak by the resource tests rather than assumed.
+pub const DEVELOP_BYTES_PER_PHOTOSITE: u64 = 34;
+
+/// A picture of the whole sensor no larger than `max_edge` on a side, built one
+/// segment at a time.
+///
+/// Memory is the picture, not the sensor: each segment is decoded, the photosites
+/// that survive decimation are copied out, and the segment is dropped. The result
+/// is the same decimation the in-memory preview uses — whole two-photosite blocks,
+/// so every sample keeps its colour — followed by the ordinary development.
+///
+/// This is what makes choosing a region on a sensor too large to develop possible
+/// at all.
+pub fn develop_preview(
+    data: &[u8],
+    parameters: &DevelopmentParameters,
+    max_edge: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<DevelopedRaw, RawError> {
+    parameters
+        .validate()
+        .map_err(|error| RawError::InvalidMetadata(error.to_string()))?;
+    let layout = dng::inspect_layout(data)?;
+    let max_edge = max_edge.clamp(64, 8192);
+    let longest = layout.width.max(layout.height);
+    let factor = longest.div_ceil(max_edge).max(1);
+    if factor <= 1 {
+        // The whole sensor is already no larger than the preview.
+        let sensor = dng::decode(data)?;
+        return develop_with(&sensor, parameters, RenderScale::Full, None);
+    }
+    let step = factor * 2;
+    let out_width = (layout.width / step).max(1) * 2;
+    let out_height = (layout.height / step).max(1) * 2;
+
+    // The camera's description of itself comes from a window two photosites on a
+    // side; only the samples differ between it and the picture built below.
+    let corner = Rect {
+        x: 0,
+        y: 0,
+        width: layout.width.min(2),
+        height: layout.height.min(2),
+    };
+    let mut sensor = dng::decode_window(data, corner)?;
+    let mut samples = vec![0u16; out_width as usize * out_height as usize];
+    dng::visit_sensor_until(data, cancel, |sx, sy, width, height, segment| {
+        for row in 0..height {
+            let y = sy + row;
+            let within_y = y % step;
+            if within_y >= 2 {
+                continue;
+            }
+            let out_y = (y / step) * 2 + within_y;
+            if out_y >= out_height {
+                continue;
+            }
+            for column in 0..width {
+                let x = sx + column;
+                let within_x = x % step;
+                if within_x >= 2 {
+                    continue;
+                }
+                let out_x = (x / step) * 2 + within_x;
+                if out_x >= out_width {
+                    continue;
+                }
+                samples[out_y as usize * out_width as usize + out_x as usize] =
+                    segment[(row * width + column) as usize];
+            }
+        }
+    })?;
+    sensor.data = samples;
+    sensor.width = out_width;
+    sensor.height = out_height;
+    sensor.active_area = (0, 0, out_width, out_height);
+    sensor.default_crop = None;
+    let mut developed = develop_with(&sensor, parameters, RenderScale::Full, None)?;
+    developed.source_dimensions = (layout.width, layout.height);
+    Ok(developed)
 }
 
 /// Decodes and develops a RAW buffer in one step.

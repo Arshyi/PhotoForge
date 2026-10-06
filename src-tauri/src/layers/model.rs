@@ -302,10 +302,20 @@ impl Layer {
         if let Some(raw) = &self.raw {
             raw.validate()
                 .map_err(|error| AppError::InvalidLayerDocument(error.to_string()))?;
-            if !matches!(self.content, LayerContent::Pixel { .. }) {
+            let LayerContent::Pixel { width, height, .. } = &self.content else {
                 return Err(AppError::InvalidLayerDocument(
                     "only pixel layers can carry a RAW source".into(),
                 ));
+            };
+            // A layer that is a region of a sensor is exactly that many pixels.
+            // Re-developing it rebuilds the rectangle, so a raster of any other
+            // size would be one the source could not reproduce.
+            if let Some(view) = &raw.view {
+                if view.width != *width || view.height != *height {
+                    return Err(AppError::InvalidLayerDocument(
+                        "a RAW region layer's raster must be the size of its region".into(),
+                    ));
+                }
             }
         }
 

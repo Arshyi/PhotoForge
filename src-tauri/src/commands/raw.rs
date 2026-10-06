@@ -82,7 +82,7 @@ pub fn inspect_raw(path: String) -> Result<RawInspectionResult, AppError> {
 fn register(
     state: &AppState,
     developed: DevelopedRaw,
-    sensor: &dng::SensorImage,
+    sensor: &dng::SensorSummary,
     source: RawLayerSource,
     started: std::time::Instant,
     expected: Option<(u64, u64)>,
@@ -122,7 +122,7 @@ fn register(
         multipliers: developed.multipliers,
         color_managed: developed.color_managed,
         demosaic: developed.demosaic.name().to_string(),
-        cfa_pattern: sensor.cfa.name().to_string(),
+        cfa_pattern: sensor.cfa_name.clone(),
         bits_per_sample: sensor.bits_per_sample,
         black_level: sensor.black_level,
         white_level: sensor.white_level,
@@ -180,9 +180,10 @@ pub async fn open_raw_layer(
         decoder: DECODER_ID.to_string(),
         decoder_version: DECODER_VERSION.to_string(),
         capture: sensor.metadata.clone(),
+        view: None,
     };
     source.validate().map_err(map)?;
-    register(&state, developed, &sensor, source, started, None)
+    register(&state, developed, &sensor.summary(), source, started, None)
 }
 
 /// The parameters that produced a development, with the resolved white balance
@@ -271,12 +272,22 @@ pub async fn develop_raw_layer(
     };
 
     let for_worker = parameters.clone();
+    let view = request.source.view;
     let decoded = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)
             .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
-        let sensor = dng::decode(&bytes)?;
-        let developed = develop_sensor(&sensor, &for_worker, scale)?;
-        Ok::<_, RawError>((sensor, developed))
+        match view {
+            None => {
+                let sensor = dng::decode(&bytes)?;
+                let developed = develop_sensor(&sensor, &for_worker, scale)?;
+                Ok::<_, RawError>((sensor.summary(), developed))
+            }
+            // A region layer is re-developed as the same rectangle of the sensor,
+            // at full resolution: it was admitted because that fits, and a
+            // decimated preview would not line up with the rectangle.
+            Some(rect) => crate::raw::develop::develop_region_described(&bytes, rect, &for_worker)
+                .map(|(developed, summary)| (summary, developed)),
+        }
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("the RAW worker stopped".into()))?
@@ -312,7 +323,8 @@ pub fn verify_raw_source(
     reference: RawSourceReference,
     path: String,
 ) -> Result<RawSourceStatusResult, AppError> {
-    reference.validate().map_err(map)?;
+    // Identity of a file is checked whatever its size relative to the budget.
+    reference.validate_structure().map_err(map)?;
     Ok(RawSourceStatusResult {
         status: verify_source(&reference, &PathBuf::from(path)),
         expected_sha256: reference.sha256.clone(),
@@ -386,12 +398,20 @@ pub async fn export_raw_layer_png16(
     let _permit = state.export_gate.lock().await;
     let started = std::time::Instant::now();
 
+    let view = source.view;
     let (saved, width, height) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        let sensor = dng::decode(&bytes).map_err(map)?;
-        // Always the full sensor and the better algorithm, whatever the
-        // interface was previewing.
-        let developed = develop_sensor(&sensor, &parameters, RenderScale::Full).map_err(map)?;
+        // Always full resolution and the better algorithm, whatever the
+        // interface was previewing. A region layer exports its own rectangle.
+        let developed = match view {
+            None => {
+                let sensor = dng::decode(&bytes).map_err(map)?;
+                develop_sensor(&sensor, &parameters, RenderScale::Full).map_err(map)?
+            }
+            Some(rect) => {
+                crate::raw::develop::develop_region(&bytes, rect, &parameters).map_err(map)?
+            }
+        };
         let dimensions = (developed.image.width(), developed.image.height());
         let saved =
             crate::infrastructure::save_float_png16(&developed.image, &source_path, &output)?;
@@ -489,6 +509,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         // The same bytes, at a new location.
         let moved = directory.path().join("archive.dng");
@@ -513,6 +534,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         let error = relink_raw_source(source, other.to_string_lossy().into_owned())
             .expect_err("a different photograph must be refused");
@@ -536,6 +558,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         let absent = directory.path().join("gone.dng");
         assert!(relink_raw_source(source, absent.to_string_lossy().into_owned()).is_err());
@@ -557,6 +580,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         let json = serde_json::to_string(&source).unwrap();
         let restored: RawLayerSource = serde_json::from_str(&json).unwrap();
@@ -577,6 +601,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         let json = serde_json::to_string(&source).unwrap();
         let restored: RawLayerSource = serde_json::from_str(&json).unwrap();
@@ -597,6 +622,7 @@ mod tests {
             decoder: DECODER_ID.into(),
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
+            view: None,
         };
         source.decoder = String::new();
         assert!(source.validate().is_err());

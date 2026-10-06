@@ -139,7 +139,7 @@
     type WorkspaceMutationGuard
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
-  import { developRawLayer, isRawPath, metadataRows } from './lib/utils/raw';
+  import { developRawLayer, isRawPath, metadataRows, verifyRawSource } from './lib/utils/raw';
   import type { ColorExportOptions, OpenRawImageResult, RawDevelopmentParameters, RawLayerSource } from './lib/types/editor';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import TextPanel from './lib/components/TextPanel.svelte';
@@ -149,8 +149,9 @@
   import SmartObjectPanel from './lib/components/SmartObjectPanel.svelte';
   import SmartContentsEditor from './lib/components/SmartContentsEditor.svelte';
   import { sourceDimensions, replaceSmartSourceDocument } from './lib/layers/smart';
-  import { probeImageSource } from './lib/source/commands';
-  import { needsDecision, type OpenSelection, type SourceAdmission, type SourceOrigin } from './lib/source/types';
+  import { inspectSourceOrigin, probeImageSource } from './lib/source/commands';
+  import { sourceBackingOf } from './lib/source/backing';
+  import { needsDecision, type OpenSelection, type Rect, type SourceAdmission, type SourceOrigin } from './lib/source/types';
   import { convertLayersToSmartObject, updateSmartSource, inspectSmartLinks, relinkSmartSource, importSmartObject, createBlankLayerDocument } from './lib/layers/commands';
   import { createTextLayer, createShapeLayer } from './lib/layers/tree';
   import type { TextContent, ShapeContent, ShapeGeometry } from './lib/layers/types';
@@ -268,6 +269,9 @@
    * leaves it exactly as it was.
    */
   let sourceDialog: SourceAdmission | null = null;
+  /** Set when the dialog was opened by "Change Source Region", with the region to start from. */
+  let sourceDialogChange: { initial: Rect } | null = null;
+  $: sourceBacking = sourceBackingOf(layerDocument);
   /** Appended to the "opened" message when an image that opens whole will use much of the budget. */
   let highMemoryNote = '';
   /**
@@ -686,7 +690,51 @@
   function openSourceSelection(selection: OpenSelection) {
     const path = sourceDialog?.path;
     sourceDialog = null;
+    sourceDialogChange = null;
     if (path) void loadPath(path, selection);
+  }
+
+  function closeSourceDialog() {
+    sourceDialog = null;
+    sourceDialogChange = null;
+  }
+
+  /**
+   * Opens the file this region came from again, to choose a different region.
+   *
+   * The file is checked first. If it is gone, or is not the file the region was
+   * taken from, nothing is offered: choosing a region of some other picture and
+   * calling it a change would put different pixels under the same name. The
+   * document's own pixels are not touched either way.
+   */
+  async function changeSourceRegion() {
+    const backing = sourceBacking;
+    if (!backing || fileMutationBusy) return;
+    try {
+      const state =
+        backing.kind === 'file'
+          ? await inspectSourceOrigin(backing.origin)
+          : (await verifyRawSource(backing.source.reference, backing.path)).status;
+      if (state === 'missing') {
+        notify(
+          `${backing.filename} is no longer at ${backing.path}, so its region cannot be changed. The pixels in this document are untouched.`,
+          'error'
+        );
+        return;
+      }
+      if (state !== 'available') {
+        notify(
+          `The file at ${backing.path} is not the one this region was taken from, so its region cannot be changed. The pixels in this document are untouched.`,
+          'error'
+        );
+        return;
+      }
+      const admission = await probeImageSource(backing.path);
+      sourceDialogChange = { initial: backing.rect };
+      sourceDialog = admission;
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    }
   }
 
   /** Part of a file's identity for selection persistence: two regions of one file are different documents. */
@@ -699,7 +747,7 @@
   async function loadPath(path: string, selection?: OpenSelection) {
     // Before anything about the open document is touched, so that choosing Cancel
     // in the dialog leaves it exactly as it was.
-    if (!selection && !isRawPath(path)) {
+    if (!selection) {
       const admission = await probeForOpen(path);
       if (admission) {
         sourceDialog = admission;
@@ -727,10 +775,15 @@
       // A camera RAW is decoded and developed by a different command, but the
       // result has the same shape, so nothing below this line has to know.
       const isRaw = isRawPath(path);
+      if (isRaw && selection && selection.kind !== 'region') {
+        // A sensor is opened whole or as a region; there is no reduced copy of one.
+        throw new Error('A camera RAW can be opened whole or as a region, not as a reduced copy.');
+      }
       const result = isRaw
         ? await invoke<OpenRawImageResult>('open_raw_image', {
             path,
-            requestId: ownOpenRequest
+            requestId: ownOpenRequest,
+            region: selection?.kind === 'region' ? selection.rect : null
           })
         : selection
           ? await invoke<OpenImageResult>('open_image_selection', {
@@ -757,10 +810,15 @@
       zoom = 100;
       comparison = false;
       const origin = result.metadata.origin ?? null;
+      const rawView = rawSource?.view ?? null;
       const selectionKey = documentSelectionKey(
         // Two regions of one file are different documents, so a selection saved
         // for one must not be restored onto another of the same size.
-        origin ? `${path}#${originKey(origin)}` : path,
+        origin
+          ? `${path}#${originKey(origin)}`
+          : rawView
+            ? `${path}#region:${rawView.x},${rawView.y},${rawView.width},${rawView.height}`
+            : path,
         result.metadata.width,
         result.metadata.height
       );
@@ -793,7 +851,7 @@
       startLayerDocument(
         createDocument(result.metadata.width, result.metadata.height, [
           rawSource
-            ? { ...background, name: 'RAW', raw: rawSource }
+            ? { ...background, name: rawSource.view ? 'RAW region' : 'RAW', raw: rawSource }
             : origin
               ? {
                   ...background,
@@ -811,7 +869,9 @@
       syncHistoryActions();
       previewCurrent = true;
       notify(
-        origin
+        rawView && rawSource
+          ? `${result.metadata.filename}: region ${result.metadata.width} × ${result.metadata.height} of the ${rawSource.reference.width} × ${rawSource.reference.height} sensor developed locally`
+          : origin
           ? origin.view.view === 'region'
             ? `${result.metadata.filename}: region ${result.metadata.width} × ${result.metadata.height} of ${origin.source.width} × ${origin.source.height} opened locally`
             : `${result.metadata.filename}: reduced copy ${result.metadata.width} × ${result.metadata.height} (${Math.round((result.metadata.width / origin.source.width) * 100)}% of the file) opened locally`
@@ -3556,6 +3616,15 @@
         title="Open a PhotoForge project"
         onclick={openProject}
       />
+      {#if sourceBacking}
+        <ToolButton
+          label="Change Source Region…"
+          icon="⛶"
+          disabled={fileMutationBusy || selectionBusy || geometryMutationBusy}
+          title={`Choose a different part of ${sourceBacking.filename}`}
+          onclick={changeSourceRegion}
+        />
+      {/if}
       <ToolButton
         label={projectDirty ? 'Save project •' : 'Save project'}
         icon="⌸"
@@ -4061,8 +4130,10 @@
 {#if sourceDialog}
   <OversizedSourceDialog
     admission={sourceDialog}
+    startInRegion={Boolean(sourceDialogChange)}
+    initialRect={sourceDialogChange?.initial ?? null}
     onopen={openSourceSelection}
-    oncancel={() => (sourceDialog = null)}
+    oncancel={closeSourceDialog}
   />
 {/if}
 

@@ -5,8 +5,9 @@
 //! proportion to the image: the headers of all three formats are read without
 //! decoding a sample, so a hostile claim of a million pixels a side is learned
 //! about, and refused, for the price of reading a few hundred bytes.
-use super::{jpeg, png, webp};
+use super::{dng, jpeg, png, webp};
 use crate::error::AppError;
+use crate::raw::RawFormat;
 use crate::resources::admission::{
     plan, AdmissionReport, DecodeCapabilities, ReducedDecode, Refusal, RegionDecode, Shortfall,
     SourceKind, SourceProbe, Verdict,
@@ -64,6 +65,16 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
     }
     if metadata.len() > HARD_MAX_SOURCE_FILE_BYTES {
         return Err(AppError::OutOfMemoryRisk);
+    }
+    // A DNG is a TIFF container, so the content sniffer cannot tell it from any
+    // other TIFF. The extension decides, and the DNG reader then verifies it.
+    if canonical
+        .extension()
+        .and_then(|value| value.to_str())
+        .and_then(RawFormat::from_extension)
+        == Some(RawFormat::Dng)
+    {
+        return probe_dng(canonical, metadata.len());
     }
     let format = ImageReader::open(&canonical)
         .map_err(|_| AppError::DecodeFailure)?
@@ -149,6 +160,7 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
         width: u64::from(width),
         height: u64::from(height),
         native_bytes_per_pixel: native_bpp,
+        full_decode_bytes_per_pixel: native_bpp,
         file_bytes: metadata.len(),
         capabilities,
     };
@@ -161,6 +173,33 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
         has_icc,
         bit_depth,
         has_alpha,
+        probe,
+    })
+}
+
+/// The header of a DNG: sensor size and how the pixel payload is divided up.
+fn probe_dng(canonical: PathBuf, file_bytes: u64) -> Result<Probed, AppError> {
+    let info = dng::read_info(&canonical)?;
+    let probe = SourceProbe {
+        kind: SourceKind::Dng,
+        width: u64::from(info.width),
+        height: u64::from(info.height),
+        // The document keeps an 8-bit RGBA original of what it develops.
+        native_bytes_per_pixel: 4,
+        // Opening whole develops the entire sensor at once.
+        full_decode_bytes_per_pixel: crate::raw::develop::DEVELOP_BYTES_PER_PHOTOSITE,
+        file_bytes,
+        capabilities: dng::capabilities(&info),
+    };
+    Ok(Probed {
+        path: canonical,
+        file_bytes,
+        kind: SourceKind::Dng,
+        width: info.width,
+        height: info.height,
+        has_icc: false,
+        bit_depth: info.bits,
+        has_alpha: false,
         probe,
     })
 }

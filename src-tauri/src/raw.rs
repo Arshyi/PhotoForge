@@ -237,13 +237,35 @@ pub struct RawSourceReference {
 }
 
 impl RawSourceReference {
+    /// Valid as the record of a sensor that opens whole: its dimensions must also
+    /// fit the current pixel budget.
     pub fn validate(&self) -> Result<(), RawError> {
+        self.validate_structure()?;
+        validate_dimensions(self.width, self.height)
+    }
+
+    /// Valid as a *description of a file*, whatever the budget.
+    ///
+    /// A sensor of 200 megapixels is a real file even on a machine that cannot
+    /// develop it whole. Whether the layer made from it fits is the layer's
+    /// question: see `RawLayerSource::validate`. This checks only what is true of
+    /// the file itself — a name, a plausible size, a hash — and that its sensor
+    /// dimensions are ones the application can address at all.
+    pub fn validate_structure(&self) -> Result<(), RawError> {
         if self.filename.trim().is_empty() || self.filename.chars().count() > 255 {
             return Err(RawError::InvalidMetadata(
                 "filename is empty or too long".into(),
             ));
         }
-        validate_dimensions(self.width, self.height)?;
+        if self.width == 0
+            || self.height == 0
+            || u64::from(self.width) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+            || u64::from(self.height) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+        {
+            return Err(RawError::InvalidMetadata(
+                "the sensor dimensions are not plausible".into(),
+            ));
+        }
         if self.file_size == 0 || self.file_size > RAW_MAX_FILE_BYTES || self.sha256.len() != 64 {
             return Err(RawError::InvalidMetadata(
                 "source size or hash is invalid".into(),
@@ -311,6 +333,9 @@ pub enum RawError {
     /// "PhotoForge cannot develop this yet" rather than "your file is broken".
     #[error("this RAW file is not supported: {0}")]
     Unsupported(String),
+    /// The caller asked for the work to stop. Not a fault in the file.
+    #[error("the RAW read was cancelled")]
+    Cancelled,
 }
 
 impl From<io::Error> for RawError {
@@ -501,11 +526,34 @@ pub struct RawLayerSource {
     /// photograph even when the source file is not reachable.
     #[serde(default)]
     pub capture: RawCaptureMetadata,
+    /// The part of the sensor this layer is, when it is not all of it.
+    ///
+    /// A sensor too large to develop whole on this machine is opened as a region:
+    /// the layer is those photosites and nothing else, and re-developing it
+    /// re-develops *that rectangle* — not the file, which would be refused. The
+    /// rectangle is in sensor coordinates, so the same layer means the same pixels
+    /// on a machine with more memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<crate::source::Rect>,
 }
 
 impl RawLayerSource {
     pub fn validate(&self) -> Result<(), RawError> {
-        self.reference.validate()?;
+        self.reference.validate_structure()?;
+        match &self.view {
+            // The layer is the whole sensor, so the whole sensor must fit.
+            None => validate_dimensions(self.reference.width, self.reference.height)?,
+            // The layer is a window of it: the window must lie on the sensor and
+            // fit; the sensor it came from need not.
+            Some(view) => {
+                if !view.is_within(self.reference.width, self.reference.height) {
+                    return Err(RawError::InvalidMetadata(
+                        "the region lies outside the sensor".into(),
+                    ));
+                }
+                validate_dimensions(view.width, view.height)?;
+            }
+        }
         self.capture.validate()?;
         if self.decoder.trim().is_empty() || self.decoder.len() > 128 {
             return Err(RawError::InvalidMetadata("decoder id is invalid".into()));
@@ -570,14 +618,54 @@ pub fn read_source_bytes(path: &Path) -> Result<Vec<u8>, RawError> {
     fs::read(&canonical).map_err(RawError::from)
 }
 
-/// Builds the source record for a file that has just been decoded.
+/// Builds the source record for a file that has just been decoded, hashing the
+/// file as it is on disk now.
 pub fn source_reference_for(
     path: &Path,
     sensor_width: u32,
     sensor_height: u32,
 ) -> Result<RawSourceReference, RawError> {
     let canonical = canonical_source_path(path)?;
-    let metadata = fs::metadata(&canonical).map_err(RawError::from)?;
+    let sha256 = sha256_file(&canonical)?;
+    build_reference(
+        &canonical,
+        fs::metadata(&canonical)?.len(),
+        sha256,
+        sensor_width,
+        sensor_height,
+    )
+}
+
+/// As `source_reference_for`, from the bytes that were decoded.
+///
+/// Hashing what was decoded, rather than reading the file a second time, means
+/// the identity recorded is the identity of the pixels: a file replaced between
+/// the decode and a later hash cannot be recorded under the old picture.
+pub fn source_reference_for_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sensor_width: u32,
+    sensor_height: u32,
+) -> Result<RawSourceReference, RawError> {
+    let canonical = canonical_source_path(path)?;
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    build_reference(
+        &canonical,
+        bytes.len() as u64,
+        format!("{:x}", digest.finalize()),
+        sensor_width,
+        sensor_height,
+    )
+}
+
+fn build_reference(
+    canonical: &Path,
+    file_size: u64,
+    sha256: String,
+    sensor_width: u32,
+    sensor_height: u32,
+) -> Result<RawSourceReference, RawError> {
     let format = canonical
         .extension()
         .and_then(|value| value.to_str())
@@ -593,12 +681,12 @@ pub fn source_reference_for(
     let reference = RawSourceReference {
         filename,
         format,
-        file_size: metadata.len(),
-        sha256: sha256_file(&canonical)?,
+        file_size,
+        sha256,
         width: sensor_width,
         height: sensor_height,
     };
-    reference.validate()?;
+    reference.validate_structure()?;
     Ok(reference)
 }
 

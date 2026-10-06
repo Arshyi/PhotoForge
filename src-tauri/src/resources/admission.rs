@@ -62,7 +62,16 @@ pub enum RegionDecode {
     /// one row; time still runs down to the window's last row.
     Rows,
     /// Decodes only the tiles or strips that intersect the window.
-    Segments,
+    ///
+    /// `fixed_bytes` is what is held whatever the window: one decoded segment at a
+    /// time (the whole sensor, for a file stored as a single strip) and the margin
+    /// a window carries beyond its region. `bytes_per_pixel` is what the decoder
+    /// and everything developed from the window hold for each window pixel.
+    #[serde(rename_all = "camelCase")]
+    Segments {
+        fixed_bytes: u64,
+        bytes_per_pixel: u64,
+    },
     /// Decodes the entire frame at native depth, keeps the window and frees the
     /// rest. Peak memory follows the source.
     #[serde(rename_all = "camelCase")]
@@ -129,6 +138,11 @@ pub struct SourceProbe {
     pub height: u64,
     /// Bytes per pixel the decoder produces natively (for example 4 for RGBA8).
     pub native_bytes_per_pixel: u64,
+    /// Bytes per pixel the decoder holds while the *whole* source is decoded for
+    /// a full open. Usually the native depth; a camera RAW holds the sensor
+    /// samples, the normalised plane, the demosaiced colour and the float image
+    /// together, which is far more than the two bytes a photosite is stored in.
+    pub full_decode_bytes_per_pixel: u64,
     pub file_bytes: u64,
     pub capabilities: DecodeCapabilities,
 }
@@ -293,7 +307,10 @@ pub fn region_cost(probe: &SourceProbe) -> Option<RegionCost> {
     // part, and a part that grows with the region.
     let (decode_fixed, decode_per_pixel) = match probe.capabilities.region {
         RegionDecode::Rows => (u128::from(probe.width) * native, native),
-        RegionDecode::Segments => (0, native * 2),
+        RegionDecode::Segments {
+            fixed_bytes,
+            bytes_per_pixel,
+        } => (u128::from(fixed_bytes), u128::from(bytes_per_pixel)),
         RegionDecode::TransientFull { bytes_per_pixel } => {
             (probe.pixels() * u128::from(bytes_per_pixel), 0)
         }
@@ -362,7 +379,7 @@ pub fn plan(
     let available_bytes = available.map(u128::from);
 
     // ---- Whole source as a conventional document.
-    let decode_full = pixels * native;
+    let decode_full = pixels * u128::from(probe.full_decode_bytes_per_pixel);
     let full_peak = document_peak(pixels, native, file, decode_full);
     let within_pixel_ceiling = pixels <= u128::from(limits.working_pixels());
     let full_fits_budget = within_pixel_ceiling && full_peak <= budget_bytes;
@@ -539,6 +556,7 @@ mod tests {
             width,
             height,
             native_bytes_per_pixel: 4,
+            full_decode_bytes_per_pixel: 4,
             file_bytes,
             capabilities: DecodeCapabilities {
                 region,
@@ -832,7 +850,10 @@ mod tests {
     fn the_region_cost_coefficients_are_the_planners_own_model() {
         let kinds = [
             RegionDecode::Rows,
-            RegionDecode::Segments,
+            RegionDecode::Segments {
+                fixed_bytes: 1_000_000,
+                bytes_per_pixel: 36,
+            },
             RegionDecode::TransientFull { bytes_per_pixel: 3 },
         ];
         for region in kinds {
@@ -854,7 +875,10 @@ mod tests {
         let native = u128::from(probe.native_bytes_per_pixel);
         match probe.capabilities.region {
             RegionDecode::Rows => u128::from(probe.width) * native + region_pixels * native,
-            RegionDecode::Segments => region_pixels * native * 2,
+            RegionDecode::Segments {
+                fixed_bytes,
+                bytes_per_pixel,
+            } => u128::from(fixed_bytes) + region_pixels * u128::from(bytes_per_pixel),
             RegionDecode::TransientFull { bytes_per_pixel } => {
                 probe.pixels() * u128::from(bytes_per_pixel)
             }

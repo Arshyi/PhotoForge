@@ -1,4 +1,4 @@
-import type { SourceOrigin } from '../source/types';
+import type { Rect, SourceOrigin } from '../source/types';
 import type { LayerWorkflowStep } from '../layers/workflow';
 
 export interface CurvePoint { input: number; output: number }
@@ -191,6 +191,12 @@ export interface RawLayerSource {
   decoder: string;
   decoderVersion: string;
   capture: RawCaptureMetadata;
+  /**
+   * The part of the sensor this layer is, when it is not all of it. Present only
+   * for a sensor too large to develop whole: the layer is that rectangle, in
+   * sensor coordinates, and re-developing it re-develops that rectangle.
+   */
+  view?: Rect | null;
 }
 
 /** Mirrors `commands::raw::RawDevelopResult`. */
