@@ -1,3 +1,4 @@
+import type { SourceOrigin } from '../source/types';
 import type { BaseEditOperation, EditOperation, ImageMetadata, RawLayerSource } from '../types/editor';
 import type { MaskSnapshot } from '../selections/types';
 
@@ -230,6 +231,8 @@ export interface Layer {
    * Absent on every other layer and in projects written before 0.9.0.
    */
   raw?: RawLayerSource | null;
+  /** The file these pixels were read from, when they are only part of it. */
+  origin?: SourceOrigin | null;
   content: LayerContent;
 }
 
@@ -258,6 +261,8 @@ export interface LayerPixelsResult {
   height: number;
   filename: string | null;
   raw?: RawLayerSource | null;
+  /** The file these pixels were read from, when they are only part of it. */
+  origin?: SourceOrigin | null;
 }
 
 export interface LayerThumbnailResult {

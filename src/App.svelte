@@ -145,9 +145,12 @@
   import TextPanel from './lib/components/TextPanel.svelte';
   import ShapePanel from './lib/components/ShapePanel.svelte';
   import SemanticCanvas from './lib/components/SemanticCanvas.svelte';
+  import OversizedSourceDialog from './lib/components/OversizedSourceDialog.svelte';
   import SmartObjectPanel from './lib/components/SmartObjectPanel.svelte';
   import SmartContentsEditor from './lib/components/SmartContentsEditor.svelte';
   import { sourceDimensions, replaceSmartSourceDocument } from './lib/layers/smart';
+  import { probeImageSource } from './lib/source/commands';
+  import { needsDecision, type OpenSelection, type SourceAdmission, type SourceOrigin } from './lib/source/types';
   import { convertLayersToSmartObject, updateSmartSource, inspectSmartLinks, relinkSmartSource, importSmartObject, createBlankLayerDocument } from './lib/layers/commands';
   import { createTextLayer, createShapeLayer } from './lib/layers/tree';
   import type { TextContent, ShapeContent, ShapeGeometry } from './lib/layers/types';
@@ -259,6 +262,14 @@
   let settingsOpen = false;
   let settingsPage: 'general' | 'workspace' | 'components' | 'diagnostics' | 'privacy' = 'general';
   let newDocumentOpen = false;
+  /**
+   * A source too large to open whole, awaiting the user's choice of what to do.
+   * Probed before anything about the current document is touched, so cancelling
+   * leaves it exactly as it was.
+   */
+  let sourceDialog: SourceAdmission | null = null;
+  /** Appended to the "opened" message when an image that opens whole will use much of the budget. */
+  let highMemoryNote = '';
   /**
    * Which close confirmation is on screen, if any.
    *
@@ -461,7 +472,7 @@
           selectionTool: selectionState.tool,
           settingsOpen,
           // The Refine Selection dialog owns the keyboard while it is open.
-          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen),
+          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog),
           bindings: shortcuts
         }
       );
@@ -650,7 +661,51 @@
     }
   }
 
-  async function loadPath(path: string) {
+  /**
+   * Reads the file's header and returns it only if the user has to decide what to
+   * do. Anything the planner admits whole, and anything that cannot be probed at
+   * all (unsupported, unreadable), falls through to the ordinary open, which
+   * reports the real error in its own words.
+   */
+  async function probeForOpen(path: string): Promise<SourceAdmission | null> {
+    highMemoryNote = '';
+    try {
+      const admission = await probeImageSource(path);
+      if (needsDecision(admission.report.verdict)) return admission;
+      // It opens whole, but may take a large share of the budget. That is worth
+      // saying once it has opened; it is not worth a dialog in the way.
+      if (admission.report.verdict.kind === 'fullResolutionWithWarning') {
+        highMemoryNote = ` High-memory document: about ${formatBytes(admission.report.fullPeakBytes)} while editing, ${admission.report.verdict.peakPercentOfBudget}% of the memory budget.`;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  function openSourceSelection(selection: OpenSelection) {
+    const path = sourceDialog?.path;
+    sourceDialog = null;
+    if (path) void loadPath(path, selection);
+  }
+
+  /** Part of a file's identity for selection persistence: two regions of one file are different documents. */
+  function originKey(origin: SourceOrigin): string {
+    return origin.view.view === 'region'
+      ? `region:${origin.view.rect.x},${origin.view.rect.y},${origin.view.rect.width},${origin.view.rect.height}`
+      : `reduced:${origin.view.width}x${origin.view.height}`;
+  }
+
+  async function loadPath(path: string, selection?: OpenSelection) {
+    // Before anything about the open document is touched, so that choosing Cancel
+    // in the dialog leaves it exactly as it was.
+    if (!selection && !isRawPath(path)) {
+      const admission = await probeForOpen(path);
+      if (admission) {
+        sourceDialog = admission;
+        return;
+      }
+    }
     if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
     cancelTransformGesture();
     persistSelectionState();
@@ -677,10 +732,16 @@
             path,
             requestId: ownOpenRequest
           })
-        : await invoke<OpenImageResult>('open_image', {
-            path,
-            requestId: ownOpenRequest
-          });
+        : selection
+          ? await invoke<OpenImageResult>('open_image_selection', {
+              path,
+              selection,
+              requestId: ownOpenRequest
+            })
+          : await invoke<OpenImageResult>('open_image', {
+              path,
+              requestId: ownOpenRequest
+            });
       if (!result.isCurrent || activeOpenRequest !== ownOpenRequest) return;
       rawSource = isRaw ? ((result as OpenRawImageResult).source ?? null) : null;
       rawDevelopment = isRaw ? (result as OpenRawImageResult) : null;
@@ -695,8 +756,11 @@
       processingTime = result.processingTimeMs;
       zoom = 100;
       comparison = false;
+      const origin = result.metadata.origin ?? null;
       const selectionKey = documentSelectionKey(
-        path,
+        // Two regions of one file are different documents, so a selection saved
+        // for one must not be restored onto another of the same size.
+        origin ? `${path}#${originKey(origin)}` : path,
         result.metadata.width,
         result.metadata.height
       );
@@ -728,7 +792,15 @@
       // re-doable instead of being baked into the raster.
       startLayerDocument(
         createDocument(result.metadata.width, result.metadata.height, [
-          rawSource ? { ...background, name: 'RAW', raw: rawSource } : background
+          rawSource
+            ? { ...background, name: 'RAW', raw: rawSource }
+            : origin
+              ? {
+                  ...background,
+                  name: origin.view.view === 'region' ? 'Region' : 'Reduced copy',
+                  origin
+                }
+              : background
         ], 'linear_srgb_f32'),
         null
       );
@@ -738,7 +810,14 @@
       selectionPersistenceWarningShown = false;
       syncHistoryActions();
       previewCurrent = true;
-      notify(`${result.metadata.filename} opened locally`);
+      notify(
+        origin
+          ? origin.view.view === 'region'
+            ? `${result.metadata.filename}: region ${result.metadata.width} × ${result.metadata.height} of ${origin.source.width} × ${origin.source.height} opened locally`
+            : `${result.metadata.filename}: reduced copy ${result.metadata.width} × ${result.metadata.height} (${Math.round((result.metadata.width / origin.source.width) * 100)}% of the file) opened locally`
+          : `${result.metadata.filename} opened locally.${highMemoryNote}`
+      );
+      highMemoryNote = '';
       if (operations.length) schedulePreview();
       if (selectionState.activeMask && !selectionState.activeDiagnostics) {
         void refreshActiveMaskDiagnostics();
@@ -3445,7 +3524,7 @@
   <title>{metadata ? `${metadata.filename} — PhotoForge` : 'PhotoForge'}</title>
 </svelte:head>
 
-<div class="app-shell" inert={settingsOpen || Boolean(smartEditing) || newDocumentOpen} aria-hidden={settingsOpen || Boolean(smartEditing) || newDocumentOpen}>
+<div class="app-shell" inert={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog)} aria-hidden={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog)}>
   <header class="topbar" inert={Boolean(textEdit)}>
     <div class="brand" aria-label="PhotoForge">
       <span class="brand-mark" aria-hidden="true"><b></b><i></i></span>
@@ -3977,6 +4056,14 @@
       </div>
     </dialog>
   </div>
+{/if}
+
+{#if sourceDialog}
+  <OversizedSourceDialog
+    admission={sourceDialog}
+    onopen={openSourceSelection}
+    oncancel={() => (sourceDialog = null)}
+  />
 {/if}
 
 {#if newDocumentOpen}

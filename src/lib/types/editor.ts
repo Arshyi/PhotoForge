@@ -1,3 +1,4 @@
+import type { SourceOrigin } from '../source/types';
 import type { LayerWorkflowStep } from '../layers/workflow';
 
 export interface CurvePoint { input: number; output: number }
@@ -110,6 +111,11 @@ export interface ImageMetadata {
   exifAvailable: boolean;
   /** Optional decoder-supplied camera metadata; absent for legacy raster files. */
   raw?: RawCaptureMetadata | null;
+  /**
+   * Present when what was opened is a region or reduced copy of a larger file.
+   * `width` and `height` above are then the document's; the file's are in here.
+   */
+  origin?: SourceOrigin | null;
 }
 
 export interface RawCaptureMetadata {
