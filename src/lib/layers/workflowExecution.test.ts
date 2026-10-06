@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { executeLayerWorkflow, type LayerWorkflowBackend } from './workflowExecution';
-import { createDocument, createGroupLayer, createPixelLayer } from './tree';
-import { decodedCoverageChecksum } from '../selections/checksum';
-import type { MaskSnapshot } from '../selections/types';
+import { executeLayerWorkflow, stepToCall, type LayerWorkflowBackend } from './workflowExecution';
+import { createDocument, createPixelLayer } from './tree';
+import type { LayerWorkflowStep } from './workflow';
+import type { TransactionRequest, TransactionResult } from '../operations/types';
+import registry from '../../../src-tauri/tests/fixtures/operation_registry.json';
+
+/**
+ * The replay engine now lives in the backend (`src-tauri/src/operations`), where
+ * its behaviour — atomicity, rollback of pixel buffers, lock and planner rules,
+ * the dry run, the ordering of merges and selections — is tested against the real
+ * thing in `src-tauri/tests/operations_engine.rs`. What is left here is the part
+ * that is TypeScript: turning steps into registered operations, sending one
+ * transaction, and running the export afterwards.
+ */
 
 function fixture() {
   const bottom = createPixelLayer('Bottom', 'px1', 8, 8);
@@ -10,177 +20,143 @@ function fixture() {
   return createDocument(8, 8, [bottom, top]);
 }
 
-function backend(): LayerWorkflowBackend {
-  return {
-    validate: vi.fn(async () => undefined),
-    apply: vi.fn(async () => ({ pixelId: 'applied', width: 8, height: 8, filename: null })),
-    mask: vi.fn(),
-    merge: vi.fn(async () => ({ pixelId: 'merged', width: 8, height: 8, filename: null })),
-    flatten: vi.fn(async () => ({ pixelId: 'flat', width: 8, height: 8, filename: null })),
-    export: vi.fn(async () => undefined)
-  };
+function backend(result?: Partial<TransactionResult>) {
+  const transact = vi.fn(async (request: TransactionRequest): Promise<TransactionResult> => ({
+    document: { ...request.document, activeLayerId: 'after' },
+    revision: 'r'.repeat(64),
+    label: request.label,
+    steps: [],
+    createdPixelIds: [],
+    lastCreated: null,
+    ...result
+  }));
+  const exported = vi.fn(async () => undefined);
+  const api: LayerWorkflowBackend = { transact, export: exported };
+  return { api, transact, exported };
 }
 
-function selection(value = 255): MaskSnapshot {
-  const snapshot = {
-    version: 1, width: 8, height: 8, encoding: 'base64_u8',
-    data: btoa(String.fromCharCode(...Array(64).fill(value))).replace(/=+$/, ''), checksum: ''
-  };
-  snapshot.checksum = decodedCoverageChecksum(snapshot)!;
-  return snapshot;
-}
+const everyStep: LayerWorkflowStep[] = [
+  { type: 'select_layer', selector: { type: 'top' } },
+  { type: 'set_visibility', selector: { type: 'active' }, visible: false },
+  { type: 'set_opacity', selector: { type: 'active' }, opacity: 0.5 },
+  { type: 'set_blend_mode', selector: { type: 'active' }, blendMode: 'multiply' },
+  { type: 'create_adjustment_layer', name: ' Tone ', operation: { type: 'grayscale' } },
+  { type: 'apply_to_layer', selector: { type: 'last_created' }, operations: [{ type: 'grayscale' }] },
+  { type: 'create_mask_from_selection', selector: { type: 'active' } },
+  { type: 'merge_down', selector: { type: 'active' } },
+  { type: 'flatten' }
+];
 
-function expectNoBackendCalls(api: LayerWorkflowBackend) {
-  for (const method of Object.values(api)) expect(method).not.toHaveBeenCalled();
-}
-
-describe('transactional layer workflow execution', () => {
-  it('merges before resolving the following active-layer operation', async () => {
-    const source = fixture();
-    const api = backend();
-    const result = await executeLayerWorkflow(source, [
-      { type: 'merge_down', selector: { type: 'active' } },
-      { type: 'set_opacity', selector: { type: 'active' }, opacity: 0.4 },
-      { type: 'apply_to_layer', selector: { type: 'active' }, operations: [{ type: 'grayscale' }] },
-      { type: 'export_composite' }
-    ], null, api);
-    expect(source.layers).toHaveLength(2);
-    expect(result.layers).toHaveLength(1);
-    expect(result.layers[0].opacity).toBe(0.4);
-    expect(result.layers[0].content).toMatchObject({ pixelId: 'applied' });
-    expect(api.apply).toHaveBeenCalledWith(expect.objectContaining({ layers: [expect.objectContaining({ opacity: 0.4 })] }),
-      result.layers[0].id, [{ type: 'grayscale' }]);
-    expect(api.export).toHaveBeenCalledWith(result);
+describe('layer workflow replay through the operation engine', () => {
+  it('turns every step that edits the document into an operation the registry has', () => {
+    const known = new Set(registry.map((spec) => spec.id));
+    const calls = everyStep.map((step) => stepToCall(step));
+    for (const call of calls) {
+      expect(call, 'every editing step is an operation').not.toBeNull();
+      expect(known.has(call!.op), `${call!.op} is registered`).toBe(true);
+    }
+    // And no two steps share an operation by accident.
+    expect(new Set(calls.map((call) => call!.op)).size).toBe(everyStep.length);
+    // Export is the one step that is not an edit.
+    expect(stepToCall({ type: 'export_composite' })).toBeNull();
   });
 
-  it('preflights references after flatten before any backend side effect', async () => {
-    const source = fixture();
-    const api = backend();
-    await expect(executeLayerWorkflow(source, [
-      { type: 'flatten' },
-      { type: 'set_opacity', selector: { type: 'id', id: source.layers[1].id }, opacity: 0.2 }
-    ], null, api)).rejects.toThrow(/does not have/);
-    expect(api.flatten).not.toHaveBeenCalled();
-    expect(api.validate).not.toHaveBeenCalled();
+  it('names the right operation and parameters for each step', () => {
+    expect(stepToCall(everyStep[1])).toEqual({
+      op: 'core.layer.set_visible',
+      params: { selector: { type: 'active' }, visible: false }
+    });
+    expect(stepToCall(everyStep[3])).toEqual({
+      op: 'core.layer.set_blend_mode',
+      params: { selector: { type: 'active' }, blendMode: 'multiply' }
+    });
+    // A name is trimmed; a blank one is left out so the backend's default applies.
+    expect(stepToCall(everyStep[4])!.params).toEqual({ operation: { type: 'grayscale' }, name: 'Tone' });
+    expect(
+      stepToCall({ type: 'create_adjustment_layer', name: '  ', operation: { type: 'grayscale' } })!.params
+    ).toEqual({ operation: { type: 'grayscale' } });
+    expect(stepToCall({ type: 'create_adjustment_layer', operation: { type: 'grayscale' } })!.params).toEqual({
+      operation: { type: 'grayscale' }
+    });
   });
 
-  it('retains the original tree when a later worker fails', async () => {
+  it('sends the whole list as one transaction, who is asking, and the selection', async () => {
+    const { api, transact } = backend();
+    const source = fixture();
+    const selection = { version: 1, width: 8, height: 8, encoding: 'base64_u8', data: '', checksum: '' } as never;
+    const result = await executeLayerWorkflow(source, everyStep, selection, api, 'planner', 'Guided edit');
+    expect(transact).toHaveBeenCalledTimes(1);
+    const request = transact.mock.calls[0][0];
+    expect(request.steps).toHaveLength(everyStep.length);
+    expect(request.origin).toBe('planner');
+    expect(request.label).toBe('Guided edit');
+    expect(request.selection).toBe(selection);
+    expect(request.document).toBe(source);
+    // What comes back is the backend's document, untouched by this layer.
+    expect(result.activeLayerId).toBe('after');
+    expect(source.activeLayerId).not.toBe('after');
+  });
+
+  it('is an automation by default, and says so', async () => {
+    const { api, transact } = backend();
+    await executeLayerWorkflow(fixture(), [{ type: 'flatten' }], null, api);
+    expect(transact.mock.calls[0][0].origin).toBe('automation');
+    expect(transact.mock.calls[0][0].label).toBe('Apply layer workflow');
+  });
+
+  it('exports after the transaction, from the document it produced', async () => {
+    const { api, transact, exported } = backend();
+    const result = await executeLayerWorkflow(
+      fixture(),
+      [{ type: 'set_opacity', selector: { type: 'top' }, opacity: 0.4 }, { type: 'export_composite' }],
+      null,
+      api
+    );
+    expect(transact.mock.calls[0][0].steps).toHaveLength(1);
+    expect(exported).toHaveBeenCalledExactlyOnceWith(result);
+    expect(transact.mock.invocationCallOrder[0]).toBeLessThan(exported.mock.invocationCallOrder[0]);
+  });
+
+  it('does not open a transaction for a workflow that only exports', async () => {
+    const { api, transact, exported } = backend();
+    const source = fixture();
+    const result = await executeLayerWorkflow(source, [{ type: 'export_composite' }], null, api);
+    expect(transact).not.toHaveBeenCalled();
+    expect(exported).toHaveBeenCalledExactlyOnceWith(source);
+    expect(result).toBe(source);
+  });
+
+  it('refuses a misplaced or repeated export before anything is sent', async () => {
+    const { api, transact, exported } = backend();
+    await expect(
+      executeLayerWorkflow(fixture(), [{ type: 'export_composite' }, { type: 'flatten' }], null, api)
+    ).rejects.toThrow(/final step/);
+    await expect(
+      executeLayerWorkflow(fixture(), [{ type: 'export_composite' }, { type: 'export_composite' }], null, api)
+    ).rejects.toThrow(/final step/);
+    expect(transact).not.toHaveBeenCalled();
+    expect(exported).not.toHaveBeenCalled();
+  });
+
+  it('refuses malformed steps before anything is sent', async () => {
+    const { api, transact } = backend();
+    await expect(
+      executeLayerWorkflow(fixture(), [{ type: 'set_opacity', selector: { type: 'top' }, opacity: 4 }], null, api)
+    ).rejects.toThrow();
+    expect(transact).not.toHaveBeenCalled();
+  });
+
+  it('exports nothing and returns nothing when the transaction fails', async () => {
+    const { api, exported } = backend();
+    api.transact = vi.fn(async () => {
+      throw new Error('Step 2 (core.layer.merge_down) failed. Nothing was changed.');
+    });
     const source = fixture();
     const before = JSON.stringify(source);
-    const api = backend();
-    api.apply = vi.fn(async () => { throw new Error('worker failed'); });
-    await expect(executeLayerWorkflow(source, [
-      { type: 'set_opacity', selector: { type: 'top' }, opacity: 0.3 },
-      { type: 'apply_to_layer', selector: { type: 'active' }, operations: [{ type: 'grayscale' }] }
-    ], null, api)).rejects.toThrow('worker failed');
+    await expect(
+      executeLayerWorkflow(source, [{ type: 'flatten' }, { type: 'export_composite' }], null, api)
+    ).rejects.toThrow(/Nothing was changed/);
+    expect(exported).not.toHaveBeenCalled();
     expect(JSON.stringify(source)).toBe(before);
-  });
-
-  it('resolves last-created against the actual adjustment and validates its ID', async () => {
-    const api = backend();
-    const result = await executeLayerWorkflow(fixture(), [
-      { type: 'create_adjustment_layer', name: 'Tone', operation: { type: 'grayscale' } },
-      { type: 'set_opacity', selector: { type: 'last_created' }, opacity: 0.6 }
-    ], null, api);
-    expect(result.layers.at(-1)).toMatchObject({ name: 'Tone', opacity: 0.6 });
-    expect(api.validate).toHaveBeenLastCalledWith(expect.anything(), [
-      { type: 'set_opacity', selector: { type: 'id', id: result.layers.at(-1)!.id }, opacity: 0.6 }
-    ]);
-  });
-
-  it('rejects missing selections, locked edits, and nonterminal exports up front', async () => {
-    const api = backend();
-    const source = fixture();
-    await expect(executeLayerWorkflow(source, [{ type: 'create_mask_from_selection', selector: { type: 'top' } }], null, api))
-      .rejects.toThrow(/selection/);
-    source.layers[1].locked = true;
-    await expect(executeLayerWorkflow(source, [{ type: 'flatten' }], null, api)).rejects.toThrow(/Unlock/);
-    await expect(executeLayerWorkflow(source, [{ type: 'export_composite' }, { type: 'flatten' }], null, api))
-      .rejects.toThrow(/final step/);
-    expect(api.validate).not.toHaveBeenCalled();
-  });
-
-  it('attaches a new selection mask before merging the layer', async () => {
-    const source = fixture(); const api = backend(); const snapshot = selection(128);
-    api.mask = vi.fn(async () => ({ snapshot, width: 8, height: 8 }));
-    const result = await executeLayerWorkflow(source, [
-      { type: 'create_mask_from_selection', selector: { type: 'active' } },
-      { type: 'merge_down', selector: { type: 'active' } }
-    ], snapshot, api);
-    expect(api.merge).toHaveBeenCalledWith(expect.objectContaining({ layers: [
-      source.layers[0], expect.objectContaining({ mask: { snapshot, enabled: true, inverted: false } })
-    ] }), [source.layers[0].id, source.layers[1].id]);
-    expect(result.layers[0].content).toMatchObject({ pixelId: 'merged' });
-    expect(source.layers[1].mask).toBeNull();
-  });
-
-  it('flattens updated pixel references from the preceding apply step', async () => {
-    const source = fixture(); const api = backend();
-    const result = await executeLayerWorkflow(source, [
-      { type: 'apply_to_layer', selector: { type: 'top' }, operations: [{ type: 'grayscale' }] },
-      { type: 'flatten' }
-    ], null, api);
-    expect(api.flatten).toHaveBeenCalledWith(expect.objectContaining({ layers: [
-      source.layers[0], expect.objectContaining({ content: { type: 'pixel', pixelId: 'applied', width: 8, height: 8 } })
-    ] }));
-    expect(result.layers[0].content).toMatchObject({ pixelId: 'flat' });
-    expect(source.layers[1].content).toMatchObject({ pixelId: 'px2' });
-  });
-
-  it('rejects later invalid references before any earlier apply, mask, or export backend call', async () => {
-    const source = fixture(); const api = backend();
-    await expect(executeLayerWorkflow(source, [
-      { type: 'apply_to_layer', selector: { type: 'top' }, operations: [{ type: 'grayscale' }] },
-      { type: 'create_mask_from_selection', selector: { type: 'top' } },
-      { type: 'set_opacity', selector: { type: 'name', name: 'Missing' }, opacity: 0.3 },
-      { type: 'export_composite' }
-    ], selection(), api)).rejects.toThrow(/does not have/);
-    expectNoBackendCalls(api);
-  });
-
-  it('does not discard locked descendants when merging into a group', async () => {
-    const locked = createPixelLayer('Locked child', 'locked', 8, 8); locked.locked = true;
-    const source = createDocument(8, 8, [
-      createGroupLayer('Below', [locked]), createPixelLayer('Above', 'top', 8, 8)
-    ]);
-    const api = backend();
-    await expect(executeLayerWorkflow(source, [
-      { type: 'merge_down', selector: { type: 'active' } }
-    ], null, api)).rejects.toThrow(/Unlock Locked child/);
-    expectNoBackendCalls(api);
-  });
-
-  it('preflights a corrupt selection checksum before any backend calls', async () => {
-    const api = backend();
-    await expect(executeLayerWorkflow(fixture(), [
-      { type: 'apply_to_layer', selector: { type: 'top' }, operations: [{ type: 'grayscale' }] },
-      { type: 'create_mask_from_selection', selector: { type: 'top' } }
-    ], { ...selection(), checksum: 'fnv1a64:0000000000000000' }, api)).rejects.toThrow(/checksum/);
-    expectNoBackendCalls(api);
-  });
-
-  it('does not pass a malformed worker buffer to a later flatten', async () => {
-    const source = fixture(); const api = backend();
-    api.apply = vi.fn(async () => ({ pixelId: 'bad', width: 9, height: 8, filename: null }));
-    await expect(executeLayerWorkflow(source, [
-      { type: 'apply_to_layer', selector: { type: 'top' }, operations: [{ type: 'grayscale' }] },
-      { type: 'flatten' }
-    ], null, api)).rejects.toThrow(/unexpected dimensions/);
-    expect(api.flatten).not.toHaveBeenCalled();
-    expect(source.layers[1].content).toMatchObject({ pixelId: 'px2' });
-  });
-
-  it('fails closed when merge down would omit a blend-dependent backdrop', async () => {
-    const bottom = createPixelLayer('Bottom', 'px1', 8, 8);
-    const middle = createPixelLayer('Middle', 'px2', 8, 8);
-    middle.blendMode = 'screen';
-    const top = createPixelLayer('Top', 'px3', 8, 8);
-    const source = createDocument(8, 8, [bottom, middle, top]);
-    source.activeLayerId = top.id;
-    const api = backend();
-    await expect(executeLayerWorkflow(source, [
-      { type: 'merge_down', selector: { type: 'active' } }
-    ], null, api)).rejects.toThrow(/depends on layers beneath/);
-    expectNoBackendCalls(api);
   });
 });

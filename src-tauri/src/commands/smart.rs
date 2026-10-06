@@ -94,7 +94,7 @@ fn convert_document(
             .iter()
             .any(|id| document.find(id).is_some_and(|l| l.locked))
     {
-        return Err(AppError::LayerLocked(first.id));
+        return Err(AppError::LayerLocked(first.name));
     }
     let source_id = fresh_id(&document, "smart-source-");
     let instance_id = fresh_id(&document, "smart-layer-");

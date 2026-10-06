@@ -134,7 +134,7 @@ pub enum AppError {
     UnsupportedAdjustmentLayer(String),
     #[error("The pixel data for layer buffer {0} is no longer available. Reopen the project.")]
     LayerPixelsMissing(String),
-    #[error("This layer is locked. Unlock it before editing.")]
+    #[error("{0} is locked. Unlock it before editing.")]
     LayerLocked(String),
     #[error("This is not a valid PhotoForge project file: {0}")]
     ProjectFormat(String),
@@ -150,6 +150,18 @@ pub enum AppError {
     RawInspection(String),
     #[error("colour development failed: {0}")]
     ColorPipeline(String),
+    /// A step of a transaction failed. Nothing the transaction did was kept.
+    #[error("Step {step} ({operation}) failed: {reason} Nothing was changed.")]
+    Transaction {
+        step: usize,
+        operation: String,
+        reason: String,
+    },
+    /// The document is not the one a plan was made against.
+    #[error("The document changed after this was planned, so nothing was changed.")]
+    StaleRevision,
+    #[error("There is no operation called {0}.")]
+    UnknownOperation(String),
 }
 
 impl AppError {
@@ -224,6 +236,9 @@ impl AppError {
             Self::RenderCancelled => "render_cancelled",
             Self::RawInspection(_) => "raw_inspection",
             Self::ColorPipeline(_) => "color_pipeline",
+            Self::Transaction { .. } => "transaction_failed",
+            Self::StaleRevision => "stale_revision",
+            Self::UnknownOperation(_) => "unknown_operation",
         }
     }
 }

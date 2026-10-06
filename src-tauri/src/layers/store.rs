@@ -295,6 +295,18 @@ impl LayerPixelStore {
         before - self.buffers.len()
     }
 
+    /// Removes exactly the named buffers, returning how many were present.
+    ///
+    /// For undoing a failed transaction: it names only what that transaction
+    /// created, never anything undo history may still need, which is what
+    /// `retain` would put at risk.
+    pub fn discard(&mut self, pixel_ids: &[String]) -> usize {
+        pixel_ids
+            .iter()
+            .filter(|id| self.buffers.remove(id.as_str()).is_some())
+            .count()
+    }
+
     pub fn clear(&mut self) {
         self.buffers.clear();
     }

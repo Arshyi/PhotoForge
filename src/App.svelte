@@ -169,6 +169,8 @@
   import AdjustmentLayerDialog from './lib/components/AdjustmentLayerDialog.svelte';
   import { LayerHistory } from './lib/layers/history';
   import { executeLayerWorkflow } from './lib/layers/workflowExecution';
+  import { applyTransaction } from './lib/operations/client';
+  import type { Origin as OperationOrigin } from './lib/operations/types';
   import { mergeSafetyProblem } from './lib/layers/mergeSafety';
   import type { LayerWorkflowStep } from './lib/layers/workflow';
   import { ThumbnailCache, thumbnailKey } from './lib/layers/thumbnails';
@@ -2065,6 +2067,7 @@
     const index = path[path.length - 1];
     const below = siblings[index - 1];
     if (!below) return;
+    // Cheap, and says why before anything is sent. The engine checks it again.
     const mergeProblem = mergeSafetyProblem(document, [below.id, layerId]);
     if (mergeProblem) {
       notify(mergeProblem, 'error');
@@ -2074,18 +2077,16 @@
     layerBusy = true;
     const revision = layerRevision;
     try {
-      const merged = await mergeLayerPixels(document, [below.id, layerId]);
+      // One transaction: the merge and the tree change happen together or not at
+      // all, and the buffer it made is discarded by the engine if it fails.
+      const result = await applyTransaction({
+        document,
+        label: 'Merge down',
+        steps: [{ op: 'core.layer.merge_down', params: { selector: { type: 'id', id: layerId } } }],
+        origin: 'user'
+      });
       if (revision !== layerRevision) return;
-      const replacement = createPixelLayer(
-        below.name,
-        merged.pixelId,
-        merged.width,
-        merged.height
-      );
-      let next = removeLayer(document, layerId);
-      next = removeLayer(next, below.id);
-      next = insertLayer(next, replacement, parentId, index - 1);
-      commitLayers(next, 'Merge down');
+      commitLayers(result.document, 'Merge down');
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -2098,23 +2099,14 @@
     layerBusy = true;
     const revision = layerRevision;
     try {
-      const flattened = await flattenLayerDocument(document);
+      const result = await applyTransaction({
+        document,
+        label: 'Flatten image',
+        steps: [{ op: 'core.document.flatten', params: {} }],
+        origin: 'user'
+      });
       if (revision !== layerRevision) return;
-      const replacement = createPixelLayer(
-        'Background',
-        flattened.pixelId,
-        flattened.width,
-        flattened.height
-      );
-      commitLayers(
-        createDocument(
-          document.canvasWidth,
-          document.canvasHeight,
-          [replacement],
-          document.precision ?? 'legacy_srgb8'
-        ),
-        'Flatten image'
-      );
+      commitLayers(result.document, 'Flatten image');
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -2633,11 +2625,13 @@
   }
 
   function applyGuidedPlan(plan: EditPlan): boolean | Promise<boolean> {
-    return applyLayerPlan(plan.operations, plan.layerSteps ?? []);
+    // A planner proposes; it never decides. The engine holds it to the relative
+    // selectors and the operations that are suggestions.
+    return applyLayerPlan(plan.operations, plan.layerSteps ?? [], 'planner');
   }
 
   function applyWorkflow(workflow: Workflow): boolean | Promise<boolean> {
-    return applyLayerPlan(workflow.operations, workflow.layerSteps ?? []);
+    return applyLayerPlan(workflow.operations, workflow.layerSteps ?? [], 'automation');
   }
 
   async function stageWorkflowGeometry(next: EditOperation[], before: EditOperation[], selection: SelectionState) {
@@ -2656,7 +2650,7 @@
       validateGeometryRemapResult(plan, result, documentId, ownRequest));
   }
 
-  async function applyLayerPlan(nextOperations: EditOperation[], steps: LayerWorkflowStep[]): Promise<boolean> {
+  async function applyLayerPlan(nextOperations: EditOperation[], steps: LayerWorkflowStep[], origin: OperationOrigin): Promise<boolean> {
     if (!steps.length) return commitGlobal(nextOperations);
     const document = layerDocument;
     if (!document || !allowWorkspaceMutation()) return false;
@@ -2685,13 +2679,9 @@
         : selectionBefore.activeMask;
       const staged = await stageWorkflowGeometry(nextOperations, operationsBefore, selectionBefore);
       const next = await executeLayerWorkflow(document, steps, layerSelection, {
-        validate: planLayerWorkflowSteps,
-        apply: applyOperationsToLayer,
-        mask: layerMaskFromSelection,
-        merge: mergeLayerPixels,
-        flatten: flattenLayerDocument,
+        transact: applyTransaction,
         export: (current) => exportLayerComposite(outputPath!, current, staged.operations, profile)
-      });
+      }, origin);
       if (documentId !== ownDocument || layerRevision !== revision ||
         JSON.stringify(selectionState) !== JSON.stringify(selectionBefore) ||
         JSON.stringify(operations) !== JSON.stringify(operationsBefore)) {

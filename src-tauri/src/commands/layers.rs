@@ -437,7 +437,7 @@ pub async fn create_layer_pixels(
     })
 }
 
-pub(super) fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Layer, AppError> {
+pub(crate) fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Layer, AppError> {
     document
         .find(layer_id)
         .cloned()
@@ -449,7 +449,7 @@ pub(super) fn find_layer(document: &LayerDocument, layer_id: &str) -> Result<Lay
 /// Merge and flatten both land here. The result is canvas sized with an
 /// identity transform, because a merged layer no longer has the individual
 /// placements of the layers that produced it.
-pub(super) async fn render_subset_into_buffer(
+pub(crate) async fn render_subset_into_buffer(
     document: LayerDocument,
     layers: Vec<Layer>,
     state: &AppState,
@@ -487,7 +487,7 @@ pub(super) async fn render_subset_into_buffer(
 /// source-over range is associative and can be rendered against transparency;
 /// a range that omits its backdrop cannot safely bake blend-dependent layers,
 /// adjustments, or pass-through groups.
-pub(super) fn merge_targets(
+pub(crate) fn merge_targets(
     document: &LayerDocument,
     layer_ids: &[String],
 ) -> Result<Vec<Layer>, AppError> {
@@ -614,6 +614,19 @@ pub async fn apply_operations_to_layer(
     operations: Vec<EditOperation>,
     state: State<'_, AppState>,
 ) -> Result<LayerPixelsResult, AppError> {
+    apply_edit_to_layer(&document, &layer_id, operations, &state).await
+}
+
+/// Applies operations destructively to one pixel layer and registers the result
+/// as a new buffer. Shared by the command above and by the operation engine, so
+/// a macro, a plugin or a planner edits a layer by exactly the path the Layers
+/// panel does.
+pub(crate) async fn apply_edit_to_layer(
+    document: &LayerDocument,
+    layer_id: &str,
+    operations: Vec<EditOperation>,
+    state: &AppState,
+) -> Result<LayerPixelsResult, AppError> {
     document.validate()?;
     for operation in &operations {
         operation.validate()?;
@@ -624,9 +637,9 @@ pub async fn apply_operations_to_layer(
             )));
         }
     }
-    let layer = find_layer(&document, &layer_id)?;
+    let layer = find_layer(document, layer_id)?;
     if layer.locked {
-        return Err(AppError::LayerLocked(layer_id));
+        return Err(AppError::LayerLocked(layer.name.clone()));
     }
     let pixel_id = layer
         .pixel_id()
@@ -789,17 +802,23 @@ pub async fn layer_mask_from_selection(
     layer_id: String,
     selection: MaskSnapshot,
 ) -> Result<LayerMaskResult, AppError> {
+    mask_for_layer(&document, &layer_id, &selection).await
+}
+
+/// Converts a canvas selection into a mask in one layer's own space. Shared with
+/// the operation engine for the same reason as `apply_edit_to_layer`.
+pub(crate) async fn mask_for_layer(
+    document: &LayerDocument,
+    layer_id: &str,
+    selection: &MaskSnapshot,
+) -> Result<LayerMaskResult, AppError> {
     document.validate()?;
-    let layer = find_layer(&document, &layer_id)?;
+    let layer = find_layer(document, layer_id)?;
     let decoded = selection.decode()?;
-    let layer = crate::layers::mask_geometry_layer(&document, &layer)?;
+    let layer = crate::layers::mask_geometry_layer(document, &layer)?;
+    let (canvas_width, canvas_height) = (document.canvas_width, document.canvas_height);
     let mask = tauri::async_runtime::spawn_blocking(move || {
-        selection_to_layer_mask(
-            &decoded,
-            &layer,
-            document.canvas_width,
-            document.canvas_height,
-        )
+        selection_to_layer_mask(&decoded, &layer, canvas_width, canvas_height)
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("mask conversion worker stopped".into()))??;

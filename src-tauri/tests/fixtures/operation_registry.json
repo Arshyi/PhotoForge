@@ -1,0 +1,557 @@
+[
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.select",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Makes a layer the active one.",
+    "title": "Select layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_visible",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Whether the layer is drawn.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "visible",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Sets whether a layer is drawn.",
+    "title": "Show or hide layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_locked",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Whether the layer is locked.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "locked",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a layer is protected from automation.",
+    "title": "Lock or unlock layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_opacity",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Opacity from 0 (transparent) to 1 (opaque).",
+        "kind": {
+          "kind": "number",
+          "max": 1.0,
+          "min": 0.0
+        },
+        "name": "opacity",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Sets how opaque a layer is, from 0 to 1.",
+    "title": "Set layer opacity",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_blend_mode",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The blend mode.",
+        "kind": {
+          "kind": "blendMode"
+        },
+        "name": "blendMode",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Sets how a layer combines with what is beneath it.",
+    "title": "Set blend mode",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.rename",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The new name.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Changes a layer's name.",
+    "title": "Rename layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_collapsed",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Whether the group is collapsed.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "collapsed",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a group is shown collapsed in the Layers panel.",
+    "title": "Collapse or expand group",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.move",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The group to move it into; absent for the top level.",
+        "kind": {
+          "kind": "optionalSelector"
+        },
+        "name": "parent",
+        "required": false
+      },
+      {
+        "description": "Position among its new siblings, 0 being the bottom.",
+        "kind": {
+          "kind": "integer",
+          "max": 511,
+          "min": 0
+        },
+        "name": "index",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Moves a layer to a position in a stack, optionally inside a group.",
+    "title": "Move layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.delete",
+    "lock": "always",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Removes a layer and everything inside it.",
+    "title": "Delete layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.duplicate",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Copies a layer and everything inside it, just above the original.",
+    "title": "Duplicate layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.group",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layers to group.",
+        "kind": {
+          "kind": "selectors"
+        },
+        "name": "selectors",
+        "required": true
+      },
+      {
+        "description": "The group's name; \"Group\" if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Wraps layers that share a parent in a new group.",
+    "title": "Group layers",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.ungroup",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Replaces a group with the layers inside it.",
+    "title": "Ungroup",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.reset_transform",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Returns a layer's placement, scale and rotation to the identity.",
+    "title": "Reset layer transform",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.add_group",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The group's name; \"Group\" if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Adds an empty group at the top of the stack.",
+    "title": "New group",
+    "version": 1
+  },
+  {
+    "category": "adjustment",
+    "effects": "none",
+    "id": "core.layer.add_adjustment",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The adjustment the layer applies.",
+        "kind": {
+          "kind": "editOperation"
+        },
+        "name": "operation",
+        "required": true
+      },
+      {
+        "description": "The layer's name; \"Adjustment\" if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Adds a non-destructive adjustment at the top of the stack.",
+    "title": "New adjustment layer",
+    "version": 1
+  },
+  {
+    "category": "pixels",
+    "effects": "pixels",
+    "id": "core.layer.add_pixel",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer's name; \"Layer\" if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Adds an empty, transparent pixel layer the size of the canvas.",
+    "title": "New pixel layer",
+    "version": 1
+  },
+  {
+    "category": "pixels",
+    "effects": "pixels",
+    "id": "core.layer.apply_edit",
+    "lock": "always",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The edits to apply, in order.",
+        "kind": {
+          "kind": "editOperations"
+        },
+        "name": "operations",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Applies adjustments to a pixel layer's pixels, producing new pixels.",
+    "title": "Apply edits to layer",
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.mask_from_selection",
+    "lock": "always",
+    "needsSelection": true,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": true,
+    "summary": "Gives a layer a mask made from the current selection.",
+    "title": "Mask from selection",
+    "version": 1
+  },
+  {
+    "category": "pixels",
+    "effects": "pixels",
+    "id": "core.layer.merge_down",
+    "lock": "always",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Merges a pixel layer into the layer beneath it.",
+    "title": "Merge down",
+    "version": 1
+  },
+  {
+    "category": "document",
+    "effects": "pixels",
+    "id": "core.document.flatten",
+    "lock": "always",
+    "needsSelection": false,
+    "params": [],
+    "plannerSafe": false,
+    "summary": "Merges every layer into a single background layer.",
+    "title": "Flatten document",
+    "version": 1
+  },
+  {
+    "category": "plugin",
+    "effects": "pixels",
+    "id": "core.plugin.apply_filter",
+    "lock": "always",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The plugin's id.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 64
+        },
+        "name": "plugin",
+        "required": true
+      },
+      {
+        "description": "The filter's id within the plugin.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 64
+        },
+        "name": "filter",
+        "required": true
+      },
+      {
+        "description": "The filter's parameters, as the plugin declared them.",
+        "kind": {
+          "kind": "json"
+        },
+        "name": "parameters",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Runs a plugin's filter on a pixel layer, producing new pixels.",
+    "title": "Apply plugin filter",
+    "version": 1
+  }
+]

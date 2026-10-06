@@ -1,9 +1,10 @@
 mod components;
 mod editor;
 mod inference;
-mod layers;
+pub(crate) mod layers;
 mod mask;
 mod ollama;
+mod operations;
 mod planner;
 mod professional;
 mod raw;
@@ -43,6 +44,7 @@ pub use ollama::{
     cancel_ollama_plan, compare_planners, generate_ollama_plan, get_ollama_diagnostics,
     refresh_ollama_models, test_ollama_connection, validate_ollama_json,
 };
+pub use operations::{apply_transaction, layer_document_revision, list_operations};
 pub use planner::{generate_edit_plan, validate_guided_plan};
 pub use professional::{
     cancel_batch, create_point_operation, export_with_profile, export_workflow, generate_histogram,

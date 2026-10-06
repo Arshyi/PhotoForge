@@ -20,7 +20,7 @@ pub mod text;
 pub mod tiled;
 pub mod tiles;
 mod transform;
-mod workflow;
+pub(crate) mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
 pub use cache::{CacheStats, DocumentFingerprint, TileCache, DEFAULT_CACHE_BYTES};

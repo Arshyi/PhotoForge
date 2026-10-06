@@ -26,6 +26,9 @@ pub mod infrastructure;
 pub mod layers;
 pub mod mask;
 mod network_policy;
+/// The operation registry and transaction engine: the one path by which a plugin, a
+/// macro, a workflow, a planner or a batch run edits a document.
+pub mod operations;
 pub mod pixel;
 pub mod raw;
 pub mod resources;
@@ -34,18 +37,19 @@ pub mod source;
 
 use application::AppState;
 use commands::{
-    analyze_image, apply_operations_to_layer, cancel_batch, cancel_mask_operation,
-    cancel_ollama_plan, clear_render_cache, color_range_selection, compare_planners,
-    compose_selection_masks, create_layer_mask, create_layer_pixels, create_point_operation,
-    default_render_cache_budget, develop_raw_layer, discard_recovery_snapshot, discover_models,
-    export_developed_png16, export_image, export_layer_composite, export_mask_file,
-    export_mask_png, export_raw_layer_png16, export_with_profile, export_workflow,
-    flatten_layer_document, generate_edit_plan, generate_histogram, generate_ollama_plan,
-    get_batch_status, get_component_diagnostics, get_component_snapshot, get_mask_progress,
-    get_ollama_diagnostics, get_render_backend_mode, import_inference_model, import_layer_image,
-    import_mask_file, import_mask_png, import_workflow, inference_status, inspect_document_fonts,
-    inspect_image_pixel, inspect_raw, inspect_selection_mask, layer_mask_from_selection,
-    layer_store_report, list_recovery_snapshots, list_system_fonts, load_layer_project,
+    analyze_image, apply_operations_to_layer, apply_transaction, cancel_batch,
+    cancel_mask_operation, cancel_ollama_plan, clear_render_cache, color_range_selection,
+    compare_planners, compose_selection_masks, create_layer_mask, create_layer_pixels,
+    create_point_operation, default_render_cache_budget, develop_raw_layer,
+    discard_recovery_snapshot, discover_models, export_developed_png16, export_image,
+    export_layer_composite, export_mask_file, export_mask_png, export_raw_layer_png16,
+    export_with_profile, export_workflow, flatten_layer_document, generate_edit_plan,
+    generate_histogram, generate_ollama_plan, get_batch_status, get_component_diagnostics,
+    get_component_snapshot, get_mask_progress, get_ollama_diagnostics, get_render_backend_mode,
+    import_inference_model, import_layer_image, import_mask_file, import_mask_png, import_workflow,
+    inference_status, inspect_document_fonts, inspect_image_pixel, inspect_raw,
+    inspect_selection_mask, layer_document_revision, layer_mask_from_selection, layer_store_report,
+    list_operations, list_recovery_snapshots, list_system_fonts, load_layer_project,
     magic_wand_selection, measure_component_performance, merge_layer_pixels, open_image,
     open_raw_image, open_raw_layer, plan_layer_workflow, preview_batch_workflow,
     rasterize_layer_transform, rasterize_selection, rasterize_semantic_layer,
@@ -85,6 +89,20 @@ use commands::{
     cancel_source_preview, inspect_source_origin, open_image_selection, probe_image_source,
     source_preview_image,
 };
+
+/// Registers the operation commands, so integration tests can drive a transaction
+/// through the real IPC boundary. The shipped binary registers them in `run`.
+#[doc(hidden)]
+pub fn register_operation_commands<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        apply_transaction,
+        list_operations,
+        layer_document_revision
+    ])
+}
+
 use commands::{
     convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
     inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
@@ -105,6 +123,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_image,
+            apply_transaction,
+            list_operations,
+            layer_document_revision,
             create_blank_layer_document,
             render_preview,
             analyze_image,

@@ -128,7 +128,7 @@ pub async fn rasterize_semantic_layer(
     document.validate()?;
     let mut layer = find_layer(&document, &layer_id)?;
     if layer.locked {
-        return Err(AppError::LayerLocked(layer.id));
+        return Err(AppError::LayerLocked(layer.name));
     }
     match layer.kind() {
         LayerKind::Text | LayerKind::Shape | LayerKind::SmartObject => {}

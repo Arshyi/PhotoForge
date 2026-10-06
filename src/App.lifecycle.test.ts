@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import App from './App.svelte';
-import { createDocument, createPixelLayer } from './lib/layers/tree';
+import { createAdjustmentLayer, createDocument, createPixelLayer, insertLayer, updateLayer } from './lib/layers/tree';
+import type { TransactionRequest } from './lib/operations/types';
 import type { RecoveryRecord } from './lib/layers/commands';
 import type { LayerDocument, ProjectLoadResult } from './lib/layers/types';
 import type { ImageMetadata, Workflow } from './lib/types/editor';
@@ -139,15 +140,41 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
         case 'render_layer_thumbnail': return {
           layerId: args.layerId, previewDataUrl: originalUrl, width: 16, height: 12
         };
-        case 'flatten_layer_document': return {
-          pixelId: 'pxflattened', width: 16, height: 12, bytes: 768
-        };
         case 'create_layer_pixels': return pendingCreate ?? {
           pixelId: 'pxcreated', width: 16, height: 12, bytes: 768
         };
         case 'apply_operations_to_layer':
           if (failPixelWorker) throw new Error('Pixel worker failed');
           return { pixelId: 'pxedited', width: 16, height: 12, bytes: 768 };
+        // A stand-in for the backend's transaction engine, which is tested for real
+        // in src-tauri/tests/operations_engine.rs. It performs the two operations
+        // these tests replay on a copy and, like the engine, hands back a document
+        // without touching the one it was given.
+        case 'apply_transaction': {
+          const request = args.request as TransactionRequest;
+          let next = structuredClone(request.document) as LayerDocument;
+          let lastCreated: string | null = null;
+          for (const step of request.steps) {
+            const params = (step.params ?? {}) as Record<string, any>;
+            if (step.op === 'core.layer.set_opacity') {
+              next = updateLayer(next, next.activeLayerId!, (layer) => ({ ...layer, opacity: params.opacity }));
+            } else if (step.op === 'core.layer.add_adjustment') {
+              const layer = createAdjustmentLayer(params.name ?? 'Adjustment', params.operation);
+              next = insertLayer(next, layer, null, next.layers.length);
+              lastCreated = layer.id;
+            } else if (step.op === 'core.document.flatten') {
+              next = createDocument(next.canvasWidth, next.canvasHeight, [
+                createPixelLayer('Background', 'pxflattened', 16, 12)
+              ], next.precision ?? 'legacy_srgb8');
+            } else if (step.op === 'core.layer.apply_edit') {
+              if (failPixelWorker) throw new Error('Step 2 (core.layer.apply_edit) failed: Pixel worker failed Nothing was changed.');
+            }
+          }
+          return {
+            document: next, revision: 'r'.repeat(64), label: request.label, steps: [],
+            createdPixelIds: [], lastCreated
+          };
+        }
         case 'rasterize_selection': return {
           documentId: args.documentId, requestId: args.requestId, isCurrent: true,
           mask: canvasStroke, diagnostics: null, processingTimeMs: 1
@@ -316,9 +343,14 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     await openImage();
     await fireEvent.click(screen.getByRole('tab', { name: 'Flows' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
-    await screen.findByText('Pixel worker failed');
-    expect(calls('apply_operations_to_layer')).toHaveLength(1);
-    expect((argsFor('apply_operations_to_layer').document as LayerDocument).layers[0].opacity).toBe(0.3);
+    await screen.findByText(/Pixel worker failed/);
+    // One transaction carried both steps. The document it was given is unchanged:
+    // the engine works on a copy, and the copy is what was thrown away.
+    expect(calls('apply_transaction')).toHaveLength(1);
+    const request = argsFor('apply_transaction').request as TransactionRequest;
+    expect(request.steps.map((step) => step.op)).toEqual(['core.layer.set_opacity', 'core.layer.apply_edit']);
+    expect(request.origin).toBe('automation');
+    expect((request.document as LayerDocument).layers[0].opacity).toBe(1);
     expect(screen.getByRole('button', { name: 'Undo' }).hasAttribute('disabled')).toBe(true);
     expect(calls('render_preview')).toHaveLength(0);
     expect(calls('render_layer_composite')).toHaveLength(0);

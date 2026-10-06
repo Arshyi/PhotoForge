@@ -640,7 +640,19 @@ impl LayerDocument {
         false
     }
 
-    fn siblings_mut(&mut self, parent: Option<&str>) -> Result<&mut Vec<Layer>, AppError> {
+    /// The layer with this identifier, for editing in place.
+    pub fn layer_mut(&mut self, id: &str) -> Option<&mut Layer> {
+        let path = self.path_to(id)?;
+        let (last, parents) = path.split_last()?;
+        let mut layers = &mut self.layers;
+        for index in parents {
+            layers = layers[*index].children_mut()?;
+        }
+        layers.get_mut(*last)
+    }
+
+    /// The sibling list under `parent`, or the root stack for `None`.
+    pub fn siblings_mut(&mut self, parent: Option<&str>) -> Result<&mut Vec<Layer>, AppError> {
         match parent {
             None => Ok(&mut self.layers),
             Some(parent_id) => {
