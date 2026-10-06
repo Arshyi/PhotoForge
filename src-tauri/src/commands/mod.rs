@@ -8,8 +8,10 @@ mod planner;
 mod professional;
 mod raw;
 mod render;
+mod resources;
 mod sampling;
 mod smart;
+mod source;
 mod text;
 
 pub use components::{
@@ -18,8 +20,8 @@ pub use components::{
     select_restoration_engine, update_component_configuration, validate_plugin_manifest,
 };
 pub use editor::{
-    analyze_image, export_developed_png16, export_image, open_image, open_raw_image,
-    render_preview, OpenRawImageResult,
+    analyze_image, export_developed_png16, export_image, open_image, open_image_selection,
+    open_raw_image, render_preview, OpenRawImageResult, SelectionRequest,
 };
 pub use inference::{import_inference_model, inference_status, remove_inference_model};
 pub use layers::register_layer_commands;
@@ -57,9 +59,14 @@ pub use render::{
     clear_render_cache, default_render_cache_budget, get_render_backend_mode, render_diagnostics,
     set_render_backend_mode, set_render_cache_budget,
 };
+pub use resources::{resource_status, set_memory_budget, GpuMemory, ResourceStatus};
 pub use smart::{
     convert_layers_to_smart_object, import_smart_object, inspect_smart_links, relink_smart_source,
     update_smart_source, SmartLinkStatus, SmartLinksResult,
+};
+pub use source::{
+    cancel_source_preview, inspect_source_origin, probe_image_source, source_preview_image,
+    SourceAdmission, SourcePreviewResult,
 };
 pub use text::{
     inspect_document_fonts, list_system_fonts, rasterize_semantic_layer, FontListResult,

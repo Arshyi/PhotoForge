@@ -48,6 +48,11 @@ pub struct AppState {
     pub batch_status: Arc<Mutex<BatchStatus>>,
     pub batch_cancelled: Arc<AtomicBool>,
     pub mask_cancelled: Arc<AtomicBool>,
+    /// The cancel flag of the source preview currently decoding, if any. A new
+    /// preview cancels the old one, and the interface can cancel it directly:
+    /// a preview holds the CPU job gate, so one that outlived its dialog would
+    /// otherwise block the next open until it finished.
+    pub source_preview_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub mask_progress: SharedMaskProgress,
 }
 
@@ -83,6 +88,7 @@ impl Default for AppState {
             batch_status: Arc::new(Mutex::new(BatchStatus::default())),
             batch_cancelled: Arc::new(AtomicBool::new(false)),
             mask_cancelled: Arc::new(AtomicBool::new(false)),
+            source_preview_cancel: Mutex::new(None),
             mask_progress: Arc::new(Mutex::new(None)),
         }
     }

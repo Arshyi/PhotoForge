@@ -274,17 +274,47 @@ pub fn linear_profile() -> ColorProfile {
     profile
 }
 
+/// A prepared transform from an embedded ICC profile to linear sRGB, applied one
+/// row of RGBA `f32` at a time.
+///
+/// Importing a whole image and importing it as a stream are the same arithmetic,
+/// so they share this. That is what lets a region or reduced copy of a file too
+/// large to open whole come out with exactly the colours a full open would give
+/// the same pixels.
+pub struct IccRowTransform {
+    transform: std::sync::Arc<dyn moxcms::TransformExecutor<f32> + Send + Sync>,
+}
+
+impl IccRowTransform {
+    pub fn new(bytes: &[u8]) -> Result<Self, AppError> {
+        let input = parse_rgb_profile(bytes)?;
+        let options = TransformOptions {
+            prefer_fixed_point: false,
+            allow_use_cicp_transfer: false,
+            allow_extended_range_rgb_xyz: true,
+            ..Default::default()
+        };
+        let transform = input
+            .create_transform_f32(Layout::Rgba, &linear_profile(), Layout::Rgba, options)
+            .map_err(cms_error)?;
+        Ok(Self { transform })
+    }
+
+    /// Transforms one row of encoded RGBA into linear RGBA. Alpha is carried over
+    /// unchanged: a colour profile says nothing about coverage.
+    pub fn apply(&self, encoded: &[f32], linear: &mut [f32]) -> Result<(), AppError> {
+        self.transform
+            .transform(encoded, linear)
+            .map_err(cms_error)?;
+        for (source, dest) in encoded.chunks_exact(4).zip(linear.chunks_exact_mut(4)) {
+            dest[3] = source[3];
+        }
+        Ok(())
+    }
+}
+
 pub fn import_icc(image: &image::DynamicImage, bytes: &[u8]) -> Result<FloatImage, AppError> {
-    let input = parse_rgb_profile(bytes)?;
-    let options = TransformOptions {
-        prefer_fixed_point: false,
-        allow_use_cicp_transfer: false,
-        allow_extended_range_rgb_xyz: true,
-        ..Default::default()
-    };
-    let transform = input
-        .create_transform_f32(Layout::Rgba, &linear_profile(), Layout::Rgba, options)
-        .map_err(cms_error)?;
+    let transform = IccRowTransform::new(bytes)?;
     let encoded = image.to_rgba32f();
     let mut result = FloatImage::blank(image.width(), image.height(), FloatRgba::TRANSPARENT)?;
     let row_size = image.width() as usize * 4;
@@ -294,9 +324,9 @@ pub fn import_icc(image: &image::DynamicImage, bytes: &[u8]) -> Result<FloatImag
         .chunks_exact(row_size)
         .zip(result.pixels_mut().chunks_mut(image.width() as usize))
     {
-        transform.transform(source, &mut row).map_err(cms_error)?;
-        for ((input, p), output) in source.chunks_exact(4).zip(dest).zip(row.chunks_exact(4)) {
-            *p = FloatRgba::new(output[0], output[1], output[2], input[3]);
+        transform.apply(source, &mut row)?;
+        for (output, p) in row.chunks_exact(4).zip(dest) {
+            *p = FloatRgba::new(output[0], output[1], output[2], output[3]);
         }
     }
     result.validate()?;

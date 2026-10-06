@@ -1,6 +1,7 @@
 mod color_io;
 mod component_io;
-mod image_io;
+pub(crate) mod image_io;
+pub mod local_path;
 pub use color_io::{save_color_image, save_color_image_streaming};
 mod metadata;
 pub mod preferences;

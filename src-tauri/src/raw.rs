@@ -26,7 +26,10 @@ use std::path::{Path, PathBuf};
 
 pub const RAW_MAX_FILE_BYTES: u64 = 750 * 1024 * 1024;
 pub const RAW_MAX_HEADER_BYTES: usize = 64 * 1024;
-pub const RAW_MAX_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
+/// Most pixels a RAW image may decode to, under the current budget.
+pub fn raw_max_pixels() -> u64 {
+    crate::resources::max_working_pixels()
+}
 
 /// Camera RAW families that the planned backend can identify by extension.
 /// Recognition is not a claim that this build can decode the format.
@@ -401,9 +404,10 @@ pub fn validate_dimensions(width: u32, height: u32) -> Result<(), RawError> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or_else(|| RawError::InvalidMetadata("dimensions overflow".into()))?;
-    if pixels > RAW_MAX_PIXELS {
+    if pixels > raw_max_pixels() {
         return Err(RawError::InvalidMetadata(format!(
-            "dimensions exceed the {RAW_MAX_PIXELS}-pixel limit"
+            "dimensions exceed the {}-pixel limit",
+            raw_max_pixels()
         )));
     }
     Ok(())

@@ -35,6 +35,8 @@ pub struct LayerPixelsResult {
     pub height: u32,
     pub filename: Option<String>,
     pub raw: Option<crate::raw::RawLayerSource>,
+    /// Set when the pixels are a region or reduced copy of a larger file.
+    pub origin: Option<crate::source::SourceOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -379,6 +381,7 @@ pub async fn import_layer_image(
             height: result.height,
             filename: Some(result.source.reference.filename.clone()),
             raw: Some(result.source),
+            origin: None,
         });
     }
     let input_path = PathBuf::from(path);
@@ -406,6 +409,7 @@ pub async fn import_layer_image(
         height,
         filename: Some(filename),
         raw: None,
+        origin: None,
     })
 }
 
@@ -429,6 +433,7 @@ pub async fn create_layer_pixels(
         height,
         filename: None,
         raw: None,
+        origin: None,
     })
 }
 
@@ -473,6 +478,7 @@ pub(super) async fn render_subset_into_buffer(
         height: canvas_height,
         filename: None,
         raw: None,
+        origin: None,
     })
 }
 
@@ -661,6 +667,7 @@ pub async fn apply_operations_to_layer(
         height,
         filename: None,
         raw: None,
+        origin: None,
     })
 }
 
@@ -1028,6 +1035,7 @@ fn prepare_project(
         camera_model: None,
         exif_available: false,
         raw: None,
+        origin: None,
     };
     Ok(PreparedProject {
         source: LoadedImage {

@@ -617,6 +617,11 @@ pub struct ImageMetadata {
     /// absent; RAW import may populate it without making metadata mandatory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<crate::raw::RawCaptureMetadata>,
+    /// Present when what was opened is a region or a reduced copy of a larger
+    /// file. The width and height above are then the document's, not the file's;
+    /// the file's are in here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::source::SourceOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize)]

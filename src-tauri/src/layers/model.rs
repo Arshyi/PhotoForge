@@ -22,8 +22,7 @@ pub const MAX_LAYER_METADATA_VALUE_CHARS: usize = 512;
 pub const MAX_TIMESTAMP_CHARS: usize = 64;
 /// Largest canvas the layer document model accepts, matching the existing
 /// decode ceiling in `infrastructure::image_io`.
-pub const MAX_CANVAS_DIMENSION: u32 = 20_000;
-pub const MAX_CANVAS_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
+pub const MAX_CANVAS_DIMENSION: u32 = crate::resources::HARD_MAX_CANVAS_DIMENSION;
 
 /// Groups are isolated unless a project says otherwise, so a document written
 /// before pass-through existed restores with exactly its original appearance.
@@ -224,6 +223,15 @@ pub struct Layer {
     /// and absent in projects written before 0.9.0.
     #[serde(default)]
     pub raw: Option<crate::raw::RawLayerSource>,
+    /// The file this layer's pixels were read from, when they are only part of
+    /// it: a region of a larger image, or a reduced copy of one.
+    ///
+    /// Provenance, not a dependency. The pixels are stored in the project like
+    /// any layer's, so a missing source changes nothing about editing; it only
+    /// means the region cannot be changed. Absent on every ordinary layer and in
+    /// every project written before 0.14.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Box<crate::source::SourceOrigin>>,
     pub content: LayerContent,
 }
 
@@ -301,6 +309,15 @@ impl Layer {
             }
         }
 
+        if let Some(origin) = &self.origin {
+            let LayerContent::Pixel { width, height, .. } = &self.content else {
+                return Err(AppError::InvalidLayerDocument(
+                    "only pixel layers can record a source origin".into(),
+                ));
+            };
+            origin.validate(*width, *height)?;
+        }
+
         match &self.content {
             LayerContent::Shape { shape } => shape.validate()?,
             LayerContent::Text { text } => text.validate()?,
@@ -370,11 +387,9 @@ pub fn validate_dimensions(width: u32, height: u32) -> Result<(), AppError> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or_else(|| AppError::InvalidLayerDocument("layer dimensions overflow".into()))?;
-    if pixels > MAX_CANVAS_PIXELS {
-        return Err(AppError::ImageTooLarge {
-            pixels,
-            limit: MAX_CANVAS_PIXELS,
-        });
+    let limit = crate::resources::max_working_pixels();
+    if pixels > limit {
+        return Err(AppError::ImageTooLarge { pixels, limit });
     }
     Ok(())
 }
@@ -733,6 +748,7 @@ pub(crate) mod fixtures {
             collapsed: false,
             metadata: LayerMetadata::default(),
             raw: None,
+            origin: None,
             content: LayerContent::Pixel {
                 pixel_id: format!("px{id}"),
                 width,
@@ -763,6 +779,7 @@ pub(crate) mod fixtures {
             collapsed: false,
             metadata: LayerMetadata::default(),
             raw: None,
+            origin: None,
             content: LayerContent::Group {
                 children,
                 isolated: true,
@@ -783,6 +800,7 @@ pub(crate) mod fixtures {
             collapsed: false,
             metadata: LayerMetadata::default(),
             raw: None,
+            origin: None,
             content: LayerContent::Adjustment {
                 operation: Box::new(operation),
             },

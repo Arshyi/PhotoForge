@@ -29,6 +29,7 @@ fn base_layer(id: &str) -> Layer {
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Group {
             children: Vec::new(),
             isolated: true,

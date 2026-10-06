@@ -15,10 +15,17 @@ use std::sync::Arc;
 
 use super::{camera_model, file_time};
 
-const MAX_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
-const MAX_DIMENSION: u32 = 20_000;
-const MAX_DECODED_BYTES: u64 = crate::resources::MAX_WORKING_IMAGE_BYTES;
-const MAX_FILE_BYTES: u64 = 750 * 1024 * 1024;
+/// The edge ceiling is structural; the pixel and byte ceilings come from the
+/// resource budget, so they are functions rather than constants.
+const MAX_DIMENSION: u32 = crate::resources::HARD_MAX_CANVAS_DIMENSION;
+
+fn max_pixels() -> u64 {
+    crate::resources::max_working_pixels()
+}
+
+fn max_decoded_bytes() -> u64 {
+    crate::resources::max_working_image_bytes()
+}
 const PREVIEW_MAX_DIMENSION: u32 = 1_600;
 const JPEG_QUALITY: u8 = 90;
 
@@ -38,13 +45,15 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
     if !file_metadata.is_file() {
         return Err(AppError::UnsupportedImageFormat);
     }
-    if file_metadata.len() > MAX_FILE_BYTES {
-        return Err(AppError::OutOfMemoryRisk);
-    }
 
-    let (width, height) = image::image_dimensions(&canonical_path).map_err(map_image_error)?;
+    // One arbiter. The planner reads the header, prices opening this source as a
+    // conventional document against the budget in force, and either admits it or
+    // says why not. Anything it does not admit whole is a job for the region or
+    // reduced-copy paths, not for this one.
+    let probed = crate::source::probe::probe_path(&canonical_path)?;
+    crate::source::probe::require_full_admission(&probed)?;
+    let (width, height) = (probed.width, probed.height);
     validate_dimensions(width, height)?;
-    crate::resources::ResourceEstimate::decode(width, height, file_metadata.len())?;
 
     let mut reader = ImageReader::open(&canonical_path)
         .map_err(map_io_error)?
@@ -61,15 +70,34 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_DIMENSION);
     limits.max_image_height = Some(MAX_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODED_BYTES);
+    limits.max_alloc = Some(max_decoded_bytes());
     reader.limits(limits);
 
     let mut decoder = reader.into_decoder().map_err(map_image_error)?;
-    if decoder.total_bytes() > MAX_DECODED_BYTES {
+    if decoder.total_bytes() > max_decoded_bytes() {
         return Err(AppError::OutOfMemoryRisk);
     }
     let icc = decoder.icc_profile().map_err(map_image_error)?;
     let decoded = DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    assemble_loaded(canonical_path, &file_metadata, format, decoded, icc, None)
+}
+
+/// Everything after the pixels are decoded: colour management, the preview and
+/// the metadata.
+///
+/// Shared by the whole-file open and by region opens, deliberately. A region has
+/// to come out of exactly the colour pipeline a full open uses, or "the region
+/// matches the same area of a full render" would be untrue before any editing
+/// began. `origin` is set only when what was decoded is part of a larger file.
+pub(crate) fn assemble_loaded(
+    canonical_path: PathBuf,
+    file_metadata: &fs::Metadata,
+    format: ImageFormat,
+    decoded: DynamicImage,
+    icc: Option<Vec<u8>>,
+    origin: Option<crate::source::SourceOrigin>,
+) -> Result<LoadedImage, AppError> {
+    let (width, height) = decoded.dimensions();
     let color = decoded.color();
     let working = if let Some(profile) = &icc {
         Some(Arc::new(crate::color_management::import_icc(
@@ -89,32 +117,16 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         decoded.clone()
     };
 
-    let filename = canonical_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("image")
-        .to_string();
-    let camera_model = camera_model(&canonical_path);
-    let metadata = ImageMetadata {
-        filename,
-        width,
-        height,
-        format: format_name(format).to_string(),
-        file_size: file_metadata.len(),
-        color_space: if icc.is_some() {
-            "Embedded RGB ICC → linear sRGB".to_string()
-        } else {
-            "sRGB".to_string()
-        },
-        bit_depth: (color.bits_per_pixel() / u16::from(color.channel_count())).min(255) as u8,
-        has_alpha: color.has_alpha(),
-        created_at: file_time(file_metadata.created()),
-        modified_at: file_time(file_metadata.modified()),
-        exif_available: camera_model.is_some(),
-        camera_model,
-        raw: None,
-    };
-
+    let metadata = metadata_for(
+        &canonical_path,
+        file_metadata,
+        format,
+        (width, height),
+        icc.is_some(),
+        (color.bits_per_pixel() / u16::from(color.channel_count())).min(255) as u8,
+        color.has_alpha(),
+        origin,
+    );
     Ok(LoadedImage {
         path: canonical_path,
         original: Arc::new(decoded),
@@ -122,6 +134,89 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         metadata,
         working,
     })
+}
+
+/// What the source file said about its own pixels, which a reduced copy no
+/// longer carries in its samples but must still report.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceTraits {
+    pub had_icc: bool,
+    pub bit_depth: u8,
+    pub has_alpha: bool,
+}
+
+/// A reduced copy, already in linear float: it was resampled in linear light, so
+/// converting it again would be wrong, and the float image is authoritative.
+pub(crate) fn assemble_reduced(
+    canonical_path: PathBuf,
+    file_metadata: &fs::Metadata,
+    format: ImageFormat,
+    reduced: crate::color::FloatImage,
+    traits: SourceTraits,
+    origin: crate::source::SourceOrigin,
+) -> Result<LoadedImage, AppError> {
+    let (width, height) = reduced.dimensions();
+    let (pw, ph) = crate::layers::preview_dimensions(width, height);
+    let preview = DynamicImage::ImageRgba8(reduced.resized(pw, ph)?.to_rgba8());
+    // The 8-bit original the document keeps alongside, encoded from the float
+    // image so the two agree.
+    let original = DynamicImage::ImageRgba8(reduced.to_rgba8());
+    let metadata = metadata_for(
+        &canonical_path,
+        file_metadata,
+        format,
+        (width, height),
+        traits.had_icc,
+        traits.bit_depth,
+        traits.has_alpha,
+        Some(origin),
+    );
+    Ok(LoadedImage {
+        path: canonical_path,
+        original: Arc::new(original),
+        preview: Arc::new(preview),
+        metadata,
+        working: Some(Arc::new(reduced)),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metadata_for(
+    canonical_path: &Path,
+    file_metadata: &fs::Metadata,
+    format: ImageFormat,
+    (width, height): (u32, u32),
+    had_icc: bool,
+    bit_depth: u8,
+    has_alpha: bool,
+    origin: Option<crate::source::SourceOrigin>,
+) -> ImageMetadata {
+    let filename = canonical_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let camera_model = camera_model(canonical_path);
+    ImageMetadata {
+        filename,
+        width,
+        height,
+        format: format_name(format).to_string(),
+        file_size: file_metadata.len(),
+        color_space: if had_icc {
+            "Embedded RGB ICC → linear sRGB".to_string()
+        } else {
+            "sRGB".to_string()
+        },
+        bit_depth,
+        has_alpha,
+        created_at: file_time(file_metadata.created()),
+        modified_at: file_time(file_metadata.modified()),
+        exif_available: camera_model.is_some(),
+        camera_model,
+        raw: None,
+        origin,
+    }
 }
 
 pub fn encode_preview(image: &DynamicImage) -> Result<String, AppError> {
@@ -225,16 +320,16 @@ fn validate_dimensions(width: u32, height: u32) -> Result<u64, AppError> {
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(AppError::ImageTooLarge {
             pixels: u64::from(width).saturating_mul(u64::from(height)),
-            limit: MAX_PIXELS,
+            limit: max_pixels(),
         });
     }
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or(AppError::OutOfMemoryRisk)?;
-    if pixels > MAX_PIXELS {
+    if pixels > max_pixels() {
         return Err(AppError::ImageTooLarge {
             pixels,
-            limit: MAX_PIXELS,
+            limit: max_pixels(),
         });
     }
     Ok(pixels)

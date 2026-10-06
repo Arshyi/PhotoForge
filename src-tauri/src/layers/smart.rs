@@ -74,28 +74,9 @@ impl SmartLink {
             )));
         }
         // Projects store links as inert metadata; they never authorise a
-        // network connection or a path traversal. Only explicit local absolute
-        // file paths may be checked/relinked by the command layer.
-        let normalised = self.path.replace('\\', "/");
-        let drive_absolute = normalised.as_bytes().get(1) == Some(&b':')
-            && normalised
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphabetic)
-            && normalised.as_bytes().get(2) == Some(&b'/');
-        let unix_absolute = normalised.starts_with('/') && !normalised.starts_with("//");
-        if self.path.contains('\0')
-            || normalised.starts_with("//")
-            || (!drive_absolute && !unix_absolute)
-            || normalised
-                .split('/')
-                .any(|part| part == ".." || part == ".")
-            || normalised.get(2..).is_some_and(|tail| tail.contains(':'))
-        {
-            return Err(AppError::InvalidLayerDocument(
-                "smart links require an absolute local file path without traversal or network paths".into(),
-            ));
-        }
+        // network connection or a path traversal. The rules are shared with
+        // source origins, so the two cannot drift apart.
+        crate::infrastructure::local_path::check_local_absolute(&self.path)?;
         if self.digest.len() != 64 || !self.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(AppError::InvalidLayerDocument(
                 "a linked source digest must be 64 hexadecimal characters".into(),

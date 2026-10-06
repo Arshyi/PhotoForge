@@ -63,6 +63,7 @@ fn layer(id: &str, pixel: &str, w: u32, h: u32) -> Layer {
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Pixel {
             pixel_id: pixel.into(),
             width: w,

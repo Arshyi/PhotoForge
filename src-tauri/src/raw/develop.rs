@@ -25,7 +25,7 @@
 
 use super::demosaic::{self, Quality};
 use super::dng;
-use super::{RawError, RAW_MAX_PIXELS};
+use super::{raw_max_pixels, RawError};
 use crate::color::{
     apply_development, ColorPipelineError, DevelopmentParameters, FloatImage, FloatRgba,
     WhiteBalance,
@@ -338,7 +338,7 @@ pub fn develop_bytes(
     }
     let sensor = dng::decode(data)?;
     let pixels = u64::from(sensor.width) * u64::from(sensor.height);
-    if pixels > RAW_MAX_PIXELS {
+    if pixels > raw_max_pixels() {
         return Err(RawError::FileTooLarge);
     }
     develop_sensor(&sensor, parameters, scale)

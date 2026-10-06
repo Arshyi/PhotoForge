@@ -209,6 +209,7 @@ fn document_with(image: FloatImage, operation: EditOperation) -> (LayerDocument,
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Pixel {
             pixel_id: id,
             width,

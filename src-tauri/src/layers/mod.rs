@@ -80,6 +80,7 @@ pub fn test_pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> La
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Pixel {
             pixel_id: pixel_id.into(),
             width,

@@ -169,6 +169,7 @@ fn pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> Layer {
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Pixel {
             pixel_id: pixel_id.into(),
             width,
@@ -190,6 +191,7 @@ fn group_layer(id: &str, children: Vec<Layer>, isolated: bool) -> Layer {
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Group { children, isolated },
     }
 }

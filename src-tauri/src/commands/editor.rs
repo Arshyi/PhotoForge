@@ -101,23 +101,89 @@ pub async fn open_image(
     request_id: u64,
     state: State<'_, AppState>,
 ) -> Result<OpenImageResult, AppError> {
-    let started = Instant::now();
-    let request = OpenRequest::begin(&state, request_id)?;
-
     let input_path = PathBuf::from(path);
+    open_loaded(request_id, &state, move || load_image(&input_path)).await
+}
+
+/// What part of a source to open, as the interface sends it.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SelectionRequest {
+    Region { rect: crate::source::Rect },
+    Reduced { width: u32, height: u32 },
+}
+
+/// Opens a region of a source, or a reduced copy of the whole of it.
+///
+/// The same replacement protocol as `open_image`, gated by the same planner the
+/// interface consulted, so the answer the user was shown is the answer enforced.
+#[tauri::command]
+pub async fn open_image_selection(
+    path: String,
+    selection: SelectionRequest,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<OpenImageResult, AppError> {
+    let input_path = PathBuf::from(path);
+    let selection = match selection {
+        SelectionRequest::Region { rect } => crate::source::open::OpenSelection::Region(rect),
+        SelectionRequest::Reduced { width, height } => {
+            crate::source::open::OpenSelection::Reduced { width, height }
+        }
+    };
+    open_loaded(request_id, &state, move || {
+        crate::source::open::open_selection(&input_path, selection, 0, None)
+    })
+    .await
+}
+
+/// The shared body of every image open.
+///
+/// The memory limits are refreshed for the document about to open and the old
+/// ones saved. If the open fails, the old ones are put back: a document that is
+/// still open must go on being judged by the limits it was admitted under, not
+/// by lower ones computed for a document that never arrived.
+async fn open_loaded<F>(
+    request_id: u64,
+    state: &State<'_, AppState>,
+    load: F,
+) -> Result<OpenImageResult, AppError>
+where
+    F: FnOnce() -> Result<crate::infrastructure::LoadedImage, AppError> + Send + 'static,
+{
+    let previous = crate::resources::snapshot();
+    crate::resources::refresh(&crate::resources::memory::OsProbe);
+    let outcome = open_loaded_inner(request_id, state, load).await;
+    if outcome.is_err() {
+        crate::resources::restore(previous);
+    }
+    outcome
+}
+
+async fn open_loaded_inner<F>(
+    request_id: u64,
+    state: &State<'_, AppState>,
+    load: F,
+) -> Result<OpenImageResult, AppError>
+where
+    F: FnOnce() -> Result<crate::infrastructure::LoadedImage, AppError> + Send + 'static,
+{
+    let started = Instant::now();
+    let request = OpenRequest::begin(state, request_id)?;
+
     let loaded = match tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        load_image(&input_path)
+        load()
     })
     .await
     {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(error)) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(error);
         }
         Err(_) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(AppError::ProcessingFailure(
                 "image loading worker stopped".into(),
             ));
@@ -131,7 +197,7 @@ pub async fn open_image(
     let preview_data_url = match encode_preview(loaded.preview.as_ref()) {
         Ok(preview) => preview,
         Err(error) => {
-            clear_pending_open(&state, request_id);
+            clear_pending_open(state, request_id);
             return Err(error);
         }
     };
@@ -579,6 +645,7 @@ pub async fn open_raw_image(
         camera_model: sensor.metadata.model.clone(),
         exif_available: sensor.metadata.manufacturer.is_some(),
         raw: Some(sensor.metadata.clone()),
+        origin: None,
     };
 
     if !request.is_current() {

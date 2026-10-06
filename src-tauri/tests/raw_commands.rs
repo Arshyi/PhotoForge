@@ -59,6 +59,7 @@ impl Harness {
                         camera_model: None,
                         exif_available: false,
                         raw: None,
+                        origin: None,
                     },
                 },
             });
@@ -716,6 +717,7 @@ fn complex_raw_document(
         collapsed: false,
         metadata: LayerMetadata::default(),
         raw: None,
+        origin: None,
         content: LayerContent::Pixel {
             pixel_id: "pxplain".into(),
             width,

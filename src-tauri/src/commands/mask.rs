@@ -964,6 +964,7 @@ mod tests {
                     camera_model: None,
                     exif_available: false,
                     raw: None,
+                    origin: None,
                 },
             },
             document_id,

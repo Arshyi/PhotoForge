@@ -14,7 +14,6 @@ use std::sync::Arc;
 pub const PREVIEW_MAX_DIMENSION: u32 = 1_600;
 /// Total full-resolution pixel memory one document's layers may hold. Previews
 /// are counted too. Exceeding it fails the edit rather than the process.
-pub const MAX_STORE_BYTES: u64 = 1_073_741_824;
 /// Largest number of distinct pixel buffers a document may hold.
 pub const MAX_STORE_BUFFERS: usize = 1_024;
 
@@ -178,7 +177,7 @@ impl LayerPixelStore {
             .total_bytes()
             .saturating_sub(replaced)
             .saturating_add(incoming);
-        if projected > MAX_STORE_BYTES {
+        if projected > crate::resources::max_store_bytes() {
             return Err(AppError::OutOfMemoryRisk);
         }
         let preview = self.scaled_preview(&image)?;
@@ -529,7 +528,7 @@ mod tests {
                 Err(error) => panic!("unexpected error: {error}"),
             }
         }
-        assert!(store.total_bytes() <= MAX_STORE_BYTES);
+        assert!(store.total_bytes() <= crate::resources::max_store_bytes());
     }
 
     #[test]

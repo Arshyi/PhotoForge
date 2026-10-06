@@ -12,7 +12,7 @@
 
 use super::ljpeg;
 use super::tiff::{self, Ifd, TiffFile};
-use super::{RawCaptureMetadata, RawError, RAW_MAX_PIXELS};
+use super::{raw_max_pixels, RawCaptureMetadata, RawError};
 
 // Baseline TIFF tags.
 const TAG_NEW_SUBFILE_TYPE: u16 = 254;
@@ -571,7 +571,7 @@ fn decode_samples(
     compression: u32,
 ) -> Result<Vec<u16>, RawError> {
     let pixels = u64::from(width) * u64::from(height);
-    if pixels > RAW_MAX_PIXELS {
+    if pixels > raw_max_pixels() {
         return Err(RawError::FileTooLarge);
     }
 
@@ -616,7 +616,7 @@ fn decode_samples(
     let down = height.div_ceil(segment_height);
     let expected_segments = u64::from(across) * u64::from(down);
     if expected_segments != offsets.len() as u64
-        || u64::from(segment_width) * u64::from(segment_height) > RAW_MAX_PIXELS
+        || u64::from(segment_width) * u64::from(segment_height) > raw_max_pixels()
     {
         return Err(RawError::Malformed(
             "strip/tile dimensions and segment count disagree".into(),

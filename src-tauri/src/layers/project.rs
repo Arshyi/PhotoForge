@@ -22,7 +22,6 @@ pub const PROJECT_FORMAT_VERSION: u32 = 2;
 pub const MAX_PROJECT_BYTES: u64 = 1_073_741_824;
 pub const MAX_MANIFEST_BYTES: u64 = 33_554_432;
 pub const MAX_PROJECT_ENTRIES: usize = 4_096;
-pub const MAX_ENTRY_BYTES: u64 = crate::resources::MAX_WORKING_IMAGE_BYTES;
 pub const MAX_ENTRY_NAME_CHARS: usize = 128;
 const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -399,10 +398,10 @@ fn encode_project_sources(
                     .len()
                     .checked_mul(16)
                     .ok_or(AppError::OutOfMemoryRisk)?;
-                if len as u64 > MAX_ENTRY_BYTES {
+                if len as u64 > crate::resources::max_entry_bytes() {
                     return Err(AppError::ProjectTooLarge {
                         bytes: len as u64,
-                        limit: MAX_ENTRY_BYTES,
+                        limit: crate::resources::max_entry_bytes(),
                     });
                 }
                 let mut payload = Vec::new();
@@ -513,10 +512,10 @@ fn encode_project_sources(
     bytes.extend_from_slice(&manifest_bytes);
     bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for entry in &entries {
-        if entry.payload.len() as u64 > MAX_ENTRY_BYTES {
+        if entry.payload.len() as u64 > crate::resources::max_entry_bytes() {
             return Err(AppError::ProjectTooLarge {
                 bytes: entry.payload.len() as u64,
-                limit: MAX_ENTRY_BYTES,
+                limit: crate::resources::max_entry_bytes(),
             });
         }
         bytes.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
@@ -666,7 +665,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             .checked_add(n * bpp)
             .ok_or(AppError::OutOfMemoryRisk)?;
     }
-    if declared_pixels > super::store::MAX_STORE_BYTES
+    if declared_pixels > crate::resources::max_store_bytes()
         || manifest.masks.len() > super::model::MAX_LAYERS
     {
         return Err(AppError::OutOfMemoryRisk);
@@ -722,10 +721,10 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
             )));
         }
         let payload_len = cursor.u64()?;
-        if payload_len > MAX_ENTRY_BYTES {
+        if payload_len > crate::resources::max_entry_bytes() {
             return Err(AppError::ProjectTooLarge {
                 bytes: payload_len,
-                limit: MAX_ENTRY_BYTES,
+                limit: crate::resources::max_entry_bytes(),
             });
         }
         let checksum = cursor.u64()?;
@@ -787,7 +786,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         decoded_bytes = decoded_bytes
             .checked_add(bytes)
             .ok_or(AppError::OutOfMemoryRisk)?;
-        if decoded_bytes > super::store::MAX_STORE_BYTES {
+        if decoded_bytes > crate::resources::max_store_bytes() {
             return Err(AppError::OutOfMemoryRisk);
         }
         if entry.encoding == ENCODING_PNG && pixel.format == PixelFormat::SRGBA8 {
@@ -1437,7 +1436,7 @@ mod tests {
         bytes.extend_from_slice(name);
         bytes.push(ENCODING_PNG);
         // Declare a gigantic payload that the file cannot possibly contain.
-        bytes.extend_from_slice(&(MAX_ENTRY_BYTES - 1).to_le_bytes());
+        bytes.extend_from_slice(&(crate::resources::max_entry_bytes() - 1).to_le_bytes());
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         let trailer = fnv1a64(&bytes);
         bytes.extend_from_slice(&trailer.to_le_bytes());

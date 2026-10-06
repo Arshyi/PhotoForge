@@ -16,6 +16,13 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# DCT-domain downscaling for JPEG. The decoder `image` uses (zune-jpeg) can only
+# decode the whole frame; this one can decode at 1/2, 1/4 or 1/8 size, which is
+# the only way to build a bounded preview or reduced copy of a JPEG too large to
+# decode in full. It is used for that path alone; ordinary JPEGs still go
+# through `image`. In maintenance mode upstream, which is weighed in
+# docs/oversized-images.md.
+jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.18"
 # Text: shaping, bidirectional layout, system font discovery and fallback.
 # Pure Rust, so no font or text DLL is packaged. swash is taken directly as
@@ -58,6 +65,17 @@ tauri = { version = "=2.11.5", features = ["test"] }
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.38.2"
 windows-core = "=0.61.2"
+# Already in the graph through Tauri and tao at exactly this version, so this
+# adds no second copy. Used for three narrow reads and nothing else: physical
+# and available memory (the resource manager's budget), this process's working
+# set (to check the estimator against reality), and free disk space (the
+# out-of-core and disk-cache story). No window, handle or registry access.
+windows = { version = "=0.61.3", features = [
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+] }
 
 [features]
 default = ["custom-protocol", "gpu", "inference"]
@@ -71,3 +89,11 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 # has a working capability; no model ships, and nothing downloads one. tract is
 # pure Rust, so this adds no native DLL to the installer. It requires Rust 1.91.
 inference = ["dep:tract-onnx"]
+
+# Third-party code is optimised even in dev and test builds; PhotoForge's own
+# crate stays at opt-level 0 so debug assertions and overflow checks still run
+# on it. Decoding a 70-megapixel PNG took 15 s with unoptimised dependencies and
+# the image, compression and colour crates are exactly where the time goes; it is
+# a cost paid once per dependency rebuild and repaid on every test run.
+[profile.dev.package."*"]
+opt-level = 2

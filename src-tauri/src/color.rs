@@ -12,7 +12,6 @@ use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use serde::{Deserialize, Serialize};
 
-const MAX_FLOAT_PIXELS: u64 = crate::resources::MAX_WORKING_PIXELS;
 const MAX_FLOAT_DIMENSION: u32 = 20_000;
 const SRGB_DECODE_BREAK: f32 = 0.04045;
 const SRGB_ENCODE_BREAK: f32 = 0.003_130_8;
@@ -400,7 +399,7 @@ fn checked_pixel_count(width: u32, height: u32) -> Result<u64, ColorPipelineErro
     let count = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or(ColorPipelineError::InvalidPixelCount)?;
-    if count > MAX_FLOAT_PIXELS {
+    if count > crate::resources::max_working_pixels() {
         return Err(ColorPipelineError::InvalidPixelCount);
     }
     Ok(count)

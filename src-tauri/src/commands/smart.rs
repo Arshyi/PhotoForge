@@ -45,6 +45,7 @@ fn instance(id: String, name: String, source_id: String) -> Layer {
         collapsed: false,
         metadata: Default::default(),
         raw: None,
+        origin: None,
         content: LayerContent::SmartObject {
             smart: Box::new(SmartObjectContent { source_id }),
         },
@@ -227,44 +228,14 @@ pub struct SmartLinksResult {
 }
 
 fn local_path(path: &str) -> Result<PathBuf, AppError> {
+    // The digest is a placeholder: only the path is being judged here.
     SmartLink {
         path: path.into(),
         digest: "0".repeat(64),
         bytes: 0,
     }
     .validate()?;
-    let result = PathBuf::from(path);
-    if !result.is_absolute()
-        || path.starts_with("\\\\")
-        || path.starts_with("//")
-        || path.contains("://")
-        || path.contains('\0')
-        || result.components().any(|p| p == Component::ParentDir)
-    {
-        return Err(AppError::ProjectIo("smart links require an absolute local path without parent traversal or device/network prefixes".into()));
-    }
-    // Windows resolves DOS device basenames even under an otherwise ordinary
-    // drive path. Do not open those devices (or alternate data streams).
-    for part in path.split(['\\', '/']).skip(1) {
-        let stem = part
-            .split('.')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches([' ', '.'])
-            .to_ascii_uppercase();
-        if matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        ) || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit())
-        {
-            return Err(AppError::ProjectIo(
-                "smart links cannot name a device".into(),
-            ));
-        }
-    }
-    Ok(result)
+    crate::infrastructure::local_path::validated_local_path(path)
 }
 
 /// Hash one open handle, stopping even if another process grows the file.

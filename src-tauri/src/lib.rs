@@ -29,6 +29,8 @@ mod network_policy;
 pub mod pixel;
 pub mod raw;
 pub mod resources;
+/// Bounded reads of image sources, and the provenance of what was read.
+pub mod source;
 
 use application::AppState;
 use commands::{
@@ -58,8 +60,13 @@ use commands::{
     validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
 };
 use commands::{
+    cancel_source_preview, inspect_source_origin, open_image_selection, probe_image_source,
+    source_preview_image,
+};
+use commands::{
     convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
-    inspect_smart_links, relink_smart_source, update_smart_source,
+    inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
+    update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -68,6 +75,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
+            // Measured before the first window exists, so that nothing is ever
+            // admitted against the unmeasured fallback in a real session.
+            resources::refresh(&resources::memory::OsProbe);
             network_policy::create_main_window(app)?;
             Ok(())
         })
@@ -148,6 +158,13 @@ pub fn run() {
             flatten_layer_document,
             rasterize_layer_transform,
             rasterize_semantic_layer,
+            resource_status,
+            set_memory_budget,
+            probe_image_source,
+            source_preview_image,
+            cancel_source_preview,
+            inspect_source_origin,
+            open_image_selection,
             list_system_fonts,
             inspect_document_fonts,
             convert_layers_to_smart_object,
