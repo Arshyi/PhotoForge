@@ -329,8 +329,27 @@ function validateBaseOperation(value: Record<string, unknown>): string | null {
     case 'selective_color':
       return finiteRange(value.target_hue, 0, 360) && finiteRange(value.width, 1, 180) &&
         validSelectiveAdjustment(value.adjustment) ? null : invalid();
+    case 'plugin_filter': return validPluginFilter(value) ? null : invalid();
     default: return `unsupported operation type ${String(value.type)}.`;
   }
+}
+
+/** Mirrors `plugins::apply::validate_reference`: the form of the reference, nothing about whether it is installed. */
+function validPluginFilter(value: Record<string, unknown>): boolean {
+  const local = /^[a-z][a-z0-9_]{0,47}$/;
+  const pluginId = typeof value.plugin === 'string' && value.plugin.length >= 3 && value.plugin.length <= 64 &&
+    /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){1,7}$/.test(value.plugin) && !value.plugin.startsWith('core.');
+  const locality = value.locality;
+  const localityOk = isRecord(locality) && (
+    locality.kind === 'pointwise' || locality.kind === 'global' ||
+    (locality.kind === 'local' && integerRange(locality.radius, 1, 256)));
+  return pluginId &&
+    typeof value.version === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value.version) &&
+    typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256) &&
+    typeof value.filter === 'string' && local.test(value.filter) &&
+    localityOk &&
+    Array.isArray(value.parameters) && value.parameters.length <= 32 &&
+    value.parameters.every((parameter) => typeof parameter === 'number' && Number.isFinite(parameter));
 }
 
 function validateMaskSnapshot(value: unknown): string | null {

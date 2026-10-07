@@ -150,6 +150,23 @@
   import SmartContentsEditor from './lib/components/SmartContentsEditor.svelte';
   import { sourceDimensions, replaceSmartSourceDocument } from './lib/layers/smart';
   import { inspectSourceOrigin, probeImageSource } from './lib/source/commands';
+  import PluginManager from './lib/components/PluginManager.svelte';
+  import PluginsPanel from './lib/components/PluginsPanel.svelte';
+  import PluginFilterDialog from './lib/components/PluginFilterDialog.svelte';
+  import PluginCommandDialog from './lib/components/PluginCommandDialog.svelte';
+  import CommandPalette from './lib/components/CommandPalette.svelte';
+  import { buildCoreCommands, buildPluginCommands } from './lib/commands/core';
+  import { listOperations } from './lib/operations/client';
+  import type { OperationSpec } from './lib/operations/types';
+  import {
+    documentPluginStatus,
+    listPlugins,
+    pluginRememberedValues,
+    rememberPluginValues,
+    runPluginCommand
+  } from './lib/plugins/client';
+  import { pluginReferenceKey } from './lib/plugins/requirements';
+  import type { CommandDecl, FilterRun, PluginStatus, PluginSummary, RequirementStatus } from './lib/plugins/types';
   import { sourceBackingOf } from './lib/source/backing';
   import { needsDecision, type OpenSelection, type Rect, type SourceAdmission, type SourceOrigin } from './lib/source/types';
   import { convertLayersToSmartObject, updateSmartSource, inspectSmartLinks, relinkSmartSource, importSmartObject, createBlankLayerDocument } from './lib/layers/commands';
@@ -271,6 +288,28 @@
    * leaves it exactly as it was.
    */
   let sourceDialog: SourceAdmission | null = null;
+  // Plugins, the command palette, and what a document needs from them.
+  let pluginStatus: PluginStatus | null = null;
+  let pluginsOpen = false;
+  let paletteOpen = false;
+  let filterDialogOpen = false;
+  let commandDialog: { plugin: PluginSummary; command: CommandDecl; remembered: Record<string, number> } | null = null;
+  let operationSpecs: OperationSpec[] = [];
+  let pluginRequirements: RequirementStatus[] = [];
+  let pluginRequirementsKey = '';
+  let pluginRequirementsRequest = 0;
+  $: pluginsInstalled = pluginStatus?.plugins ?? [];
+  $: unavailablePlugins = pluginRequirements.filter((status) => status.availability.kind !== 'available');
+  $: missingPluginLayers = Object.fromEntries(
+    unavailablePlugins.flatMap((status) => status.layerIds.map((id) => [id, status.message]))
+  );
+  $: pluginModalOpen = pluginsOpen || paletteOpen || filterDialogOpen || Boolean(commandDialog);
+  $: runnableFilters = pluginsInstalled.filter(
+    (plugin) =>
+      plugin.availability.kind === 'available' &&
+      plugin.granted.includes('filter.pixels') &&
+      (plugin.manifest?.filters?.length ?? 0) > 0
+  );
   /** Set when the dialog was opened by "Change Source Region", with the region to start from. */
   let sourceDialogChange: { initial: Rect } | null = null;
   $: sourceBacking = sourceBackingOf(layerDocument);
@@ -459,6 +498,8 @@
       .then((cleanup) => (unlisten = cleanup))
       .catch(() => undefined);
 
+    void refreshPlugins();
+
     const handleKeys = (event: KeyboardEvent) => {
       const intent = resolveShortcut(
         {
@@ -478,7 +519,7 @@
           selectionTool: selectionState.tool,
           settingsOpen,
           // The Refine Selection dialog owns the keyboard while it is open.
-          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog),
+          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog || pluginModalOpen),
           bindings: shortcuts
         }
       );
@@ -517,6 +558,9 @@
     switch (intent.type) {
       case 'close_settings':
         closeSettings();
+        return;
+      case 'command_palette':
+        paletteOpen = true;
         return;
       case 'layer':
         if (intent.action === 'new') void createLayer('pixel');
@@ -666,6 +710,179 @@
       }
     }
   }
+
+  // ---- plugins -----------------------------------------------------------------
+
+  async function refreshPlugins() {
+    try {
+      const result = await listPlugins();
+      // Normalised, so a backend that answers with less than expected shows an empty
+      // list, not an error in the middle of start-up.
+      pluginStatus = {
+        runtimeAvailable: Boolean(result?.runtimeAvailable),
+        pluginFolder: result?.pluginFolder ?? '',
+        warning: result?.warning ?? null,
+        plugins: Array.isArray(result?.plugins) ? result.plugins : []
+      };
+    } catch {
+      pluginStatus = { runtimeAvailable: false, pluginFolder: '', warning: null, plugins: [] };
+    }
+  }
+
+  /** Asks the backend what the open document needs from plugins, only if it uses any. */
+  async function refreshPluginRequirements(force = false) {
+    const key = pluginReferenceKey(layerDocument, operations);
+    if (!force && key === pluginRequirementsKey) return;
+    pluginRequirementsKey = key;
+    if (!key) {
+      pluginRequirements = [];
+      return;
+    }
+    const own = ++pluginRequirementsRequest;
+    try {
+      const statuses = await documentPluginStatus(layerDocument, cloneOperations(operations));
+      if (own === pluginRequirementsRequest) pluginRequirements = Array.isArray(statuses) ? statuses : [];
+    } catch {
+      if (own === pluginRequirementsRequest) pluginRequirements = [];
+    }
+  }
+
+  $: void pluginReferenceKey(layerDocument, operations), void refreshPluginRequirements();
+
+  /** The set of plugins, or what they may do, has changed. */
+  async function pluginsChanged() {
+    await refreshPlugins();
+    await refreshPluginRequirements(true);
+    // What the preview shows depends on which plugins are available.
+    schedulePreview();
+    void refreshThumbnails();
+  }
+
+  async function ensureOperationSpecs() {
+    if (operationSpecs.length) return;
+    try {
+      const specs = await listOperations();
+      operationSpecs = Array.isArray(specs) ? specs : [];
+    } catch {
+      operationSpecs = [];
+    }
+  }
+
+  async function runPluginFilter(run: FilterRun) {
+    const document = requireLayerDocument();
+    if (!document || layerBusy) return;
+    filterDialogOpen = false;
+    const manifestName = pluginsInstalled.find((plugin) => plugin.id === run.plugin)?.manifest?.name ?? run.plugin;
+    const title =
+      pluginsInstalled.find((plugin) => plugin.id === run.plugin)?.manifest?.filters?.find((f) => f.id === run.filter)?.title ??
+      run.filter;
+    const label = run.mode === 'adjustment' ? `${title} adjustment layer` : `${title} on layer`;
+    layerBusy = true;
+    const revision = layerRevision;
+    try {
+      const result = await applyTransaction({
+        document,
+        label,
+        steps: [
+          run.mode === 'adjustment'
+            ? { op: 'core.plugin.add_adjustment', params: { plugin: run.plugin, filter: run.filter, parameters: run.values } }
+            : {
+                op: 'core.plugin.apply_filter',
+                params: { selector: { type: 'active' }, plugin: run.plugin, filter: run.filter, parameters: run.values }
+              }
+        ],
+        origin: 'user'
+      });
+      if (revision !== layerRevision) return;
+      if (commitLayers(result.document, label)) {
+        notify(`${manifestName}: ${title} applied.`);
+        void rememberPluginValues(run.plugin, `filter:${run.filter}`, run.values).catch(() => undefined);
+      }
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  /** Starts a plugin's command: straight away if it has no parameters, else by asking for them. */
+  async function startPluginCommand(plugin: PluginSummary, commandId: string) {
+    const declared = plugin.manifest?.commands?.find((command) => command.id === commandId);
+    if (!declared) return;
+    await ensureOperationSpecs();
+    if ((declared.parameters?.length ?? 0) === 0) {
+      await runPluginCommandNow(plugin, commandId, {});
+      return;
+    }
+    let remembered: Record<string, number> = {};
+    try {
+      remembered = await pluginRememberedValues(plugin.id, `command:${commandId}`);
+    } catch {
+      remembered = {};
+    }
+    commandDialog = { plugin, command: declared, remembered };
+  }
+
+  async function runPluginCommandNow(plugin: PluginSummary, commandId: string, values: Record<string, number>) {
+    const document = requireLayerDocument();
+    if (!document || layerBusy) return;
+    commandDialog = null;
+    layerBusy = true;
+    const revision = layerRevision;
+    try {
+      const result = await runPluginCommand({ plugin: plugin.id, command: commandId, values, document });
+      if (revision !== layerRevision) return;
+      if (commitLayers(result.document, result.label)) notify(`${plugin.manifest?.name ?? plugin.id}: ${result.label}.`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  $: coreCommandContext = {
+    hasImage: Boolean(metadata),
+    hasLayers: Boolean(layerDocument),
+    hasActiveLayer: Boolean(layerDocument?.activeLayerId),
+    canUndo,
+    canRedo,
+    busy: layerBusy || fileMutationBusy || selectionBusy || opening,
+    hasEdits: operations.length > 0,
+    hasSourceRegion: Boolean(sourceBacking),
+    hasPluginFilters: runnableFilters.length > 0,
+    shortcutFor: (action: string) => shortcuts.find((binding) => binding.action === action)?.keys,
+    actions: {
+      openImage: () => void chooseImage(),
+      openProject: () => void openProject(),
+      saveProject: () => void saveProject(false),
+      exportImage: () => void exportImage(),
+      undo: () => undo(),
+      redo: () => redo(),
+      resetEdits: () => reset(),
+      toggleCompare: () => (comparison = !comparison),
+      newPixelLayer: () => void createLayer('pixel'),
+      newGroup: () => void createLayer('group'),
+      duplicateLayer: () => void handleLayerAction('duplicate'),
+      deleteLayer: () => void handleLayerAction('delete'),
+      groupLayers: () => void handleLayerAction('group'),
+      ungroupLayer: () => void handleLayerAction('ungroup'),
+      mergeDown: () => void handleLayerAction('merge_down'),
+      flatten: () => void handleLayerAction('flatten'),
+      resetTransform: () => void handleLayerAction('reset_transform'),
+      openSettings: () => void openSettings(),
+      openPlugins: () => (pluginsOpen = true),
+      runPluginFilter: () => (filterDialogOpen = true),
+      changeSourceRegion: () => void changeSourceRegion(),
+      openAutomation: () => notify('Automation opens from the Flows tab.')
+    }
+  };
+  $: paletteCommands = [
+    ...buildCoreCommands(coreCommandContext),
+    ...buildPluginCommands(pluginsInstalled, (plugin, command) => void startPluginCommand(plugin, command), {
+      hasLayers: Boolean(layerDocument),
+      busy: layerBusy || fileMutationBusy
+    })
+  ];
 
   /**
    * Reads the file's header and returns it only if the user has to decide what to
@@ -3574,7 +3791,7 @@
   <title>{metadata ? `${metadata.filename} — PhotoForge` : 'PhotoForge'}</title>
 </svelte:head>
 
-<div class="app-shell" inert={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog)} aria-hidden={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog)}>
+<div class="app-shell" inert={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog) || pluginModalOpen} aria-hidden={settingsOpen || Boolean(smartEditing) || newDocumentOpen || Boolean(sourceDialog) || pluginModalOpen}>
   <header class="topbar" inert={Boolean(textEdit)}>
     <div class="brand" aria-label="PhotoForge">
       <span class="brand-mark" aria-hidden="true"><b></b><i></i></span>
@@ -3606,6 +3823,7 @@
         title="Open a PhotoForge project"
         onclick={openProject}
       />
+      <ToolButton label="Commands" icon="⌘" title="Command palette (Ctrl+Shift+P)" onclick={() => (paletteOpen = true)} />
       {#if sourceBacking}
         <ToolButton
           label="Change Source Region…"
@@ -3793,6 +4011,7 @@
             oncreate={createLayer}
             onaction={handleLayerAction}
             {smartLinkStatuses}
+            missingPlugins={missingPluginLayers}
             ontargetchange={(target) => (editTarget = target)}
             onadjustmenttargetchange={(target) => (adjustmentTarget = target)}
           />
@@ -3859,6 +4078,16 @@
           configurationRevision={componentConfigurationRevision}
           onapply={applyGuidedPlan}
           onmessage={notify}
+        />
+
+        <PluginsPanel
+          plugins={pluginsInstalled}
+          document={layerDocument}
+          unavailable={unavailablePlugins}
+          busy={layerBusy || fileMutationBusy}
+          onfilter={() => (filterDialogOpen = true)}
+          onmanage={() => (pluginsOpen = true)}
+          oncommand={startPluginCommand}
         />
 
         <ProfessionalWorkspace
@@ -4115,6 +4344,42 @@
       </div>
     </dialog>
   </div>
+{/if}
+
+{#if pluginsOpen}
+  <PluginManager
+    onclose={() => (pluginsOpen = false)}
+    onmessage={notify}
+    onchange={pluginsChanged}
+  />
+{/if}
+
+{#if filterDialogOpen}
+  <PluginFilterDialog
+    plugins={runnableFilters}
+    layer={selectedLayer
+      ? { name: selectedLayer.name, pixel: selectedLayer.content.type === 'pixel', locked: selectedLayer.locked }
+      : null}
+    linearDocument={layerDocument?.precision === 'linear_srgb_f32'}
+    remembered={pluginRememberedValues}
+    onrun={runPluginFilter}
+    oncancel={() => (filterDialogOpen = false)}
+  />
+{/if}
+
+{#if commandDialog}
+  <PluginCommandDialog
+    plugin={commandDialog.plugin}
+    command={commandDialog.command}
+    operations={operationSpecs}
+    remembered={commandDialog.remembered}
+    onrun={(values) => commandDialog && void runPluginCommandNow(commandDialog.plugin, commandDialog.command.id, values)}
+    oncancel={() => (commandDialog = null)}
+  />
+{/if}
+
+{#if paletteOpen}
+  <CommandPalette commands={paletteCommands} onclose={() => (paletteOpen = false)} />
 {/if}
 
 {#if sourceDialog}

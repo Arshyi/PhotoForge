@@ -291,6 +291,8 @@ export interface ProjectSaveResult {
 }
 
 export interface ProjectLoadResult {
+  /** The plugins the project uses and whether each can be had here. */
+  pluginRequirements?: import('../plugins/types').RequirementStatus[];
   documentId: number;
   isCurrent: boolean;
   metadata: ImageMetadata;

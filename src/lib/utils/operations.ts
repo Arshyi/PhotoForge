@@ -223,4 +223,5 @@ export const operationLabels: Record<OperationType, string> = {
   ,temperature_tint: 'Temperature & Tint'
   ,raw_development: 'RAW Development'
   ,selective_color: 'Selective Color'
+  ,plugin_filter: 'Plugin filter'
 };

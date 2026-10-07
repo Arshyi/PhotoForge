@@ -41,6 +41,7 @@ export interface DevelopmentParameters {
   blacks: number;
 }
 import type { MaskSnapshot } from '../selections/types';
+import type { Locality } from '../plugins/types';
 
 export type BaseEditOperation =
   | { type: 'brightness'; amount: number }
@@ -75,7 +76,21 @@ export type BaseEditOperation =
   | { type: 'hsl'; settings: HslSettings }
   | { type: 'temperature_tint'; temperature: number; tint: number }
   | { type: 'raw_development'; parameters: DevelopmentParameters }
-  | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment };
+  | { type: 'selective_color'; target_hue: number; width: number; adjustment: SelectiveColorAdjustment }
+  /**
+   * A filter from an installed plugin. `sha256` is the identity of the exact plugin
+   * version that made it: a different version is never substituted, and a missing one
+   * is reported rather than skipped. `locality` is how far the filter reaches.
+   */
+  | {
+      type: 'plugin_filter';
+      plugin: string;
+      version: string;
+      sha256: string;
+      filter: string;
+      locality: Locality;
+      parameters: number[];
+    };
 
 /// The point-spread function a deconvolution inverts. Tagged exactly as the
 /// Rust `BlurKernel` serialises, so a workflow written here round-trips.
@@ -291,6 +306,8 @@ export interface PreviewResult {
   processingTimeMs: number;
   isCurrent: boolean;
   operationCount: number;
+  /** Layers left out of this render because the plugin they need is not available. */
+  missingPlugins?: import('../plugins/types').MissingPlugin[];
 }
 
 export interface ExportResult {

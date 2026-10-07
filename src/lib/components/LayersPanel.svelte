@@ -26,6 +26,8 @@
   export let selectedIds: string[] = [];
   /** Only explicit link checks populate this; opening a project never probes its paths. */
   export let smartLinkStatuses: SmartLinkStatus[] = [];
+  /** Layers whose plugin cannot be used, by layer id, with what to tell the person. */
+  export let missingPlugins: Record<string, string> = {};
 
   export let onselect: (id: string, additive: boolean) => void;
   export let ontoggle: (id: string, field: 'visible' | 'locked' | 'collapsed') => void;
@@ -424,6 +426,9 @@
                     · Linked{status ? ` (${status.state})` : ' (not checked)'}
                   </span>
                 {/if}
+                {#if missingPlugins[row.layer.id]}
+                  <span class="plugin-missing" title={missingPlugins[row.layer.id]}>· Plugin unavailable — left out of the preview</span>
+                {/if}
                 {#if row.layer.blendMode !== 'normal'}
                   · {blendModes.find((mode) => mode.id === row.layer.blendMode)?.label}
                 {/if}
@@ -666,6 +671,7 @@
   .row-text { display: grid; gap: 1px; min-width: 0; }
   .row-text strong { overflow: hidden; color: var(--ink); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
   .row-text small { display: flex; align-items: center; gap: 4px; overflow: hidden; color: var(--ink-faint); font-size: .55rem; text-overflow: ellipsis; white-space: nowrap; }
+  .plugin-missing { color: #e0795a; font-weight: 700; }
   .row-text small i { font-style: normal; }
   .rename-input { width: 100%; padding: 3px 5px; font-size: .68rem; }
   .mask-cell { display: grid; place-items: center; padding: 1px; border: 1px solid var(--line); border-radius: 4px; }

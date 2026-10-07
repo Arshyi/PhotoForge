@@ -25,6 +25,7 @@ export type ShortcutIntent =
   | { type: 'tool'; tool: SelectionTool }
   | { type: 'cancel_mask_operation' }
   | { type: 'close_settings' }
+  | { type: 'command_palette' }
   | { type: 'binding'; action: string };
 
 export interface ShortcutContext {
@@ -168,6 +169,10 @@ export function resolveShortcut(
 
   const command = Boolean(event.ctrlKey || event.metaKey);
   const key = event.key.toLowerCase();
+
+  // The palette is how everything else is reached, so it works with or without an
+  // image, and from inside a text field: Ctrl+Shift+P means nothing to a text field.
+  if (command && event.shiftKey && !event.altKey && key === 'p') return { type: 'command_palette' };
 
   if (context.transformActive && !typing) {
     if (event.key === 'Escape') return { type: 'transform_cancel' };

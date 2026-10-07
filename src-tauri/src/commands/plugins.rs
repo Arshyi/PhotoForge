@@ -166,6 +166,17 @@ pub async fn plugin_remembered_values(
     Ok(global().remembered(&plugin, &key))
 }
 
+/// Remembers the values a person last used for a filter or command, so the dialog
+/// opens where they left it. Held by the host, never given to a module.
+#[tauri::command]
+pub async fn remember_plugin_values(
+    plugin: String,
+    key: String,
+    values: BTreeMap<String, f64>,
+) -> Result<(), AppError> {
+    global().remember(&plugin, &key, values)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunPluginCommand {
