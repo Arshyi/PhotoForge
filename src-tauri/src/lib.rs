@@ -55,16 +55,16 @@ use commands::{
     install_plugin_package, layer_document_revision, layer_mask_from_selection, layer_store_report,
     list_operations, list_plugins, list_recovery_snapshots, list_system_fonts, load_layer_project,
     magic_wand_selection, measure_component_performance, merge_layer_pixels, open_image,
-    open_raw_image, open_raw_layer, plan_layer_workflow, plugin_remembered_values,
-    preview_batch_workflow, rasterize_layer_transform, rasterize_selection,
-    rasterize_semantic_layer, refine_selection_mask, refresh_ollama_models, relink_raw_source,
-    remap_selection_masks, remember_plugin_values, remove_inference_model, remove_plugin,
-    remove_plugin_version, render_diagnostics, render_layer_composite, render_layer_thumbnail,
-    render_preview, restore_recovery_snapshot, retain_layer_pixels, run_plugin_command,
-    save_layer_project, scan_plugins, select_planner_provider, select_restoration_engine,
-    selection_from_layer_mask, set_plugin_enabled, set_plugin_grants, set_render_backend_mode,
-    set_render_cache_budget, start_batch_workflow, test_ollama_connection, test_plugin,
-    transform_selection_mask, update_component_configuration, validate_guided_plan,
+    open_raw_image, open_raw_layer, plan_layer_workflow, plan_transaction,
+    plugin_remembered_values, preview_batch_workflow, rasterize_layer_transform,
+    rasterize_selection, rasterize_semantic_layer, refine_selection_mask, refresh_ollama_models,
+    relink_raw_source, remap_selection_masks, remember_plugin_values, remove_inference_model,
+    remove_plugin, remove_plugin_version, render_diagnostics, render_layer_composite,
+    render_layer_thumbnail, render_preview, restore_recovery_snapshot, retain_layer_pixels,
+    run_plugin_command, save_layer_project, scan_plugins, select_planner_provider,
+    select_restoration_engine, selection_from_layer_mask, set_plugin_enabled, set_plugin_grants,
+    set_render_backend_mode, set_render_cache_budget, start_batch_workflow, test_ollama_connection,
+    test_plugin, transform_selection_mask, update_component_configuration, validate_guided_plan,
     validate_layer_document, validate_mask_snapshot, validate_ollama_json,
     validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
     validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
@@ -104,6 +104,7 @@ pub fn register_operation_commands<R: tauri::Runtime>(
 ) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
         apply_transaction,
+        plan_transaction,
         list_operations,
         layer_document_revision
     ])
@@ -160,6 +161,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_image,
             apply_transaction,
+            plan_transaction,
             list_operations,
             layer_document_revision,
             list_plugins,

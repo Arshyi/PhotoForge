@@ -285,6 +285,7 @@ pub fn command_steps(
         .map(|step| OperationCall {
             op: step.op.clone(),
             params: substitute(&step.params, &manifest.id, manifest, command_id, &complete),
+            when: None,
         })
         .collect();
     Ok(CommandPlan {

@@ -877,6 +877,7 @@ mod tests {
         let call = OperationCall {
             op: "core.layer.explode".into(),
             params: json!({}),
+            when: None,
         };
         assert!(matches!(
             Operation::parse(&call),
@@ -885,6 +886,7 @@ mod tests {
         let spoof = OperationCall {
             op: "plugin.evil.set_opacity".into(),
             params: json!({}),
+            when: None,
         };
         assert!(matches!(
             Operation::parse(&spoof),
@@ -897,6 +899,7 @@ mod tests {
         let good = OperationCall {
             op: "core.layer.set_opacity".into(),
             params: json!({"selector": {"type": "active"}, "opacity": 0.5}),
+            when: None,
         };
         assert!(matches!(
             Operation::parse(&good),
@@ -906,18 +909,21 @@ mod tests {
         let surplus = OperationCall {
             op: "core.layer.set_opacity".into(),
             params: json!({"selector": {"type": "active"}, "opacity": 0.5, "extra": 1}),
+            when: None,
         };
         assert!(Operation::parse(&surplus).is_err());
         // A missing one is an error.
         let missing = OperationCall {
             op: "core.layer.set_opacity".into(),
             params: json!({"selector": {"type": "active"}}),
+            when: None,
         };
         assert!(Operation::parse(&missing).is_err());
         // A parameter of the wrong type is an error.
         let wrong = OperationCall {
             op: "core.layer.set_opacity".into(),
             params: json!({"selector": {"type": "active"}, "opacity": "half"}),
+            when: None,
         };
         assert!(Operation::parse(&wrong).is_err());
     }
@@ -927,16 +933,19 @@ mod tests {
         let bare = OperationCall {
             op: "core.document.flatten".into(),
             params: serde_json::Value::Null,
+            when: None,
         };
         assert!(matches!(Operation::parse(&bare), Ok(Operation::Flatten)));
         let empty = OperationCall {
             op: "core.document.flatten".into(),
             params: json!({}),
+            when: None,
         };
         assert!(Operation::parse(&empty).is_ok());
         let invented = OperationCall {
             op: "core.document.flatten".into(),
             params: json!({"keep": "all"}),
+            when: None,
         };
         assert!(Operation::parse(&invented).is_err());
     }

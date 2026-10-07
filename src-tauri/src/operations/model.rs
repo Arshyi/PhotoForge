@@ -16,6 +16,10 @@ pub struct OperationCall {
     pub op: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    /// The step is skipped, in the dry run and the real one alike, unless this holds
+    /// for the document as it is when the step is reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<super::condition::Condition>,
 }
 
 /// Who is asking.
@@ -65,6 +69,8 @@ pub struct TransactionRequest {
 pub struct StepReport {
     pub index: usize,
     pub op: String,
+    /// The step's condition did not hold, so it was not run.
+    pub skipped: bool,
     /// Layers this step created.
     pub created_layers: Vec<String>,
     /// Pixel buffers this step registered.

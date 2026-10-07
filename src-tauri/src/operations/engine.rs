@@ -138,13 +138,29 @@ fn name_or(name: &Option<String>, fallback: &str) -> Result<String, AppError> {
     }
 }
 
-/// Runs a transaction with the given sources of identifiers and time.
-pub async fn execute_with(
+/// What validation and the dry run learned, ready for the real run.
+struct Prepared {
+    label: String,
+    operations: Vec<Operation>,
+    /// Which steps' conditions did not hold in the dry run.
+    skipped: Vec<bool>,
+}
+
+/// Whether a step runs: its condition, if it has one, asked of the working document.
+fn runs(call: &OperationCall, tx: &Tx<'_>) -> bool {
+    call.when
+        .as_ref()
+        .is_none_or(|condition| condition.holds(&tx.document, tx.last_created.as_deref()))
+}
+
+/// Everything that can be decided without producing a pixel: the request's shape, the
+/// document, the revision, every step's parameters and the rules of who is asking,
+/// and then the whole list run once dry.
+async fn prepare(
     state: &AppState,
-    request: TransactionRequest,
-    ids: &mut dyn IdSource,
+    request: &TransactionRequest,
     clock: &dyn Clock,
-) -> Result<TransactionResult, AppError> {
+) -> Result<Prepared, AppError> {
     let label = request.label.trim().to_string();
     if label.is_empty() || label.chars().count() > MAX_LABEL_CHARS {
         return Err(AppError::InvalidOperation(format!(
@@ -195,35 +211,80 @@ pub async fn execute_with(
     }
 
     // The dry run: all the checks, none of the pixels.
-    {
-        let mut dry_ids = SequenceIds::default();
-        let mut dry = Tx {
-            state,
-            document: request.document.clone(),
-            selection: request.selection.clone(),
-            origin: request.origin,
-            plugin: request.plugin.clone(),
-            created_pixels: Vec::new(),
-            last_created: None,
-            ids: &mut dry_ids,
-            clock,
-            dry: true,
-            placeholders: 0,
+    let mut skipped = Vec::with_capacity(operations.len());
+    let mut dry_ids = SequenceIds::default();
+    let mut dry = Tx {
+        state,
+        document: request.document.clone(),
+        selection: request.selection.clone(),
+        origin: request.origin,
+        plugin: request.plugin.clone(),
+        created_pixels: Vec::new(),
+        last_created: None,
+        ids: &mut dry_ids,
+        clock,
+        dry: true,
+        placeholders: 0,
+    };
+    for (index, (call, operation)) in request.steps.iter().zip(&operations).enumerate() {
+        if !runs(call, &dry) {
+            skipped.push(true);
+            continue;
+        }
+        skipped.push(false);
+        let result = match run_step(&mut dry, operation).await {
+            Ok(_) => dry.document.validate(),
+            Err(error) => Err(error),
         };
-        for (index, (call, operation)) in request.steps.iter().zip(&operations).enumerate() {
-            let result = match run_step(&mut dry, operation).await {
-                Ok(_) => dry.document.validate(),
-                Err(error) => Err(error),
-            };
-            if let Err(error) = result {
-                return Err(AppError::Transaction {
-                    step: index + 1,
-                    operation: call.op.clone(),
-                    reason: error.to_string(),
-                });
-            }
+        if let Err(error) = result {
+            return Err(AppError::Transaction {
+                step: index + 1,
+                operation: call.op.clone(),
+                reason: error.to_string(),
+            });
         }
     }
+    Ok(Prepared {
+        label,
+        operations,
+        skipped,
+    })
+}
+
+/// What a transaction would do, without doing it: every check and a dry run of every
+/// step, reporting which steps' conditions hold. Nothing is produced and nothing in
+/// the pixel store changes.
+pub async fn plan(
+    state: &AppState,
+    request: &TransactionRequest,
+) -> Result<Vec<StepReport>, AppError> {
+    let prepared = prepare(state, request, &SystemClock).await?;
+    Ok(request
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, call)| StepReport {
+            index,
+            op: call.op.clone(),
+            skipped: prepared.skipped[index],
+            created_layers: Vec::new(),
+            created_pixels: Vec::new(),
+        })
+        .collect())
+}
+
+/// Runs a transaction with the given sources of identifiers and time.
+pub async fn execute_with(
+    state: &AppState,
+    request: TransactionRequest,
+    ids: &mut dyn IdSource,
+    clock: &dyn Clock,
+) -> Result<TransactionResult, AppError> {
+    let Prepared {
+        label,
+        operations,
+        skipped,
+    } = prepare(state, &request, clock).await?;
 
     let mut tx = Tx {
         state,
@@ -240,6 +301,19 @@ pub async fn execute_with(
     };
     let mut reports = Vec::with_capacity(operations.len());
     for (index, (call, operation)) in request.steps.iter().zip(&operations).enumerate() {
+        if !runs(call, &tx) {
+            // The dry run reached the same answer for this step; the two cannot
+            // disagree, because neither produces anything the condition reads.
+            debug_assert!(skipped[index]);
+            reports.push(StepReport {
+                index,
+                op: call.op.clone(),
+                skipped: true,
+                created_layers: Vec::new(),
+                created_pixels: Vec::new(),
+            });
+            continue;
+        }
         let result = match run_step(&mut tx, operation).await {
             Ok(outcome) => tx.document.validate().map(|()| outcome),
             Err(error) => Err(error),
@@ -248,6 +322,7 @@ pub async fn execute_with(
             Ok(outcome) => reports.push(StepReport {
                 index,
                 op: call.op.clone(),
+                skipped: false,
                 created_layers: outcome.created_layers,
                 created_pixels: outcome.created_pixels,
             }),
@@ -295,6 +370,35 @@ fn preflight(
         };
         let operation = Operation::parse(call).map_err(|error| fail(error.to_string()))?;
         let spec = operation.kind().spec();
+        if let Some(condition) = &call.when {
+            condition
+                .validate()
+                .map_err(|error| fail(error.to_string()))?;
+            // A condition names layers like a step does, and is held to the same
+            // rules about who may name which.
+            if origin == Origin::Planner
+                && condition
+                    .selectors()
+                    .iter()
+                    .any(|selector| !selector.is_planner_safe())
+            {
+                return Err(fail(
+                    "a planner may only refer to the selected layer or the one just created."
+                        .into(),
+                ));
+            }
+            if condition
+                .selectors()
+                .iter()
+                .any(|selector| matches!(selector, LayerSelector::LastCreated))
+                && !created_before
+            {
+                return Err(fail(
+                    "its condition refers to the layer an earlier step created, and none has."
+                        .into(),
+                ));
+            }
+        }
         if origin == Origin::Planner {
             if !spec.planner_safe {
                 return Err(fail(
@@ -337,6 +441,8 @@ fn preflight(
                 | OperationKind::Duplicate
                 | OperationKind::Group
                 | OperationKind::MergeDown
+                | OperationKind::AddPluginAdjustment
+                | OperationKind::Flatten
         ) {
             created_before = true;
         }

@@ -22,6 +22,17 @@ pub async fn apply_transaction(
     execute(&state, request).await
 }
 
+/// What a transaction would do, without doing it: every check and a dry run of every
+/// step, saying which steps' conditions hold. Produces nothing and changes nothing.
+#[tauri::command]
+pub async fn plan_transaction(
+    request: TransactionRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::operations::StepReport>, AppError> {
+    let _permit = state.layer_gate.lock().await;
+    crate::operations::plan(&state, &request).await
+}
+
 /// Every operation that may edit a document, for the interface to draw its
 /// command palette and automation editor from.
 #[tauri::command]

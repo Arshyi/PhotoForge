@@ -45,7 +45,9 @@ pub use ollama::{
     cancel_ollama_plan, compare_planners, generate_ollama_plan, get_ollama_diagnostics,
     refresh_ollama_models, test_ollama_connection, validate_ollama_json,
 };
-pub use operations::{apply_transaction, layer_document_revision, list_operations};
+pub use operations::{
+    apply_transaction, layer_document_revision, list_operations, plan_transaction,
+};
 pub use planner::{generate_edit_plan, validate_guided_plan};
 pub use plugins::{
     document_plugin_status, inspect_plugin_package, install_plugin_package, list_plugins,

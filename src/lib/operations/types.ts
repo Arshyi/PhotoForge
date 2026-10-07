@@ -11,15 +11,40 @@ import type { MaskSnapshot } from '../selections/types';
 /** Who is asking. It decides what is allowed, never how it is done. */
 export type Origin = 'user' | 'automation' | 'planner' | 'plugin' | 'batch';
 
+/** A layer a step or a condition names, as the backend resolves it. */
+export type LayerSelector =
+  | { type: 'id'; id: string }
+  | { type: 'active' }
+  | { type: 'last_created' }
+  | { type: 'name'; name: string }
+  | { type: 'bottom' }
+  | { type: 'top' };
+
+/**
+ * The only decision an automation can make: a question about the document as it is
+ * when a step is reached, answered yes or no. A step whose condition does not hold is
+ * skipped. There is nothing else: no else, no loop, no variable, no expression.
+ */
+export type Condition =
+  | { kind: 'layer_exists'; selector: LayerSelector }
+  | { kind: 'layer_count_at_least'; count: number }
+  | { kind: 'active_layer_kind'; layerKind: 'pixel' | 'group' | 'adjustment' | 'shape' | 'text' | 'smart_object' }
+  | { kind: 'precision'; precision: 'linear_srgb_f32' | 'legacy_srgb8' }
+  | { kind: 'not'; condition: Condition };
+
 /** One call: an operation's registered id and its parameters. */
 export interface OperationCall {
   op: string;
   params?: Record<string, unknown>;
+  /** The step is skipped unless this holds when the step is reached. */
+  when?: Condition | null;
 }
 
 export interface StepReport {
   index: number;
   op: string;
+  /** Its condition did not hold, so it was not run. */
+  skipped: boolean;
   createdLayers: string[];
   createdPixels: string[];
 }

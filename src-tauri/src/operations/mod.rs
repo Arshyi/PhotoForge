@@ -35,13 +35,15 @@
 //! held to the same behaviour by the vectors in
 //! `src-tauri/tests/fixtures/operations_parity.json`. `docs/automation.md` lists
 //! which interface actions go through here.
+pub mod condition;
 pub mod engine;
 pub mod model;
 pub mod registry;
 pub mod structure;
 pub mod support;
 
-pub use engine::{execute, execute_with};
+pub use condition::Condition;
+pub use engine::{execute, execute_with, plan};
 pub use model::{
     OperationCall, Origin, StepReport, TransactionRequest, TransactionResult, MAX_TRANSACTION_STEPS,
 };

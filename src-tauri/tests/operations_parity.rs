@@ -125,6 +125,7 @@ async fn every_vector_the_typescript_functions_produce_is_produced_by_the_engine
             steps: vec![OperationCall {
                 op: vector["call"]["op"].as_str().unwrap().to_string(),
                 params: vector["call"]["params"].clone(),
+                when: None,
             }],
             expected_revision: None,
             selection: None,

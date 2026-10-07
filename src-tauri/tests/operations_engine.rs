@@ -17,6 +17,7 @@ fn call(op: &str, params: Value) -> OperationCall {
     OperationCall {
         op: op.to_string(),
         params,
+        when: None,
     }
 }
 
