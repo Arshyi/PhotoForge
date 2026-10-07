@@ -2,8 +2,9 @@
 //!
 //! `image-webp` decodes the entire frame into memory; there is no crop, no row
 //! stream and no scaled decode. A region or reduced copy therefore holds the whole
-//! frame at 3 or 4 bytes per pixel while it is produced, and the planner prices it
-//! as [`RegionDecode::TransientFull`] / [`ReducedDecode::TransientFull`].
+//! frame while it is produced, and the planner prices it as
+//! [`RegionDecode::TransientFull`] / [`ReducedDecode::TransientFull`] at
+//! [`whole_frame_bytes_per_pixel`].
 //!
 //! The format itself bounds this: WebP dimensions are limited to 16,383 pixels a
 //! side, so the whole-frame transient cannot exceed about 1 GiB however hostile
@@ -17,6 +18,23 @@ use crate::image_processing::high_precision::check_cancel;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
+
+/// Bytes per pixel the whole-frame decode holds at its peak, measured.
+///
+/// With an alpha channel the decoder fills one RGBA frame: four bytes. **Without**
+/// one it still decodes to RGBA and then converts to RGB while the RGBA frame is
+/// alive, so both coexist: seven. (A 96 MP RGB file peaked at 645 MiB, 7.05 bytes a
+/// pixel with the file buffer; the same picture with alpha at 371 MiB, 4.1.) The
+/// first version of the planner priced RGB at three, which was the size of the
+/// *result* and under-priced the decode by more than half; `tests/estimate_accuracy.rs`
+/// now fails if a decoder holds more than the planner says it does.
+pub const fn whole_frame_bytes_per_pixel(has_alpha: bool) -> u64 {
+    if has_alpha {
+        4
+    } else {
+        7
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebpInfo {

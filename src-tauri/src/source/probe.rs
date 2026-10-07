@@ -144,10 +144,10 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
                     info.has_alpha,
                     DecodeCapabilities {
                         region: RegionDecode::TransientFull {
-                            bytes_per_pixel: bpp,
+                            bytes_per_pixel: webp::whole_frame_bytes_per_pixel(info.has_alpha),
                         },
                         reduced: ReducedDecode::TransientFull {
-                            bytes_per_pixel: bpp,
+                            bytes_per_pixel: webp::whole_frame_bytes_per_pixel(info.has_alpha),
                         },
                     },
                 )
@@ -160,7 +160,12 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
         width: u64::from(width),
         height: u64::from(height),
         native_bytes_per_pixel: native_bpp,
-        full_decode_bytes_per_pixel: native_bpp,
+        // What a whole decode holds is not always what it leaves: WebP without alpha
+        // peaks at seven bytes a pixel and leaves three.
+        full_decode_bytes_per_pixel: match kind {
+            SourceKind::WebP => webp::whole_frame_bytes_per_pixel(has_alpha),
+            _ => native_bpp,
+        },
         file_bytes: metadata.len(),
         capabilities,
     };

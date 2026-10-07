@@ -53,7 +53,10 @@ pub struct AreaReducer {
     following: Vec<f64>,
     /// One source row reduced horizontally.
     scratch: Vec<f64>,
-    output: Vec<f32>,
+    /// The result, built in place: premultiplied while rows arrive, straight when
+    /// [`AreaReducer::finish`] has gone over it. One buffer, because a second one the
+    /// size of the result would double the peak of the very thing this exists to bound.
+    output: FloatImage,
 }
 
 impl AreaReducer {
@@ -88,11 +91,7 @@ impl AreaReducer {
         }
 
         let row = dst_w as usize * 4;
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(row * dst_h as usize)
-            .map_err(|_| AppError::OutOfMemoryRisk)?;
-        output.resize(row * dst_h as usize, 0.0);
+        let output = FloatImage::blank(dst_w, dst_h, FloatRgba::TRANSPARENT)?;
         Ok(Self {
             src_w,
             src_h,
@@ -168,13 +167,18 @@ impl AreaReducer {
     }
 
     fn emit(&mut self) {
-        let row = self.dst_w as usize * 4;
-        let start = self.rows_out as usize * row;
-        for (out, value) in self.output[start..start + row]
+        let width = self.dst_w as usize;
+        let start = self.rows_out as usize * width;
+        for (out, value) in self.output.pixels_mut()[start..start + width]
             .iter_mut()
-            .zip(&self.current)
+            .zip(self.current.chunks_exact(4))
         {
-            *out = *value as f32;
+            *out = FloatRgba::new(
+                value[0] as f32,
+                value[1] as f32,
+                value[2] as f32,
+                value[3] as f32,
+            );
         }
         std::mem::swap(&mut self.current, &mut self.following);
         self.following.iter_mut().for_each(|v| *v = 0.0);
@@ -193,18 +197,14 @@ impl AreaReducer {
                 "the source ended before every row was supplied".into(),
             ));
         }
-        let mut image = FloatImage::blank(self.dst_w, self.dst_h, FloatRgba::TRANSPARENT)?;
-        for (pixel, premultiplied) in image
-            .pixels_mut()
-            .iter_mut()
-            .zip(self.output.chunks_exact(4))
-        {
-            let alpha = premultiplied[3].clamp(0.0, 1.0);
+        let mut image = self.output;
+        for pixel in image.pixels_mut() {
+            let alpha = pixel.alpha.clamp(0.0, 1.0);
             *pixel = if alpha > 0.0 {
                 FloatRgba::new(
-                    premultiplied[0] / alpha,
-                    premultiplied[1] / alpha,
-                    premultiplied[2] / alpha,
+                    pixel.red / alpha,
+                    pixel.green / alpha,
+                    pixel.blue / alpha,
                     alpha,
                 )
             } else {

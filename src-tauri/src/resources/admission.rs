@@ -32,6 +32,16 @@ use serde::{Deserialize, Serialize};
 /// over from the original estimate so open-time figures stay comparable.
 const RENDER_FIXED_BYTES: u128 = 40_960_000;
 
+/// What every decoder holds besides its pixels: the codec's own buffers, a reader's
+/// buffer (the PNG reader's alone is 1 MiB), the resampler's weights and a few rows.
+/// Measured at under 2 MiB on every decoder; priced at 4.
+pub const DECODER_FIXED_BYTES: u128 = 4 * 1024 * 1024;
+
+/// What opening a source builds beside the document itself: the bounded preview, as a
+/// float copy and as an 8-bit one, 20 bytes for each of at most 1600 x 1600 pixels.
+/// `tests::the_preview_allowance_is_the_previews_size` ties it to the real bound.
+pub const OPEN_PREVIEW_BYTES: u128 = 1_600 * 1_600 * 20;
+
 /// A document whose peak would exceed this share of the budget is admitted with
 /// a warning rather than silently.
 const WARN_PERCENT: u128 = 50;
@@ -306,18 +316,22 @@ pub fn region_cost(probe: &SourceProbe) -> Option<RegionCost> {
     // What the decoder holds while the working copy is being built: a fixed
     // part, and a part that grows with the region.
     let (decode_fixed, decode_per_pixel) = match probe.capabilities.region {
-        RegionDecode::Rows => (u128::from(probe.width) * native, native),
+        RegionDecode::Rows => (
+            u128::from(probe.width) * native + DECODER_FIXED_BYTES,
+            native,
+        ),
         RegionDecode::Segments {
             fixed_bytes,
             bytes_per_pixel,
         } => (u128::from(fixed_bytes), u128::from(bytes_per_pixel)),
-        RegionDecode::TransientFull { bytes_per_pixel } => {
-            (probe.pixels() * u128::from(bytes_per_pixel), 0)
-        }
+        RegionDecode::TransientFull { bytes_per_pixel } => (
+            probe.pixels() * u128::from(bytes_per_pixel) + DECODER_FIXED_BYTES,
+            0,
+        ),
         RegionDecode::None => return None,
     };
     Some(RegionCost {
-        opening_fixed: saturate(file + decode_fixed),
+        opening_fixed: saturate(file + decode_fixed + OPEN_PREVIEW_BYTES),
         opening_per_pixel: saturate(decode_per_pixel + working),
         editing_fixed: saturate(RENDER_FIXED_BYTES),
         editing_per_pixel: saturate(working * 2 + native + 8),
@@ -467,6 +481,34 @@ fn region_option(
     })
 }
 
+/// Bytes held while a reduced copy at `scale` (0..1, per side) is produced, not
+/// counting the reduced image itself.
+///
+/// It is a function of the scale for DCT decoding, where the decode scale is a step
+/// function of it. Public so that the accuracy gate (`tests/estimate_accuracy.rs`)
+/// prices a decode with the planner's own formula rather than a copy of it.
+pub fn reduced_transient_bytes(probe: &SourceProbe, scale: f64) -> Option<u128> {
+    let native = u128::from(probe.native_bytes_per_pixel);
+    let src_w = u32::try_from(probe.width).unwrap_or(u32::MAX);
+    let src_h = u32::try_from(probe.height).unwrap_or(u32::MAX);
+    match probe.capabilities.reduced {
+        ReducedDecode::Rows => Some(
+            u128::from(probe.width) * (native + ROW_REDUCER_BYTES_PER_COLUMN) + DECODER_FIXED_BYTES,
+        ),
+        ReducedDecode::TransientFull { bytes_per_pixel } => {
+            Some(probe.pixels() * u128::from(bytes_per_pixel) + DECODER_FIXED_BYTES)
+        }
+        ReducedDecode::DctScaled => {
+            let dst_w = (f64::from(src_w) * scale).ceil() as u32;
+            let dst_h = (f64::from(src_h) * scale).ceil() as u32;
+            let factor = dct_factor(src_w, src_h, dst_w.max(1), dst_h.max(1));
+            let scaled = u128::from(src_w.div_ceil(factor)) * u128::from(src_h.div_ceil(factor));
+            Some(scaled * DCT_BYTES_PER_OUTPUT_PIXEL + DCT_FIXED_BYTES)
+        }
+        ReducedDecode::None => None,
+    }
+}
+
 fn reduced_option(
     probe: &SourceProbe,
     limits: &ResourceLimits,
@@ -476,34 +518,9 @@ fn reduced_option(
     let file = u128::from(probe.file_bytes);
     let native = u128::from(probe.native_bytes_per_pixel);
     let ceiling = budget_bytes.min(available.unwrap_or(u128::MAX));
-    let (src_w, src_h) = (
-        u32::try_from(probe.width).unwrap_or(u32::MAX),
-        u32::try_from(probe.height).unwrap_or(u32::MAX),
-    );
 
-    // Bytes held while the reduced image is produced, as a function of the scale
-    // asked for — which matters for DCT decoding, where the decode scale is a
-    // step function of it.
-    let transient = |scale: f64, reduced: u128| -> Option<u128> {
-        match probe.capabilities.reduced {
-            ReducedDecode::Rows => {
-                Some(u128::from(probe.width) * (native + ROW_REDUCER_BYTES_PER_COLUMN))
-            }
-            ReducedDecode::TransientFull { bytes_per_pixel } => {
-                Some(probe.pixels() * u128::from(bytes_per_pixel))
-            }
-            ReducedDecode::DctScaled => {
-                let dst_w = (f64::from(src_w) * scale).ceil() as u32;
-                let dst_h = (f64::from(src_h) * scale).ceil() as u32;
-                let factor = dct_factor(src_w, src_h, dst_w.max(1), dst_h.max(1));
-                let scaled =
-                    u128::from(src_w.div_ceil(factor)) * u128::from(src_h.div_ceil(factor));
-                let _ = reduced;
-                Some(scaled * DCT_BYTES_PER_OUTPUT_PIXEL + DCT_FIXED_BYTES)
-            }
-            ReducedDecode::None => None,
-        }
-    };
+    // Bytes held while the reduced image is produced, as a function of the scale asked for.
+    let transient = |scale: f64, _reduced: u128| reduced_transient_bytes(probe, scale);
     let peak_at = |scale: f64| -> Option<u128> {
         let reduced = ((probe.pixels() as f64) * scale * scale).ceil() as u128;
         if reduced == 0 || reduced > u128::from(limits.working_pixels()) {
@@ -513,7 +530,7 @@ fn reduced_option(
             reduced,
             native,
             file,
-            transient(scale, reduced)?,
+            transient(scale, reduced)? + OPEN_PREVIEW_BYTES,
         ))
     };
     peak_at(1e-9)?;
@@ -538,6 +555,13 @@ mod tests {
     use super::super::memory::SystemMemory;
     use super::super::policy::{compute_budget, BudgetMode, GIB};
     use super::*;
+
+    /// The planner's allowance for the preview must be the preview's real bound.
+    #[test]
+    fn the_preview_allowance_is_the_previews_size() {
+        let edge = u128::from(crate::layers::PREVIEW_MAX_DIMENSION);
+        assert_eq!(OPEN_PREVIEW_BYTES, edge * edge * 20);
+    }
 
     fn budget_of(total_gib: u64, available_gib: u64) -> (Budget, ResourceLimits) {
         let budget = compute_budget(
@@ -874,13 +898,24 @@ mod tests {
     fn region_decode_overhead_for_test(probe: &SourceProbe, region_pixels: u128) -> u128 {
         let native = u128::from(probe.native_bytes_per_pixel);
         match probe.capabilities.region {
-            RegionDecode::Rows => u128::from(probe.width) * native + region_pixels * native,
+            RegionDecode::Rows => {
+                u128::from(probe.width) * native
+                    + DECODER_FIXED_BYTES
+                    + OPEN_PREVIEW_BYTES
+                    + region_pixels * native
+            }
             RegionDecode::Segments {
                 fixed_bytes,
                 bytes_per_pixel,
-            } => u128::from(fixed_bytes) + region_pixels * u128::from(bytes_per_pixel),
+            } => {
+                u128::from(fixed_bytes)
+                    + OPEN_PREVIEW_BYTES
+                    + region_pixels * u128::from(bytes_per_pixel)
+            }
             RegionDecode::TransientFull { bytes_per_pixel } => {
                 probe.pixels() * u128::from(bytes_per_pixel)
+                    + DECODER_FIXED_BYTES
+                    + OPEN_PREVIEW_BYTES
             }
             RegionDecode::None => unreachable!(),
         }
