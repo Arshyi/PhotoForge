@@ -46,3 +46,18 @@ pub async fn layer_document_revision(document: LayerDocument) -> Result<String, 
     document.validate()?;
     document_revision(&document)
 }
+
+/// Reads an exported macro. The text is returned for the interface to check and keep;
+/// nothing in it is run.
+#[tauri::command]
+pub fn import_macro(path: String) -> Result<String, AppError> {
+    crate::infrastructure::read_macro_file(&std::path::PathBuf::from(path))
+}
+
+/// Writes a macro the interface has turned into text. Only a macro document is
+/// written, to a `.json` file in a folder that exists.
+#[tauri::command]
+pub fn export_macro(path: String, text: String) -> Result<String, AppError> {
+    crate::infrastructure::write_macro_file(&std::path::PathBuf::from(path), &text)
+        .map(|saved| saved.to_string_lossy().into_owned())
+}

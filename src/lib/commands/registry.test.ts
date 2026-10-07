@@ -1,14 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildCoreCommands, buildPluginCommands, type CoreCommandContext } from './core';
-import { CommandRegistry, pluginCommandId, scoreCommand, searchCommands, type PaletteCommand } from './registry';
+import { buildCoreCommands, buildMacroCommands, buildPluginCommands, type CoreCommandContext } from './core';
+import { CommandRegistry, macroCommandId, pluginCommandId, scoreCommand, searchCommands, type PaletteCommand } from './registry';
 import type { PluginSummary } from '../plugins/types';
+import { insertStep, newMacro, newStep, setStepEnabled } from '../automation/macros';
 
 function command(id: string, title: string, extra: Partial<PaletteCommand> = {}): PaletteCommand {
   return {
     id,
     title,
     group: 'Test',
-    source: id.startsWith('plugin:') ? 'plugin' : 'core',
+    source: id.startsWith('plugin:') ? 'plugin' : id.startsWith('macro:') ? 'macro' : 'core',
     unavailable: () => null,
     run: () => undefined,
     ...extra
@@ -29,6 +30,18 @@ describe('the command registry', () => {
     registry.register(command('plugin:com.example.a:go', 'Go'));
     expect(registry.get('plugin:com.example.a:go')?.source).toBe('plugin');
     expect(pluginCommandId('com.example.a', 'go')).toBe('plugin:com.example.a:go');
+  });
+
+  it('gives macros a namespace of their own that neither a plugin nor a built-in can use', () => {
+    const registry = new CommandRegistry();
+    expect(() => registry.register(command('core.record', 'Record', { source: 'macro' }))).toThrow(/macro:<macro>/);
+    expect(() => registry.register(command('macro:m1', 'Run', { source: 'plugin' }))).toThrow(/plugin:<plugin>/);
+    expect(() => registry.register(command('macro:m1', 'Run', { source: 'core' }))).toThrow(/core\.<name>/);
+    registry.register(command('macro:m1', 'Run macro: One'));
+    expect(registry.get('macro:m1')?.source).toBe('macro');
+    expect(macroCommandId('m1')).toBe('macro:m1');
+    registry.clear('macro');
+    expect(registry.get('macro:m1')).toBeUndefined();
   });
 
   it('refuses a missing or oversized title', () => {
@@ -108,13 +121,14 @@ function context(overrides: Partial<CoreCommandContext> = {}): CoreCommandContex
     hasEdits: true,
     hasSourceRegion: false,
     hasPluginFilters: true,
+    recording: false,
     shortcutFor: (action) => ({ 'Open image': 'Ctrl+O', Undo: 'Ctrl+Z' })[action],
     actions: {
       openImage: noop, openProject: noop, saveProject: noop, exportImage: noop, undo: noop, redo: noop,
       resetEdits: noop, toggleCompare: noop, newPixelLayer: noop, newGroup: noop, duplicateLayer: noop,
       deleteLayer: noop, groupLayers: noop, ungroupLayer: noop, mergeDown: noop, flatten: noop,
       resetTransform: noop, openSettings: noop, openPlugins: noop, runPluginFilter: noop,
-      changeSourceRegion: noop, openAutomation: noop
+      changeSourceRegion: noop, openAutomation: noop, startRecording: noop, stopRecording: noop
     },
     ...overrides
   };
@@ -222,5 +236,52 @@ describe('plugin commands', () => {
     expect(first.unavailable()).toMatch(/layered document/);
     const [busy] = buildPluginCommands([plugin()], vi.fn(), { hasLayers: true, busy: true });
     expect(busy.unavailable()).toMatch(/running/);
+  });
+});
+
+describe('macro commands and recording commands', () => {
+  const find = (commands: PaletteCommand[], id: string) => commands.find((entry) => entry.id === id)!;
+
+  function macro(name: string, enabled = true) {
+    let made = insertStep(newMacro(name), newStep('core.layer.add_group', {}));
+    if (!enabled) made = setStepEnabled(made, made.steps[0].id, false);
+    return made;
+  }
+
+  it('list a run command for each macro that has something to run', () => {
+    const run = vi.fn();
+    const ready = macro('Tidy');
+    const commands = buildMacroCommands([ready, macro('Off', false), { ...macro('  '), name: '  ' }, newMacro('Empty')], run, {
+      hasLayers: true,
+      busy: false,
+      recording: false
+    });
+    expect(commands.map((entry) => entry.title)).toEqual(['Run macro: Tidy']);
+    expect(commands[0]).toMatchObject({ id: `macro:${ready.id}`, source: 'macro', group: 'Macros' });
+    commands[0].run();
+    expect(run).toHaveBeenCalledWith(ready);
+    const registry = new CommandRegistry();
+    for (const entry of commands) registry.register(entry);
+  });
+
+  it('say why a macro cannot run now', () => {
+    const one = [macro('Tidy')];
+    const reason = (context: { hasLayers: boolean; busy: boolean; recording: boolean }) =>
+      buildMacroCommands(one, vi.fn(), context)[0].unavailable();
+    expect(reason({ hasLayers: true, busy: false, recording: false })).toBeNull();
+    expect(reason({ hasLayers: false, busy: false, recording: false })).toMatch(/layered document/);
+    expect(reason({ hasLayers: true, busy: true, recording: false })).toMatch(/running/);
+    expect(reason({ hasLayers: true, busy: false, recording: true })).toMatch(/Stop recording/);
+  });
+
+  it('offer to record only when it can be done, and to stop only while recording', () => {
+    const find2 = (commands: PaletteCommand[], id: string) => find(commands, id).unavailable();
+    const idle = buildCoreCommands(context());
+    expect(find2(idle, 'core.record_macro')).toBeNull();
+    expect(find2(idle, 'core.stop_recording')).toMatch(/No macro is being recorded/);
+    const recording = buildCoreCommands(context({ recording: true }));
+    expect(find2(recording, 'core.record_macro')).toMatch(/already being recorded/);
+    expect(find2(recording, 'core.stop_recording')).toBeNull();
+    expect(find2(buildCoreCommands(context({ hasLayers: false })), 'core.record_macro')).toMatch(/layered document/);
   });
 });

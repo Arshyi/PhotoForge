@@ -155,7 +155,7 @@
   import PluginFilterDialog from './lib/components/PluginFilterDialog.svelte';
   import PluginCommandDialog from './lib/components/PluginCommandDialog.svelte';
   import CommandPalette from './lib/components/CommandPalette.svelte';
-  import { buildCoreCommands, buildPluginCommands } from './lib/commands/core';
+  import { buildCoreCommands, buildMacroCommands, buildPluginCommands } from './lib/commands/core';
   import { listOperations } from './lib/operations/client';
   import type { OperationSpec } from './lib/operations/types';
   import {
@@ -186,8 +186,11 @@
   import AdjustmentLayerDialog from './lib/components/AdjustmentLayerDialog.svelte';
   import { LayerHistory } from './lib/layers/history';
   import { executeLayerWorkflow } from './lib/layers/workflowExecution';
-  import { applyTransaction } from './lib/operations/client';
-  import type { Origin as OperationOrigin } from './lib/operations/types';
+  import { applyTransaction, exportMacroFile, importMacroFile, planTransaction } from './lib/operations/client';
+  import type { Origin as OperationOrigin, StepReport, TransactionRequest } from './lib/operations/types';
+  import AutomationDialog from './lib/components/AutomationDialog.svelte';
+  import { loadMacros, macroDocument, newMacro, parseMacroDocument, saveMacros, toCalls, type Macro } from './lib/automation/macros';
+  import { recorder, selectorFor, type RecorderState } from './lib/automation/recorder';
   import { mergeSafetyProblem } from './lib/layers/mergeSafety';
   import type { LayerWorkflowStep } from './lib/layers/workflow';
   import { ThumbnailCache, thumbnailKey } from './lib/layers/thumbnails';
@@ -293,6 +296,13 @@
   let pluginsOpen = false;
   let paletteOpen = false;
   let filterDialogOpen = false;
+  // Automation: the saved macros, the editor, and a recording in progress.
+  let automationOpen = false;
+  let macros: Macro[] = loadMacros();
+  let macroNotices: string[] = [];
+  let macroSelectedId: string | null = null;
+  let recording: RecorderState = recorder.snapshot;
+  onMount(() => recorder.subscribe((state) => (recording = state)));
   let commandDialog: { plugin: PluginSummary; command: CommandDecl; remembered: Record<string, number> } | null = null;
   let operationSpecs: OperationSpec[] = [];
   let pluginRequirements: RequirementStatus[] = [];
@@ -303,7 +313,7 @@
   $: missingPluginLayers = Object.fromEntries(
     unavailablePlugins.flatMap((status) => status.layerIds.map((id) => [id, status.message]))
   );
-  $: pluginModalOpen = pluginsOpen || paletteOpen || filterDialogOpen || Boolean(commandDialog);
+  $: pluginModalOpen = pluginsOpen || paletteOpen || filterDialogOpen || automationOpen || Boolean(commandDialog);
   $: runnableFilters = pluginsInstalled.filter(
     (plugin) =>
       plugin.availability.kind === 'available' &&
@@ -840,6 +850,106 @@
     }
   }
 
+  async function openAutomationEditor(selectId: string | null = null, notices: string[] = []) {
+    await ensureOperationSpecs();
+    macroSelectedId = selectId;
+    macroNotices = notices;
+    automationOpen = true;
+  }
+
+  function persistMacros(next: Macro[]) {
+    macros = next;
+    if (!saveMacros(next)) notify('Your macros could not be saved. They will be lost when PhotoForge closes; export them to keep them.', 'error');
+  }
+
+  /**
+   * The one request a macro becomes, for planning and for running. A selection is
+   * mapped back to the canvas only when a step needs one, as a workflow's is.
+   */
+  async function macroRequest(macro: Macro, document: LayerDocument): Promise<TransactionRequest> {
+    const steps = toCalls(macro);
+    const needsSelection = steps.some((step) => operationSpecs.find((spec) => spec.id === step.op)?.needsSelection);
+    const selection = needsSelection
+      ? (await stageWorkflowGeometry([], cloneOperations(operations), structuredClone(selectionState))).selection.activeMask
+      : null;
+    return { document, label: macro.name.trim() || 'Run macro', steps, selection, origin: 'automation' };
+  }
+
+  async function checkMacro(macro: Macro): Promise<StepReport[]> {
+    if (!layerDocument) throw new Error('Open an image first.');
+    return planTransaction(await macroRequest(macro, layerDocument));
+  }
+
+  /** Runs a macro as one transaction and one entry in Undo, or changes nothing. */
+  async function runMacro(macro: Macro): Promise<string> {
+    const document = requireLayerDocument();
+    if (!document) throw new Error('Open an image first.');
+    if (layerBusy) throw new Error('Another change is still being made. Try again when it has finished.');
+    layerBusy = true;
+    const revision = layerRevision;
+    try {
+      const request = await macroRequest(macro, document);
+      const result = await applyTransaction(request);
+      if (revision !== layerRevision) throw new Error('The document changed while the macro ran, so nothing was applied.');
+      const ran = result.steps.filter((step) => !step.skipped).length;
+      const skipped = result.steps.length - ran;
+      if (ran === 0) return `Nothing was changed: ${result.steps.length === 1 ? 'the step was' : `all ${result.steps.length} steps were`} skipped because ${result.steps.length === 1 ? 'its condition' : 'their conditions'} did not hold.`;
+      if (!commitLayers(result.document, request.label)) throw new Error('The result was not accepted, so nothing was applied.');
+      return `Ran “${request.label}”: ${ran} step${ran === 1 ? '' : 's'}${skipped ? `, ${skipped} skipped` : ''}. One Undo reverses all of it.`;
+    } finally {
+      layerBusy = false;
+      void releaseUnreferencedPixels();
+    }
+  }
+
+  async function runMacroFromPalette(macro: Macro) {
+    try {
+      notify(await runMacro(macro));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    }
+  }
+
+  function startRecording() {
+    if (!layerDocument || recording.recording) return;
+    automationOpen = false;
+    recorder.start();
+    notify('Recording. Work in the Layers panel, then choose Stop recording.');
+  }
+
+  function stopRecording() {
+    if (!recording.recording) return;
+    const { steps, notes } = recorder.stop();
+    if (!steps.length) {
+      notify(`Nothing was recorded.${notes.length ? ` ${notes[0].message}` : ''}`, 'error');
+      return;
+    }
+    const macro = { ...newMacro(`Recorded macro ${macros.length + 1}`), steps };
+    persistMacros([...macros, macro]);
+    void openAutomationEditor(macro.id, notes.map((note) => note.message));
+  }
+
+  function discardRecording() {
+    recorder.discard();
+    notify('Recording discarded.');
+  }
+
+  async function importMacro(): Promise<Macro | null> {
+    const path = await open({ multiple: false, filters: [{ name: 'PhotoForge macro', extensions: ['json'] }] });
+    if (typeof path !== 'string') return null;
+    return parseMacroDocument(await importMacroFile(path));
+  }
+
+  async function exportMacro(macro: Macro): Promise<string | null> {
+    const path = await save({
+      title: 'Export macro',
+      defaultPath: `${macro.name.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'macro'}.json`,
+      filters: [{ name: 'PhotoForge macro', extensions: ['json'] }]
+    });
+    if (!path) return null;
+    return exportMacroFile(path, JSON.stringify(macroDocument(macro), null, 2));
+  }
+
   $: coreCommandContext = {
     hasImage: Boolean(metadata),
     hasLayers: Boolean(layerDocument),
@@ -850,6 +960,7 @@
     hasEdits: operations.length > 0,
     hasSourceRegion: Boolean(sourceBacking),
     hasPluginFilters: runnableFilters.length > 0,
+    recording: recording.recording,
     shortcutFor: (action: string) => shortcuts.find((binding) => binding.action === action)?.keys,
     actions: {
       openImage: () => void chooseImage(),
@@ -873,11 +984,18 @@
       openPlugins: () => (pluginsOpen = true),
       runPluginFilter: () => (filterDialogOpen = true),
       changeSourceRegion: () => void changeSourceRegion(),
-      openAutomation: () => notify('Automation opens from the Flows tab.')
+      openAutomation: () => void openAutomationEditor(),
+      startRecording: () => startRecording(),
+      stopRecording: () => stopRecording()
     }
   };
   $: paletteCommands = [
     ...buildCoreCommands(coreCommandContext),
+    ...buildMacroCommands(macros, (macro) => void runMacroFromPalette(macro), {
+      hasLayers: Boolean(layerDocument),
+      busy: layerBusy || fileMutationBusy,
+      recording: recording.recording
+    }),
     ...buildPluginCommands(pluginsInstalled, (plugin, command) => void startPluginCommand(plugin, command), {
       hasLayers: Boolean(layerDocument),
       busy: layerBusy || fileMutationBusy
@@ -1584,7 +1702,7 @@
    * `coalesceKey` folds a continuous gesture — an opacity drag, a drag-and-drop
    * reorder — into a single logical undo entry.
    */
-  function commitLayers(next: LayerDocument, label: string, coalesceKey?: string): boolean {
+  function commitLayers(next: LayerDocument, label: string, coalesceKey?: string, recorded?: () => void): boolean {
     if (!layerDocument || next === layerDocument) return false;
     const problems = validateDocument(next);
     if (problems.length) {
@@ -1600,6 +1718,10 @@
     schedulePreview();
     void refreshThumbnails();
     void releaseUnreferencedPixels();
+    // While a macro is being recorded, a change is either written down as the registered
+    // operation it is, or reported as something that cannot be.
+    if (recorded) recorded();
+    else recorder.skip(label);
     return true;
   }
 
@@ -1853,16 +1975,21 @@
     const document = requireLayerDocument();
     if (!document) return;
     const labels = { visible: 'Layer visibility', locked: 'Lock layer', collapsed: 'Collapse group' };
+    const ops = { visible: 'core.layer.set_visible', locked: 'core.layer.set_locked', collapsed: 'core.layer.set_collapsed' };
+    const now = !findLayer(document, id)?.[field];
     commitLayers(
       updateLayer(document, id, (layer) => ({ ...layer, [field]: !layer[field] })),
-      labels[field]
+      labels[field],
+      undefined,
+      () => recorder.recordOnLayer(document, id, ops[field], { [field]: now })
     );
   }
 
   function renameLayer(id: string, name: string) {
     const document = requireLayerDocument();
     if (!document) return;
-    commitLayers(updateLayer(document, id, (layer) => ({ ...layer, name })), 'Rename layer');
+    commitLayers(updateLayer(document, id, (layer) => ({ ...layer, name })), 'Rename layer', undefined,
+      () => recorder.recordOnLayer(document, id, 'core.layer.rename', { name }));
   }
 
   function setLayerOpacity(id: string, value: number) {
@@ -1872,7 +1999,8 @@
     commitLayers(
       updateLayer(document, id, (layer) => ({ ...layer, opacity })),
       'Layer opacity',
-      `layer-opacity:${id}`
+      `layer-opacity:${id}`,
+      () => recorder.recordOnLayer(document, id, 'core.layer.set_opacity', { opacity }, { gestureKey: `layer-opacity:${id}` })
     );
   }
 
@@ -1881,7 +2009,9 @@
     if (!document) return;
     commitLayers(
       updateLayer(document, id, (layer) => ({ ...layer, blendMode: mode })),
-      'Blend mode'
+      'Blend mode',
+      undefined,
+      () => recorder.recordOnLayer(document, id, 'core.layer.set_blend_mode', { blendMode: mode })
     );
   }
 
@@ -1893,7 +2023,15 @@
       notify('That move is not allowed: a group cannot contain itself.', 'error');
       return;
     }
-    commitLayers(next, 'Reorder layer', `layer-move:${id}`);
+    commitLayers(next, 'Reorder layer', `layer-move:${id}`, () =>
+      recorder.recordOnLayer(
+        document,
+        id,
+        'core.layer.move',
+        { parent: parentId ? selectorFor(document, parentId).selector : null, index },
+        { gestureKey: `layer-move:${id}` }
+      )
+    );
   }
 
   async function createLayer(kind: 'pixel' | 'group' | 'adjustment' | 'import') {
@@ -1907,7 +2045,9 @@
       const group = createGroupLayer('Group');
       commitLayers(
         insertLayer(document, group, null, document.layers.length),
-        'New group'
+        'New group',
+        undefined,
+        () => recorder.record('core.layer.add_group', {})
       );
       return;
     }
@@ -1917,7 +2057,8 @@
       if (kind === 'pixel') {
         const created = await createLayerPixels(document.canvasWidth, document.canvasHeight);
         const layer = createPixelLayer('Layer', created.pixelId, created.width, created.height);
-        commitLayers(insertLayer(document, layer, null, document.layers.length), 'New layer');
+        commitLayers(insertLayer(document, layer, null, document.layers.length), 'New layer', undefined,
+          () => recorder.record('core.layer.add_pixel', {}));
       } else {
         const path = await open({
           multiple: false,
@@ -1971,7 +2112,8 @@
       }
       case 'duplicate': {
         const { document: next } = duplicateLayer(document, layerId as string);
-        commitLayers(next, 'Duplicate layer');
+        commitLayers(next, 'Duplicate layer', undefined,
+          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.duplicate', {}));
         return;
       }
       case 'delete': {
@@ -1979,7 +2121,8 @@
           notify('Unlock this layer before deleting it.', 'error');
           return;
         }
-        commitLayers(removeLayer(document, layerId as string), 'Delete layer');
+        commitLayers(removeLayer(document, layerId as string), 'Delete layer', undefined,
+          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.delete', {}));
         return;
       }
       case 'group': {
@@ -1991,13 +2134,15 @@
           notify('Only layers that share a parent can be grouped together.', 'error');
           return;
         }
-        if (commitLayers(next, targets.length > 1 ? 'Group layers' : 'Group layer')) {
+        if (commitLayers(next, targets.length > 1 ? 'Group layers' : 'Group layer', undefined,
+          () => recorder.recordOnLayers(document, targets, 'core.layer.group', { name: 'Group' }))) {
           selectedLayerIds = [group.id];
         }
         return;
       }
       case 'ungroup': {
-        commitLayers(ungroupLayer(document, layerId as string), 'Ungroup');
+        commitLayers(ungroupLayer(document, layerId as string), 'Ungroup', undefined,
+          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.ungroup', {}));
         return;
       }
       case 'merge_down':
@@ -2303,7 +2448,8 @@
         origin: 'user'
       });
       if (revision !== layerRevision) return;
-      commitLayers(result.document, 'Merge down');
+      commitLayers(result.document, 'Merge down', undefined,
+        () => recorder.recordOnLayer(document, layerId, 'core.layer.merge_down', {}));
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -2323,7 +2469,7 @@
         origin: 'user'
       });
       if (revision !== layerRevision) return;
-      commitLayers(result.document, 'Flatten image');
+      commitLayers(result.document, 'Flatten image', undefined, () => recorder.record('core.document.flatten', {}));
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -2759,6 +2905,7 @@
     if (!allowWorkspaceMutation()) return;
     const kind = historyEvents.at(-1);
     if (!kind) return;
+    recorder.skip('Undo');
     const stacks = historyEventStacks(kind);
     if ((stacks.edit && !history.canUndo) ||
       (stacks.selection && !selectionHistory.canUndo) ||
@@ -2784,6 +2931,7 @@
     if (!allowWorkspaceMutation()) return;
     const kind = redoEvents.at(-1);
     if (!kind) return;
+    recorder.skip('Redo');
     const stacks = historyEventStacks(kind);
     if ((stacks.edit && !history.canRedo) ||
       (stacks.selection && !selectionHistory.canRedo) ||
@@ -3853,6 +4001,16 @@
     <ToolButton label="Settings" icon="⚙" onclick={openSettings} />
   </header>
 
+  {#if recording.recording}
+    <div class="recording-bar">
+      <span class="recording-dot" aria-hidden="true"></span>
+      <span role="status">Recording a macro.</span>
+      <span aria-hidden="true">{recording.steps.length} step{recording.steps.length === 1 ? '' : 's'} so far{recording.notes.length ? `; ${recording.notes.length} thing${recording.notes.length === 1 ? '' : 's'} cannot be recorded` : ''}</span>
+      <button type="button" on:click={stopRecording}>Stop recording</button>
+      <button type="button" on:click={discardRecording}>Discard</button>
+    </div>
+  {/if}
+
   <main>
     <ImageStage
       {originalUrl}
@@ -4351,6 +4509,24 @@
     onclose={() => (pluginsOpen = false)}
     onmessage={notify}
     onchange={pluginsChanged}
+  />
+{/if}
+
+{#if automationOpen}
+  <AutomationDialog
+    specs={operationSpecs}
+    {macros}
+    plugins={pluginsInstalled}
+    selectedId={macroSelectedId}
+    notices={macroNotices}
+    hasDocument={Boolean(layerDocument)}
+    onchange={persistMacros}
+    oncheck={checkMacro}
+    onrun={runMacro}
+    onrecord={startRecording}
+    onimport={importMacro}
+    onexport={exportMacro}
+    onclose={() => (automationOpen = false)}
   />
 {/if}
 

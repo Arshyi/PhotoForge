@@ -1,5 +1,6 @@
+import type { Macro } from '../automation/macros';
 import type { PluginSummary } from '../plugins/types';
-import { pluginCommandId, type PaletteCommand } from './registry';
+import { macroCommandId, pluginCommandId, type PaletteCommand } from './registry';
 
 /**
  * What the palette needs to know about the application, and what it may ask it to do.
@@ -21,6 +22,8 @@ export interface CoreCommandContext {
   hasSourceRegion: boolean;
   /** At least one plugin filter could run now. */
   hasPluginFilters: boolean;
+  /** A macro is being recorded. */
+  recording: boolean;
   shortcutFor: (action: string) => string | undefined;
   actions: {
     openImage: () => void;
@@ -45,6 +48,8 @@ export interface CoreCommandContext {
     runPluginFilter: () => void;
     changeSourceRegion: () => void;
     openAutomation: () => void;
+    startRecording: () => void;
+    stopRecording: () => void;
   };
 }
 
@@ -121,6 +126,12 @@ export function buildCoreCommands(context: CoreCommandContext): PaletteCommand[]
     entry('automation', 'Automation…', 'Plugins', a.openAutomation, always, {
       keywords: ['macro', 'record', 'replay', 'workflow']
     }),
+    entry('record_macro', 'Record a macro…', 'Automation', a.startRecording,
+      () => (context.recording ? 'A macro is already being recorded.' : needs(context.hasLayers, noLayers)()), {
+        keywords: ['macro', 'automation', 'record']
+      }),
+    entry('stop_recording', 'Stop recording the macro', 'Automation', a.stopRecording,
+      () => (context.recording ? null : 'No macro is being recorded.'), { keywords: ['macro', 'finish'] }),
     entry('settings', 'Settings…', 'Application', a.openSettings, always, { keywords: ['preferences', 'memory', 'budget'] })
   ];
 }
@@ -160,4 +171,35 @@ export function buildPluginCommands(
     }
   }
   return out;
+}
+
+/**
+ * A command for each saved macro. Choosing one runs it exactly as the Run button in the
+ * automation editor does: as one transaction, one entry in Undo.
+ */
+export function buildMacroCommands(
+  macros: Macro[],
+  run: (macro: Macro) => void,
+  context: { hasLayers: boolean; busy: boolean; recording: boolean }
+): PaletteCommand[] {
+  const unavailable = () =>
+    context.busy
+      ? BUSY
+      : context.recording
+        ? 'Stop recording first.'
+        : context.hasLayers
+          ? null
+          : 'This needs a layered document: open or create one first.';
+  return macros
+    .filter((macro) => macro.name.trim() && macro.steps.some((step) => step.enabled))
+    .map((macro) => ({
+      id: macroCommandId(macro.id),
+      title: `Run macro: ${macro.name}`.slice(0, 120),
+      description: macro.description || undefined,
+      group: 'Macros',
+      keywords: ['macro', 'automation'],
+      source: 'macro' as const,
+      unavailable,
+      run: () => run(macro)
+    }));
 }

@@ -563,3 +563,9 @@ aside {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+.recording-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 7px 14px; border-bottom: 1px solid #754a44; color: var(--ink); background: rgba(224, 121, 90, 0.16); font-size: 0.64rem; }
+.recording-bar button { padding: 4px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background: var(--surface-raised); font-size: 0.62rem; font-weight: 700; cursor: pointer; }
+.recording-dot { width: 9px; height: 9px; border-radius: 50%; background: #e0795a; }
+@media (prefers-reduced-motion: no-preference) { .recording-dot { animation: recording-pulse 1.6s ease-in-out infinite; } }
+@keyframes recording-pulse { 50% { opacity: 0.35; } }

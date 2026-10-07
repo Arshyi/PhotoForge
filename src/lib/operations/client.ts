@@ -27,3 +27,13 @@ export function layerDocumentRevision(document: LayerDocument): Promise<string> 
 export function planTransaction(request: TransactionRequest): Promise<StepReport[]> {
   return invoke<StepReport[]>('plan_transaction', { request });
 }
+
+/** The text of an exported macro file. Nothing in it is run; the caller checks it. */
+export function importMacroFile(path: string): Promise<string> {
+  return invoke<string>('import_macro', { path });
+}
+
+/** Writes a macro document to an absolute `.json` path, returning where it went. */
+export function exportMacroFile(path: string, text: string): Promise<string> {
+  return invoke<string>('export_macro', { path, text });
+}

@@ -12,10 +12,10 @@
  * validated, and the registry refuses an entry that claims a namespace it does not
  * own.
  */
-export type CommandSource = 'core' | 'plugin';
+export type CommandSource = 'core' | 'plugin' | 'macro';
 
 export interface PaletteCommand {
-  /** `core.<name>` or `plugin:<plugin id>:<command id>`. */
+  /** `core.<name>`, `plugin:<plugin id>:<command id>` or `macro:<macro id>`. */
   id: string;
   title: string;
   description?: string;
@@ -41,6 +41,9 @@ export class CommandRegistry {
     }
     if (command.source === 'plugin' && !command.id.startsWith('plugin:')) {
       throw new Error(`A plugin command must be called plugin:<plugin>:<command>, not ${command.id}.`);
+    }
+    if (command.source === 'macro' && !command.id.startsWith('macro:')) {
+      throw new Error(`A macro command must be called macro:<macro>, not ${command.id}.`);
     }
     if (command.source === 'core' && !command.id.startsWith('core.')) {
       throw new Error(`A built-in command must be called core.<name>, not ${command.id}.`);
@@ -117,6 +120,10 @@ export function searchCommands(commands: PaletteCommand[], query: string, limit 
 }
 
 /** The id a plugin's command has in the registry. */
+export function macroCommandId(macro: string): string {
+  return `macro:${macro}`;
+}
+
 export function pluginCommandId(plugin: string, command: string): string {
   return `plugin:${plugin}:${command}`;
 }

@@ -46,7 +46,8 @@ pub use ollama::{
     refresh_ollama_models, test_ollama_connection, validate_ollama_json,
 };
 pub use operations::{
-    apply_transaction, layer_document_revision, list_operations, plan_transaction,
+    apply_transaction, export_macro, import_macro, layer_document_revision, list_operations,
+    plan_transaction,
 };
 pub use planner::{generate_edit_plan, validate_guided_plan};
 pub use plugins::{

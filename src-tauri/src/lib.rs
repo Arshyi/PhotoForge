@@ -45,12 +45,12 @@ use commands::{
     compare_planners, compose_selection_masks, create_layer_mask, create_layer_pixels,
     create_point_operation, default_render_cache_budget, develop_raw_layer,
     discard_recovery_snapshot, discover_models, document_plugin_status, export_developed_png16,
-    export_image, export_layer_composite, export_mask_file, export_mask_png,
+    export_image, export_layer_composite, export_macro, export_mask_file, export_mask_png,
     export_raw_layer_png16, export_with_profile, export_workflow, flatten_layer_document,
     generate_edit_plan, generate_histogram, generate_ollama_plan, get_batch_status,
     get_component_diagnostics, get_component_snapshot, get_mask_progress, get_ollama_diagnostics,
-    get_render_backend_mode, import_inference_model, import_layer_image, import_mask_file,
-    import_mask_png, import_workflow, inference_status, inspect_document_fonts,
+    get_render_backend_mode, import_inference_model, import_layer_image, import_macro,
+    import_mask_file, import_mask_png, import_workflow, inference_status, inspect_document_fonts,
     inspect_image_pixel, inspect_plugin_package, inspect_raw, inspect_selection_mask,
     install_plugin_package, layer_document_revision, layer_mask_from_selection, layer_store_report,
     list_operations, list_plugins, list_recovery_snapshots, list_system_fonts, load_layer_project,
@@ -106,7 +106,9 @@ pub fn register_operation_commands<R: tauri::Runtime>(
         apply_transaction,
         plan_transaction,
         list_operations,
-        layer_document_revision
+        layer_document_revision,
+        import_macro,
+        export_macro
     ])
 }
 
@@ -164,6 +166,8 @@ pub fn run() {
             plan_transaction,
             list_operations,
             layer_document_revision,
+            import_macro,
+            export_macro,
             list_plugins,
             inspect_plugin_package,
             install_plugin_package,
