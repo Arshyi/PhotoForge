@@ -1,0 +1,35 @@
+{
+  "format": "photoforge-plugin",
+  "formatVersion": 1,
+  "apiVersion": 1,
+  "id": "photoforge.example.boxblur",
+  "name": "Box Blur",
+  "version": "1.0.0",
+  "publisher": "PhotoForge examples",
+  "description": "Averages each pixel with its neighbours within a chosen radius.",
+  "license": "MIT",
+  "capabilities": [
+    "filter.pixels"
+  ],
+  "filters": [
+    {
+      "id": "box_blur",
+      "title": "Box blur",
+      "description": "A neighbourhood filter: it reads up to four pixels in every direction.",
+      "locality": {
+        "kind": "local",
+        "radius": 4
+      },
+      "parameters": [
+        {
+          "id": "radius",
+          "title": "Radius (pixels)",
+          "type": "integer",
+          "min": 1,
+          "max": 4,
+          "default": 1
+        }
+      ]
+    }
+  ]
+}

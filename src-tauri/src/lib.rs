@@ -30,6 +30,9 @@ mod network_policy;
 /// macro, a workflow, a planner or a batch run edits a document.
 pub mod operations;
 pub mod pixel;
+/// Plugins: filters in a WebAssembly sandbox, declarative commands and panels, and the
+/// package format that carries them.
+pub mod plugins;
 pub mod raw;
 pub mod resources;
 /// Bounded reads of image sources, and the provenance of what was read.

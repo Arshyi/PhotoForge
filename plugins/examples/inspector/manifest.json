@@ -1,0 +1,88 @@
+{
+  "format": "photoforge-plugin",
+  "formatVersion": 1,
+  "apiVersion": 1,
+  "id": "photoforge.example.inspector",
+  "name": "Document Inspector",
+  "version": "1.0.0",
+  "publisher": "PhotoForge examples",
+  "description": "A panel that shows facts about the open document. It contains no code.",
+  "license": "MIT",
+  "capabilities": [
+    "ui.panel",
+    "document.read",
+    "document.operations"
+  ],
+  "commands": [
+    {
+      "id": "add_inspected_group",
+      "title": "Add a group called Inspected",
+      "description": "Adds an empty group, as one undoable step.",
+      "steps": [
+        {
+          "op": "core.layer.add_group",
+          "params": {
+            "name": "Inspected"
+          }
+        }
+      ]
+    }
+  ],
+  "panels": [
+    {
+      "id": "facts",
+      "title": "Document facts",
+      "rows": [
+        {
+          "kind": "text",
+          "text": "Read from the open document."
+        },
+        {
+          "kind": "fact",
+          "label": "Canvas width",
+          "fact": "canvas_width"
+        },
+        {
+          "kind": "fact",
+          "label": "Canvas height",
+          "fact": "canvas_height"
+        },
+        {
+          "kind": "fact",
+          "label": "Precision",
+          "fact": "precision"
+        },
+        {
+          "kind": "fact",
+          "label": "Layers",
+          "fact": "layer_count"
+        },
+        {
+          "kind": "fact",
+          "label": "Pixel layers",
+          "fact": "pixel_layer_count"
+        },
+        {
+          "kind": "fact",
+          "label": "Selected layer",
+          "fact": "active_layer_name"
+        },
+        {
+          "kind": "fact",
+          "label": "Selected layer kind",
+          "fact": "active_layer_kind"
+        },
+        {
+          "kind": "fact",
+          "label": "Selected layer opacity",
+          "fact": "active_layer_opacity"
+        },
+        {
+          "kind": "command",
+          "label": "Add a group called Inspected",
+          "command": "add_inspected_group"
+        }
+      ]
+    }
+  ]
+}

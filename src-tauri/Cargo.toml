@@ -4,7 +4,7 @@ version = "0.13.0"
 description = "A private, local-first photo restoration and enhancement tool"
 authors = ["PhotoForge contributors"]
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.96"
 
 [lib]
 name = "photoforge_lib"
@@ -23,6 +23,21 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # through `image`. In maintenance mode upstream, which is weighed in
 # docs/oversized-images.md.
 jpeg-decoder = { version = "0.3", default-features = false }
+# Plugins. The runtime is a WebAssembly engine behind the `plugins` feature, chosen
+# in docs/plugin-runtime-decision.md. Only the pieces a core-module runtime needs:
+# no WASI (a module is offered no filesystem, clock or network), no text format
+# (`wat` is a dev-dependency for tests only), no component model.
+wasmtime = { version = "=49.0.2", optional = true, default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+] }
+# A `.photoforge-plugin` package is a ZIP. Rather than take a general-purpose ZIP
+# crate, whose attack surface is far wider than this needs, PhotoForge reads only
+# stored and deflated entries with its own bounded reader (see
+# docs/plugin-package.md), on top of two crates already in the graph through `png`.
+miniz_oxide = "0.8"
+crc32fast = "1"
 png = "0.18"
 # Text: shaping, bidirectional layout, system font discovery and fallback.
 # Pure Rust, so no font or text DLL is packaged. swash is taken directly as
@@ -61,6 +76,9 @@ tokio = { version = "1", features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
 tauri = { version = "=2.11.5", features = ["test"] }
+# Test fixtures for the plugin runtime are written as WebAssembly text. Production
+# code reads binary modules only.
+wat = "1"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.38.2"
@@ -78,7 +96,7 @@ windows = { version = "=0.61.3", features = [
 ] }
 
 [features]
-default = ["custom-protocol", "gpu", "inference"]
+default = ["custom-protocol", "gpu", "inference", "plugins"]
 custom-protocol = ["tauri/custom-protocol"]
 # Canonical desktop builds include GPU support, but acceleration remains
 # runtime-optional and every operation retains its CPU fallback. A deliberately
@@ -89,6 +107,10 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 # has a working capability; no model ships, and nothing downloads one. tract is
 # pure Rust, so this adds no native DLL to the installer. It requires Rust 1.91.
 inference = ["dep:tract-onnx"]
+# The plugin runtime. Without it the editor is complete: documents that refer to a
+# plugin still open and say which plugin they need, nothing can run one, and the
+# build carries no WebAssembly engine. It requires Rust 1.96.
+plugins = ["dep:wasmtime"]
 
 # Third-party code is optimised even in dev and test builds; PhotoForge's own
 # crate stays at opt-level 0 so debug assertions and overflow checks still run

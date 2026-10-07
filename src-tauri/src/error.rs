@@ -162,6 +162,16 @@ pub enum AppError {
     StaleRevision,
     #[error("There is no operation called {0}.")]
     UnknownOperation(String),
+    /// A plugin could not do what it was asked. The document is unchanged.
+    #[error("The plugin {plugin} could not finish: {message}")]
+    Plugin {
+        plugin: String,
+        code: String,
+        message: String,
+    },
+    /// A document or command needs a plugin that cannot be used right now.
+    #[error("The plugin {plugin} cannot be used: {reason}")]
+    PluginUnavailable { plugin: String, reason: String },
 }
 
 impl AppError {
@@ -239,6 +249,8 @@ impl AppError {
             Self::Transaction { .. } => "transaction_failed",
             Self::StaleRevision => "stale_revision",
             Self::UnknownOperation(_) => "unknown_operation",
+            Self::Plugin { .. } => "plugin_failed",
+            Self::PluginUnavailable { .. } => "plugin_unavailable",
         }
     }
 }

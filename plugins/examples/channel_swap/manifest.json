@@ -1,0 +1,38 @@
+{
+  "format": "photoforge-plugin",
+  "formatVersion": 1,
+  "apiVersion": 1,
+  "id": "photoforge.example.channel-swap",
+  "name": "Channel Swap",
+  "version": "1.0.0",
+  "publisher": "PhotoForge examples",
+  "description": "Reorders the red, green and blue channels.",
+  "license": "MIT",
+  "capabilities": [
+    "filter.pixels"
+  ],
+  "filters": [
+    {
+      "id": "swap",
+      "title": "Swap channels",
+      "locality": {
+        "kind": "pointwise"
+      },
+      "parameters": [
+        {
+          "id": "order",
+          "title": "Order",
+          "type": "choice",
+          "options": [
+            "Blue Green Red",
+            "Green Red Blue",
+            "Blue Red Green",
+            "Red Blue Green",
+            "Green Blue Red"
+          ],
+          "default": 0
+        }
+      ]
+    }
+  ]
+}

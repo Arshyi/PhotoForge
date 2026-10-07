@@ -1,0 +1,47 @@
+(module
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "photoforge" "log" (func $log (param i32 i32 i32)))
+  (memory (export "memory") 32)
+  (global $heap (mut i32) (i32.const 4096))
+  (func (export "pf_abi_version") (result i32) (i32.const 1))
+  ;; A bump allocator. Nothing is ever freed: every call gets a fresh instance.
+  (func (export "pf_alloc") (param $n i32) (result i32)
+    (local $p i32) (local $end i32) (local $have i32)
+    (local.set $p (i32.and (i32.add (global.get $heap) (i32.const 15)) (i32.const -16)))
+    (local.set $end (i32.add (local.get $p) (local.get $n)))
+    (local.set $have (i32.shl (memory.size) (i32.const 16)))
+    (if (i32.gt_u (local.get $end) (local.get $have))
+      (then
+        (if (i32.eq
+              (memory.grow (i32.shr_u (i32.add (i32.sub (local.get $end) (local.get $have)) (i32.const 65535)) (i32.const 16)))
+              (i32.const -1))
+          (then (return (i32.const 0))))))
+    (global.set $heap (local.get $end))
+    (local.get $p))
+  (func (export "pf_filter") (param $f i32) (param $in i32) (param $ix i32) (param $iy i32) (param $iw i32) (param $ih i32)
+      (param $out i32) (param $ox i32) (param $oy i32) (param $ow i32) (param $oh i32)
+      (param $W i32) (param $H i32) (param $params i32) (param $np i32) (result i32)
+    (local $x i32) (local $y i32) (local $gx i32) (local $gy i32) (local $s i32) (local $d i32) 
+    (local.set $y (i32.const 0))
+    (block $done_y (loop $row
+      (br_if $done_y (i32.ge_u (local.get $y) (local.get $oh)))
+      (local.set $x (i32.const 0))
+      (block $done_x (loop $col
+        (br_if $done_x (i32.ge_u (local.get $x) (local.get $ow)))
+        (local.set $gx (i32.add (local.get $ox) (local.get $x)))
+        (local.set $gy (i32.add (local.get $oy) (local.get $y)))
+        (local.set $s (i32.add (local.get $in) (i32.shl
+          (i32.add (i32.mul (i32.sub (local.get $gy) (local.get $iy)) (local.get $iw))
+                   (i32.sub (local.get $gx) (local.get $ix))) (i32.const 4))))
+        (local.set $d (i32.add (local.get $out) (i32.shl
+          (i32.add (i32.mul (local.get $y) (local.get $ow)) (local.get $x)) (i32.const 4))))
+        (f32.store offset=0  (local.get $d) (f32.load offset=0  (local.get $s)))
+        (f32.store offset=4  (local.get $d) (f32.load offset=4  (local.get $s)))
+        (f32.store offset=8  (local.get $d) (f32.load offset=8  (local.get $s)))
+        (f32.store offset=12 (local.get $d) (f32.load offset=12 (local.get $s)))
+        (local.set $x (i32.add (local.get $x) (i32.const 1)))
+        (br $col)))
+      (local.set $y (i32.add (local.get $y) (i32.const 1)))
+      (br $row)))
+    (i32.const 0))
+)
