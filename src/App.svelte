@@ -8,6 +8,7 @@
   import AnalysisPanel from './lib/components/AnalysisPanel.svelte';
   import ComponentsSettings from './lib/components/ComponentsSettings.svelte';
   import DiagnosticsSettings from './lib/components/DiagnosticsSettings.svelte';
+  import ResourceSettings from './lib/components/ResourceSettings.svelte';
   import ModelManager from './lib/components/ModelManager.svelte';
   import GuidedEditPanel from './lib/components/GuidedEditPanel.svelte';
   import LocalAiPrivacy from './lib/components/LocalAiPrivacy.svelte';
@@ -283,7 +284,7 @@
   let opening = false;
   let exporting = false;
   let settingsOpen = false;
-  let settingsPage: 'general' | 'workspace' | 'components' | 'diagnostics' | 'privacy' = 'general';
+  let settingsPage: 'general' | 'workspace' | 'memory' | 'components' | 'diagnostics' | 'privacy' = 'general';
   let newDocumentOpen = false;
   /**
    * A source too large to open whole, awaiting the user's choice of what to do.
@@ -4610,6 +4611,7 @@
       <nav class="settings-tabs" aria-label="Settings pages">
         <button type="button" class:active={settingsPage === 'general'} on:click={() => (settingsPage = 'general')}>General</button>
         <button type="button" class:active={settingsPage === 'workspace'} on:click={() => (settingsPage = 'workspace')}>Workspace</button>
+        <button type="button" class:active={settingsPage === 'memory'} on:click={() => (settingsPage = 'memory')}>Memory</button>
         <button type="button" class:active={settingsPage === 'components'} on:click={() => (settingsPage = 'components')}>Components</button>
         <button type="button" class:active={settingsPage === 'diagnostics'} on:click={() => (settingsPage = 'diagnostics')}>Diagnostics</button>
         <button type="button" class:active={settingsPage === 'privacy'} on:click={() => (settingsPage = 'privacy')}>Local AI Privacy</button>
@@ -4668,6 +4670,8 @@
         <p class="modal-footnote">The original file is never modified by default. Export always asks for a new location.</p>
       {:else if settingsPage === 'workspace'}
         <WorkspaceSettings />
+      {:else if settingsPage === 'memory'}
+        <ResourceSettings />
       {:else if settingsPage === 'components'}
         <ComponentsSettings />
       {:else if settingsPage === 'diagnostics'}

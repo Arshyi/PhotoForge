@@ -38,6 +38,9 @@ pub struct ResourceStatus {
     pub system: Option<SystemMemory>,
     pub process: Option<ProcessMemory>,
     pub budget: Budget,
+    /// The least a manual budget may be, so the interface can offer exactly the
+    /// range the policy will accept rather than a range it will quietly move.
+    pub min_budget_bytes: u64,
     pub limits: ResourceLimits,
     /// Most pixels a canvas may hold under the budget in force.
     pub max_working_pixels: u64,
@@ -65,6 +68,7 @@ fn status(state: &AppState) -> Result<ResourceStatus, AppError> {
         system: OsProbe.system(),
         process: OsProbe.process(),
         budget: current,
+        min_budget_bytes: resources::policy::MIN_BUDGET_BYTES,
         limits: resources::limits(),
         max_working_pixels: resources::max_working_pixels(),
         resident_pixel_bytes: resident,
