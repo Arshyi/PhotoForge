@@ -1,4 +1,11 @@
-# PhotoForge plugin manifest specification
+# PhotoForge component manifest specification
+
+> This file specifies the **component manifest** (`schemaVersion` 1), which PhotoForge
+> discovers and describes but never runs. The executable `.photoforge-plugin` package
+> added in 0.14.0 is a different format; see [`docs/plugins.md`](../docs/plugins.md).
+> The examples that go with that format are in [`examples/`](examples/) and the
+> deliberately hostile modules used to test its sandbox are in
+> [`adversarial/`](adversarial/); neither is installed or shipped with the application.
 
 PhotoForge 0.4.0 validates plugin metadata only. It does not install, load, import, spawn, evaluate, or execute plugin entries. A valid manifest is still reported with `executionAllowed: false`.
 
