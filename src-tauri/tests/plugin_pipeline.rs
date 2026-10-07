@@ -930,3 +930,164 @@ fn a_damaged_list_of_plugins_is_reported_and_not_silently_replaced() {
     assert!(sandbox.registry.state_warning().is_none());
     assert_eq!(sandbox.registry.list().len(), 1);
 }
+
+// ---- batch --------------------------------------------------------------------------
+//
+// Batch processing has no way of its own to change a picture: each file goes through the
+// same evaluator as the editor's edit stack, so a plugin filter in a batch workflow is the
+// same function, found the same way, and a plugin that is not there fails the file with
+// its reason instead of passing it through.
+
+fn batch_workflow(operation: EditOperation) -> photoforge_lib::domain::Workflow {
+    photoforge_lib::domain::Workflow {
+        id: "batch".into(),
+        name: "Plugin batch".into(),
+        description: String::new(),
+        folder: String::new(),
+        favorite: false,
+        operations: vec![operation],
+        layer_steps: Vec::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn batch_options(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> photoforge_lib::domain::BatchOptions {
+    photoforge_lib::domain::BatchOptions {
+        input_folder: input.to_string_lossy().into_owned(),
+        output_folder: output.to_string_lossy().into_owned(),
+        filename_template: "{name}".into(),
+        recursive: false,
+        overwrite: false,
+        workers: 1,
+        export_profile: photoforge_lib::domain::ExportProfile::Lossless,
+        color: None,
+        dry_run: false,
+    }
+}
+
+fn run_batch_over(
+    input: &std::path::Path,
+    output: &std::path::Path,
+    operation: EditOperation,
+) -> photoforge_lib::domain::BatchStatus {
+    std::fs::create_dir_all(output).unwrap();
+    photoforge_lib::application::run_batch(
+        1,
+        batch_options(input, output),
+        batch_workflow(operation),
+        Arc::new(Mutex::new(Default::default())),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .expect("the batch itself runs")
+}
+
+fn pngs(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    found.sort();
+    found
+}
+
+#[test]
+fn a_batch_applies_a_plugin_filter_to_every_kind_of_source_and_never_passes_a_file_through_without_it(
+) {
+    let sandbox = Sandbox::new();
+    sandbox.install_example("solarize");
+    let solarize = operation(
+        &sandbox,
+        "photoforge.example.solarize",
+        "solarize",
+        vec![0.5],
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("in");
+    std::fs::create_dir_all(&input).unwrap();
+    // A bright picture as 16-bit (which loads as linear float) and as 8-bit (which does not).
+    image::ImageBuffer::<image::Rgba<u16>, _>::from_pixel(
+        8,
+        8,
+        image::Rgba([60000, 60000, 60000, 65535]),
+    )
+    .save(input.join("a16.png"))
+    .unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([240, 240, 240, 255]))
+        .save(input.join("b8.png"))
+        .unwrap();
+
+    let output = directory.path().join("out");
+    let status = run_batch_over(&input, &output, solarize.clone());
+    assert_eq!(
+        (status.completed, status.failed),
+        (2, 0),
+        "{:?}",
+        status.failures
+    );
+    let written = pngs(&output);
+    assert_eq!(written.len(), 2, "{written:?}");
+    for path in &written {
+        // Solarize inverts channels above its threshold: a bright pixel must come out dark.
+        let result = image::open(path).unwrap().to_rgba8();
+        let pixel = result.get_pixel(3, 3);
+        assert!(
+            pixel[0] < 128 && pixel[1] < 128 && pixel[2] < 128,
+            "{} was not solarized: {pixel:?}",
+            path.display()
+        );
+    }
+
+    // Take the plugin away. Every file now fails, says why, and writes nothing.
+    sandbox
+        .registry
+        .remove("photoforge.example.solarize")
+        .unwrap();
+    let missing_output = directory.path().join("out-missing");
+    let status = run_batch_over(&input, &missing_output, solarize);
+    assert_eq!((status.completed, status.failed), (0, 2));
+    assert!(
+        status
+            .failures
+            .iter()
+            .all(|failure| failure.error.contains("photoforge.example.solarize")),
+        "{:?}",
+        status.failures
+    );
+    assert!(
+        pngs(&missing_output).is_empty(),
+        "a file was written without the filter"
+    );
+}
+
+#[test]
+fn a_batch_without_a_plugin_filter_keeps_the_precision_it_always_had() {
+    // Promotion to float is for plugin filters only; an ordinary 8-bit workflow is untouched.
+    let _sandbox = Sandbox::new();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("in");
+    std::fs::create_dir_all(&input).unwrap();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([100, 120, 140, 255]))
+        .save(input.join("plain.png"))
+        .unwrap();
+    let status = run_batch_over(
+        &input,
+        &directory.path().join("out"),
+        EditOperation::Brightness { amount: 0.0 },
+    );
+    assert_eq!(
+        (status.completed, status.failed),
+        (1, 0),
+        "{:?}",
+        status.failures
+    );
+    let result = image::open(directory.path().join("out").join("plain.png"))
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(result.get_pixel(1, 1), &image::Rgba([100, 120, 140, 255]));
+}

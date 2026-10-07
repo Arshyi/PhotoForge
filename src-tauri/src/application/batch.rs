@@ -165,6 +165,20 @@ pub fn run_batch(
                         (pixels, loaded.path)
                     };
                     check_cancel(Some(&cancelled))?;
+                    // A plugin filter is a function of linear float pixels, and the legacy
+                    // 8-bit renderer refuses to run one rather than quantise on every call.
+                    // An 8-bit source is promoted here, once, deliberately, as "Convert to
+                    // linear float" does for a document, so a batch can use a filter on a
+                    // folder of JPEGs. Nothing else is promoted: a workflow without a plugin
+                    // filter keeps the precision it always had.
+                    let source = if matches!(source, PixelBuffer::EncodedSrgba8(_))
+                        && workflow.operations.iter().any(|operation| {
+                            matches!(operation, crate::domain::EditOperation::PluginFilter { .. })
+                        }) {
+                        PixelBuffer::LinearRgbaF32(source.linear()?)
+                    } else {
+                        source
+                    };
                     let processed = pipeline_typed(source, &workflow.operations, Some(&cancelled))?;
                     if options.color.is_some() || matches!(processed, PixelBuffer::LinearRgbaF32(_))
                     {
