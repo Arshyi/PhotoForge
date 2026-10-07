@@ -53,7 +53,7 @@ fn the_registry_is_listed_with_everything_the_interface_needs() {
     let harness = Harness::new();
     let specs = harness.call("list_operations", json!({})).unwrap();
     let specs = specs.as_array().unwrap();
-    assert_eq!(specs.len(), 21);
+    assert_eq!(specs.len(), 22);
     let ids: Vec<&str> = specs
         .iter()
         .map(|spec| spec["id"].as_str().unwrap())

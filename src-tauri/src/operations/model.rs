@@ -52,6 +52,11 @@ pub struct TransactionRequest {
     pub selection: Option<MaskSnapshot>,
     #[serde(default)]
     pub origin: Origin,
+    /// The plugin on whose behalf a `plugin` transaction runs. It is what stops a
+    /// plugin's command from spending the authority of another plugin: a plugin
+    /// transaction may apply that plugin's filters and no one else's.
+    #[serde(default)]
+    pub plugin: Option<String>,
 }
 
 /// What one step did.

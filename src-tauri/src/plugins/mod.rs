@@ -18,6 +18,11 @@
 //! * [`limits`] — the sandbox's numbers.
 //! * [`runtime`] — the WebAssembly engine, behind the `plugins` feature.
 //! * [`filter`] — running a filter over an image, tile by tile.
+//! * [`store`] — installing, finding and removing plugins.
+//! * [`apply`] — a filter as a node in the render pipeline.
+//! * [`document`] — what a document needs from plugins, and what happens without them.
+pub mod apply;
+pub mod document;
 pub mod filter;
 pub mod job;
 pub mod limits;
@@ -28,6 +33,7 @@ mod runtime;
 #[cfg(not(feature = "plugins"))]
 #[path = "runtime_off.rs"]
 mod runtime;
+pub mod store;
 #[doc(hidden)]
 pub mod testing;
 

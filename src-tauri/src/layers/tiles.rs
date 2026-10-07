@@ -297,6 +297,12 @@ pub fn behavior(operation: &EditOperation, _scale: f64) -> TileBehavior {
         EditOperation::Deconvolve {
             kernel, iterations, ..
         } => u64::from(kernel.reach()) * 2 * u64::from(*iterations),
+        // A plugin states its own reach, which its installer verified by running
+        // the filter whole and in tiles and comparing.
+        EditOperation::PluginFilter {
+            locality: crate::plugins::manifest::Locality::Local { radius },
+            ..
+        } => u64::from(*radius),
         // `remove_defects` reads the eight surrounding pixels and nothing else.
         EditOperation::RemoveDefects { .. } => 1,
         // `local_luma` is a box filter of exactly this radius.

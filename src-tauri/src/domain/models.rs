@@ -261,6 +261,24 @@ pub enum EditOperation {
         #[serde(default)]
         mask_id: Option<String>,
     },
+    /// A filter from an installed plugin.
+    ///
+    /// `sha256` is the content hash of the exact plugin version that made this, so
+    /// the picture a document draws is the picture it was made with: a different
+    /// version is never substituted, and a missing one is reported, not skipped.
+    /// `locality` is how far the filter reaches, declared by the plugin and checked
+    /// against its manifest when the filter runs; it is here so the tiler can plan
+    /// without consulting a registry. `parameters` are in the filter's declared
+    /// order.
+    PluginFilter {
+        plugin: String,
+        version: String,
+        sha256: String,
+        filter: String,
+        locality: crate::plugins::manifest::Locality,
+        #[serde(default)]
+        parameters: Vec<f64>,
+    },
 }
 
 impl EditOperation {
@@ -447,6 +465,18 @@ impl EditOperation {
                 strength.is_finite() && (0.0..=1.0).contains(strength) && (1..=32).contains(radius)
             }
             Self::Masked { .. } => unreachable!("masked operations return after validation"),
+            Self::PluginFilter {
+                plugin,
+                version,
+                sha256,
+                filter,
+                locality,
+                parameters,
+            } => {
+                return crate::plugins::apply::validate_reference(
+                    plugin, version, sha256, filter, locality, parameters,
+                );
+            }
         };
 
         if valid {
@@ -521,6 +551,7 @@ impl EditOperation {
             Self::SelectiveColor { .. } => "selective_color",
             Self::DecontaminateColors { .. } => "decontaminate_colors",
             Self::Masked { .. } => "masked",
+            Self::PluginFilter { .. } => "plugin_filter",
         }
     }
 }
@@ -646,6 +677,10 @@ pub struct PreviewResult {
     pub processing_time_ms: f64,
     pub is_current: bool,
     pub operation_count: usize,
+    /// Layers left out of this render because the plugin they need is not
+    /// available. Empty unless the document uses plugins.
+    #[serde(default)]
+    pub missing_plugins: Vec<crate::plugins::document::MissingPlugin>,
 }
 
 #[derive(Debug, Clone, Serialize)]

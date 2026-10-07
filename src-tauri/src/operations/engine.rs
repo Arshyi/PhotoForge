@@ -44,6 +44,7 @@ use crate::application::AppState;
 use crate::commands::layers::{
     apply_edit_to_layer, mask_for_layer, merge_targets, render_subset_into_buffer,
 };
+use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::layers::workflow::{resolve, LayerSelector};
 use crate::layers::{LayerContent, LayerDocument, LayerKind, LayerMask};
@@ -72,6 +73,8 @@ struct Tx<'a> {
     document: LayerDocument,
     selection: Option<MaskSnapshot>,
     origin: Origin,
+    /// The plugin a `Plugin` transaction acts for.
+    plugin: Option<String>,
     /// Every pixel buffer registered so far, in order. The journal.
     created_pixels: Vec<String>,
     last_created: Option<String>,
@@ -169,6 +172,11 @@ pub async fn execute_with(
 
     // Everything that can be refused without running anything is refused first,
     // so a transaction that cannot succeed never starts.
+    if request.origin == Origin::Plugin && request.plugin.is_none() {
+        return Err(AppError::InvalidOperation(
+            "a plugin transaction must say which plugin it is for".into(),
+        ));
+    }
     let operations = preflight(&request.steps, request.origin, request.selection.is_some())?;
 
     // A selection that does not decode (a corrupt checksum, a truncated payload) is
@@ -194,6 +202,7 @@ pub async fn execute_with(
             document: request.document.clone(),
             selection: request.selection.clone(),
             origin: request.origin,
+            plugin: request.plugin.clone(),
             created_pixels: Vec::new(),
             last_created: None,
             ids: &mut dry_ids,
@@ -221,6 +230,7 @@ pub async fn execute_with(
         document: request.document,
         selection: request.selection,
         origin: request.origin,
+        plugin: request.plugin.clone(),
         created_pixels: Vec::new(),
         last_created: None,
         ids,
@@ -731,13 +741,156 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
             tx.created(&id, &mut outcome);
         }
         Operation::ApplyPluginFilter(p) => {
-            // The plugin runtime is separate, optional and off by default. Until a
-            // runtime is installed no plugin is, so there is nothing to run.
-            return Err(AppError::InvalidOperation(format!(
-                "the plugin {} is not installed, so its filter {} cannot run",
-                p.plugin, p.filter
-            )));
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let operation = plugin_operation(tx, &p.plugin, &p.filter, &p.parameters)?;
+            let layer = tx
+                .document
+                .find(&id)
+                .ok_or_else(|| AppError::LayerNotFound(id.clone()))?;
+            let (width, height) = layer.pixel_dimensions().ok_or_else(|| {
+                AppError::InvalidOperation(format!(
+                    "a plugin filter needs a pixel layer, but {} is not one",
+                    layer.name
+                ))
+            })?;
+            if tx.dry {
+                return Ok(outcome);
+            }
+            let result = apply_edit_to_layer(&tx.document, &id, vec![operation], tx.state).await?;
+            tx.journal(&result.pixel_id, &mut outcome);
+            if result.width != width || result.height != height {
+                return Err(AppError::ProcessingFailure(
+                    "the plugin returned pixels of an unexpected size".into(),
+                ));
+            }
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                layer.content = LayerContent::Pixel {
+                    pixel_id: result.pixel_id.clone(),
+                    width: result.width,
+                    height: result.height,
+                };
+                Ok(())
+            })?;
+        }
+        Operation::AddPluginAdjustment(p) => {
+            if tx.document.precision != crate::pixel::DocumentPrecision::LinearSrgbF32 {
+                return Err(AppError::InvalidOperation(
+                    "plugin filters need a linear float document: convert it in Color and precision first"
+                        .into(),
+                ));
+            }
+            let operation = plugin_operation(tx, &p.plugin, &p.filter, &p.parameters)?;
+            let fallback = filter_title(&p.plugin, &p.filter);
+            let name = name_or(&p.name, &fallback)?;
+            let id = tx.ids.next("l");
+            let layer = new_layer(
+                &id,
+                &name,
+                LayerContent::Adjustment {
+                    operation: Box::new(operation),
+                },
+                &tx.now(),
+            );
+            let top = tx.document.layers.len();
+            insert_layer(&mut tx.document, layer, None, top)?;
+            tx.created(&id, &mut outcome);
         }
     }
     Ok(outcome)
+}
+
+/// The title of a filter, for naming a layer made from it.
+fn filter_title(plugin: &str, filter: &str) -> String {
+    use crate::plugins::store::{global, Resolution};
+    match global().active(plugin) {
+        Resolution::Available(loaded) => loaded
+            .manifest
+            .filter(filter)
+            .map_or_else(|| filter.to_string(), |(_, decl)| decl.title.clone()),
+        Resolution::Unavailable(_) => filter.to_string(),
+    }
+}
+
+/// Turns a plugin id, a filter id and named parameters into the operation that
+/// records exactly the installed version that will run.
+///
+/// Everything a person or a plugin could get wrong is refused here, before any
+/// pixel is touched: a plugin that is not installed, that is turned off, that was
+/// not granted what its filters need, a filter it does not have, a parameter it did
+/// not declare, a value outside the declared range.
+fn plugin_operation(
+    tx: &Tx<'_>,
+    plugin: &str,
+    filter: &str,
+    parameters: &serde_json::Value,
+) -> Result<EditOperation, AppError> {
+    use crate::plugins::store::{global, Resolution};
+    if tx.origin == Origin::Plugin && tx.plugin.as_deref() != Some(plugin) {
+        return Err(AppError::InvalidOperation(format!(
+            "a plugin may apply only its own filters, not {plugin}'s"
+        )));
+    }
+    let loaded = match global().active(plugin) {
+        Resolution::Available(loaded) => loaded,
+        Resolution::Unavailable(why) => {
+            return Err(AppError::PluginUnavailable {
+                plugin: plugin.to_string(),
+                reason: why.describe(plugin, ""),
+            })
+        }
+    };
+    let (_, decl) = loaded
+        .manifest
+        .filter(filter)
+        .ok_or_else(|| AppError::PluginUnavailable {
+            plugin: plugin.to_string(),
+            reason: format!("it has no filter called {filter}"),
+        })?;
+    let given = match parameters {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(map) => map.clone(),
+        _ => {
+            return Err(AppError::InvalidOperation(
+                "a filter's parameters must be an object of names and values".into(),
+            ))
+        }
+    };
+    if let Some(unknown) = given
+        .keys()
+        .find(|key| !decl.parameters.iter().any(|p| &p.id == *key))
+    {
+        return Err(AppError::InvalidOperation(format!(
+            "{filter} has no parameter called {unknown}"
+        )));
+    }
+    let mut values = Vec::with_capacity(decl.parameters.len());
+    for declared in &decl.parameters {
+        let value = match given.get(&declared.id) {
+            None => declared.default_value(),
+            Some(serde_json::Value::Bool(flag)) => f64::from(u8::from(*flag)),
+            Some(other) => other.as_f64().ok_or_else(|| {
+                AppError::InvalidOperation(format!(
+                    "the parameter {} must be a number",
+                    declared.id
+                ))
+            })?,
+        };
+        if !declared.accepts(value) {
+            return Err(AppError::InvalidOperation(format!(
+                "{value} is not a value the parameter {} accepts",
+                declared.id
+            )));
+        }
+        values.push(value);
+    }
+    Ok(EditOperation::PluginFilter {
+        plugin: plugin.to_string(),
+        version: loaded.manifest.version.clone(),
+        sha256: loaded.content_hash.clone(),
+        filter: filter.to_string(),
+        locality: decl.locality,
+        parameters: values,
+    })
 }

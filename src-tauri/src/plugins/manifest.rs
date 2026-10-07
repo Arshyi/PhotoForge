@@ -146,6 +146,9 @@ pub fn valid_plugin_id(id: &str) -> bool {
     let segments: Vec<&str> = id.split('.').collect();
     (2..=8).contains(&segments.len())
         && segments[0] != "core"
+        // The id names a directory. On Windows `con.example` is the console, whatever
+        // follows the dot, so a segment that is a device name is refused anywhere.
+        && !segments.iter().any(|segment| is_device_name(segment))
         && segments.iter().all(|segment| {
             !segment.is_empty()
                 && segment.len() <= 24
@@ -154,6 +157,15 @@ pub fn valid_plugin_id(id: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         })
+}
+
+/// A name Windows reserves for a device.
+pub fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || (stem.len() == 4
+            && (stem.starts_with("com") || stem.starts_with("lpt"))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 /// `add_border`: a lowercase name within one plugin.
@@ -752,6 +764,14 @@ impl PluginManifest {
             }
             plain_text("a filter title", &filter.title, 1, 60)?;
             plain_text("a filter description", &filter.description, 0, 300)?;
+            // A filter that is not a pure function of its input cannot be tiled, cached
+            // or re-rendered to the same picture, which is what a document needs of it.
+            if !filter.deterministic {
+                return Err(invalid(format!(
+                    "filter {} declares itself non-deterministic; interface {API_VERSION} supports only                      filters that are a pure function of their pixels and parameters",
+                    filter.id
+                )));
+            }
             if let Locality::Local { radius } = filter.locality {
                 if radius == 0 || radius > MAX_LOCAL_RADIUS {
                     return Err(invalid(format!(
@@ -984,12 +1004,7 @@ pub fn validate_package_path(path: &str) -> Result<(), AppError> {
         {
             return Err(bad("may contain only letters, digits and - _ . and spaces"));
         }
-        let stem = segment.split('.').next().unwrap_or("").to_ascii_lowercase();
-        if matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
-            || (stem.len() == 4
-                && (stem.starts_with("com") || stem.starts_with("lpt"))
-                && stem.as_bytes()[3].is_ascii_digit())
-        {
+        if is_device_name(segment) {
             return Err(bad("uses a reserved device name"));
         }
     }

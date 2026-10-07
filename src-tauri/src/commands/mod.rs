@@ -6,6 +6,7 @@ mod mask;
 mod ollama;
 mod operations;
 mod planner;
+mod plugins;
 mod professional;
 mod raw;
 mod render;
@@ -46,6 +47,11 @@ pub use ollama::{
 };
 pub use operations::{apply_transaction, layer_document_revision, list_operations};
 pub use planner::{generate_edit_plan, validate_guided_plan};
+pub use plugins::{
+    document_plugin_status, inspect_plugin_package, install_plugin_package, list_plugins,
+    plugin_remembered_values, remove_plugin, remove_plugin_version, run_plugin_command,
+    set_plugin_enabled, set_plugin_grants, test_plugin,
+};
 pub use professional::{
     cancel_batch, create_point_operation, export_with_profile, export_workflow, generate_histogram,
     get_batch_status, import_workflow, inspect_image_pixel, preview_batch_workflow,

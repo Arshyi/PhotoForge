@@ -130,6 +130,7 @@ async fn every_vector_the_typescript_functions_produce_is_produced_by_the_engine
             selection: None,
             // The Layers panel is a person at the keyboard.
             origin: Origin::User,
+            plugin: None,
         };
         let mut ids = SequenceIds::default();
         let result = execute_with(&state, request, &mut ids, &FixedClock("T".into())).await;

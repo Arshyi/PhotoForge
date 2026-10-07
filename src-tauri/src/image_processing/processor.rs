@@ -232,6 +232,14 @@ pub(crate) fn apply_operation(
                 "remove_defects requires a high-precision document".into(),
             ));
         }
+        EditOperation::PluginFilter { .. } => {
+            // Plugin filters are pure functions of linear float pixels. The legacy
+            // encoded-8-bit renderer would have to quantise to and from that on every
+            // call, and the plugin's picture would no longer be the one it computed.
+            return Err(AppError::InvalidOperation(
+                "plugin filters require a high-precision (linear float) document".into(),
+            ));
+        }
         EditOperation::RawDevelopment { parameters } => {
             let mut developed = crate::color::FloatImage::from_rgba8(image)
                 .map_err(|error| AppError::ColorPipeline(error.to_string()))?;

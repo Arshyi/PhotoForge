@@ -388,6 +388,7 @@ fn stale_preview(request_id: u64, operation_count: usize) -> PreviewResult {
         processing_time_ms: 0.0,
         is_current: false,
         operation_count,
+        missing_plugins: Vec::new(),
     }
 }
 
@@ -472,6 +473,7 @@ pub async fn render_preview(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
         is_current,
         operation_count,
+        missing_plugins: Vec::new(),
     })
 }
 

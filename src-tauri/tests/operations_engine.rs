@@ -67,6 +67,7 @@ fn request(document: &LayerDocument, steps: Vec<OperationCall>) -> TransactionRe
         expected_revision: None,
         selection: None,
         origin: Origin::User,
+        plugin: None,
     }
 }
 
@@ -452,6 +453,8 @@ async fn a_person_may_change_what_they_locked_and_an_automation_may_not() {
     for origin in [Origin::Automation, Origin::Batch, Origin::Plugin] {
         let mut automated = request(&document, steps());
         automated.origin = origin;
+        // A plugin's transaction says which plugin it is for.
+        automated.plugin = (origin == Origin::Plugin).then(|| "com.example.acting".to_string());
         let error = run(&state, automated).await.unwrap_err();
         assert!(error.to_string().contains("b"), "{origin:?}: {error}");
         assert!(

@@ -72,6 +72,10 @@ pub struct ProjectLoadResult {
     pub created_at: String,
     pub modified_at: String,
     pub processing_time_ms: f64,
+    /// The plugins this project uses and whether each can be had here. Empty for a
+    /// project that uses none.
+    #[serde(default)]
+    pub plugin_requirements: Vec<crate::plugins::document::RequirementStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +133,7 @@ fn stale_preview(request_id: u64, operation_count: usize) -> PreviewResult {
         processing_time_ms: 0.0,
         is_current: false,
         operation_count,
+        missing_plugins: Vec::new(),
     }
 }
 
@@ -151,6 +156,12 @@ pub async fn render_layer_composite(
         operation.validate()?;
     }
     let operation_count = operations.len();
+    // A layer that needs a plugin that is not available is left out of this render
+    // and reported, so the picture has a visible gap instead of a substitute. The
+    // document itself is untouched: it still names the plugin, and saves that way.
+    let mut document = document;
+    let missing_plugins =
+        crate::plugins::document::hide_unavailable(&crate::plugins::store::global(), &mut document);
 
     if state.pending_open_request.load(Ordering::Acquire) != 0 {
         return Ok(stale_preview(request_id, operation_count));
@@ -212,6 +223,7 @@ pub async fn render_layer_composite(
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
         is_current,
         operation_count,
+        missing_plugins,
     })
 }
 
@@ -230,6 +242,11 @@ pub async fn export_layer_composite(
     for operation in &operations {
         operation.validate()?;
     }
+    // A file made without a plugin the document needs would be a different picture
+    // from the document's, so an export stops and says which plugin.
+    let plugins = crate::plugins::store::global();
+    crate::plugins::document::ensure_available(&plugins, &document)?;
+    crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
     let _permit = state.export_gate.lock().await;
 
     let original_path = {
@@ -454,6 +471,12 @@ pub(crate) async fn render_subset_into_buffer(
     layers: Vec<Layer>,
     state: &AppState,
 ) -> Result<LayerPixelsResult, AppError> {
+    {
+        // The same reason as for export: a merged layer is a picture that lasts.
+        let mut subset = document.clone();
+        subset.layers = layers.clone();
+        crate::plugins::document::ensure_available(&crate::plugins::store::global(), &subset)?;
+    }
     let (resolved, _) = resolve_pixels(state, &document, false)?;
     let canvas_width = document.canvas_width;
     let canvas_height = document.canvas_height;
@@ -693,6 +716,11 @@ pub async fn render_layer_thumbnail(
     state: State<'_, AppState>,
 ) -> Result<LayerThumbnailResult, AppError> {
     document.validate()?;
+    // A thumbnail shows what the preview shows: the layers whose plugin is missing
+    // are left out, and the preview is what says so.
+    let mut document = document;
+    let _ =
+        crate::plugins::document::hide_unavailable(&crate::plugins::store::global(), &mut document);
     let max_edge = max_edge.clamp(16, MAX_THUMBNAIL_EDGE);
     let layer = find_layer(&document, &layer_id)?;
 
@@ -1005,8 +1033,16 @@ fn prepare_project(
     for (pixel_id, image) in loaded.linear_pixels {
         store.register_typed_with_id(&pixel_id, image.into())?;
     }
-    let resolved = store.resolve(&loaded.document.referenced_pixel_ids(), false)?;
-    let typed = render_document_typed(&loaded.document, &resolved, RenderOptions::default())?;
+    // A project that uses a plugin this machine does not have must still open: the
+    // opening render leaves those layers out and the result says which they are.
+    // The document handed back is the one that was saved, plugin references intact.
+    let plugins = crate::plugins::store::global();
+    let mut render_view = loaded.document.clone();
+    crate::plugins::document::hide_unavailable(&plugins, &mut render_view);
+    let renderable_operations =
+        crate::plugins::document::without_unavailable(&plugins, &loaded.document_operations);
+    let resolved = store.resolve(&render_view.referenced_pixel_ids(), false)?;
+    let typed = render_document_typed(&render_view, &resolved, RenderOptions::default())?;
     let working = match &typed {
         PixelBuffer::LinearRgbaF32(image) => Some(Arc::clone(image)),
         _ => None,
@@ -1020,7 +1056,7 @@ fn prepare_project(
     };
     let original_preview_data_url = encode_preview(&preview)?;
     let operations = prepare_preview_operations(
-        &loaded.document_operations,
+        &renderable_operations,
         (width, height),
         (preview_width, preview_height),
     )?;
@@ -1056,6 +1092,13 @@ fn prepare_project(
         raw: None,
         origin: None,
     };
+    let plugin_requirements = {
+        let mut needed = crate::plugins::document::requirements(&loaded.document);
+        needed.extend(crate::plugins::document::operation_requirements(
+            &loaded.document_operations,
+        ));
+        crate::plugins::document::statuses(&crate::plugins::store::global(), needed)
+    };
     Ok(PreparedProject {
         source: LoadedImage {
             path,
@@ -1066,6 +1109,7 @@ fn prepare_project(
         },
         store,
         result: ProjectLoadResult {
+            plugin_requirements,
             document_id: request_id,
             is_current: false,
             metadata,

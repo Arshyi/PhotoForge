@@ -541,7 +541,7 @@
         "required": true
       },
       {
-        "description": "The filter's parameters, as the plugin declared them.",
+        "description": "The filter's parameters by name, as the plugin declared them.",
         "kind": {
           "kind": "json"
         },
@@ -552,6 +552,54 @@
     "plannerSafe": false,
     "summary": "Runs a plugin's filter on a pixel layer, producing new pixels.",
     "title": "Apply plugin filter",
+    "version": 1
+  },
+  {
+    "category": "plugin",
+    "effects": "none",
+    "id": "core.plugin.add_adjustment",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The plugin's id.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 64
+        },
+        "name": "plugin",
+        "required": true
+      },
+      {
+        "description": "The filter's id within the plugin.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 64
+        },
+        "name": "filter",
+        "required": true
+      },
+      {
+        "description": "The filter's parameters by name, as the plugin declared them.",
+        "kind": {
+          "kind": "json"
+        },
+        "name": "parameters",
+        "required": false
+      },
+      {
+        "description": "The layer's name; the filter's title if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Adds a non-destructive adjustment layer that runs a plugin's filter.",
+    "title": "New plugin adjustment layer",
     "version": 1
   }
 ]

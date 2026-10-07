@@ -35,6 +35,13 @@ pub fn locality(operation: &EditOperation) -> OperationLocality {
         | EditOperation::RemoveDefects { .. }
         | EditOperation::Deconvolve { .. } => OperationLocality::HaloDependent,
         EditOperation::Masked { operation, .. } => locality(operation),
+        // What a plugin filter reads is what it declared, and the declaration is
+        // verified when the plugin is installed.
+        EditOperation::PluginFilter { locality, .. } => match locality {
+            crate::plugins::manifest::Locality::Pointwise => OperationLocality::TileLocal,
+            crate::plugins::manifest::Locality::Local { .. } => OperationLocality::HaloDependent,
+            crate::plugins::manifest::Locality::Global => OperationLocality::Global,
+        },
         _ => OperationLocality::TileLocal,
     }
 }
@@ -299,6 +306,7 @@ pub fn apply(
             }
             result
         }
+        PluginFilter { .. } => crate::plugins::apply::apply_operation(image, operation, cancel)?,
         Brightness { amount } => encoded(image, cancel, |c| c.map(|v| v + amount))?,
         Contrast { amount } => encoded(image, cancel, |c| {
             c.map(|v| (v - 0.5) * (1.0 + amount) + 0.5)

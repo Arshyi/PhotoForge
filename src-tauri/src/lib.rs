@@ -44,27 +44,30 @@ use commands::{
     cancel_mask_operation, cancel_ollama_plan, clear_render_cache, color_range_selection,
     compare_planners, compose_selection_masks, create_layer_mask, create_layer_pixels,
     create_point_operation, default_render_cache_budget, develop_raw_layer,
-    discard_recovery_snapshot, discover_models, export_developed_png16, export_image,
-    export_layer_composite, export_mask_file, export_mask_png, export_raw_layer_png16,
-    export_with_profile, export_workflow, flatten_layer_document, generate_edit_plan,
-    generate_histogram, generate_ollama_plan, get_batch_status, get_component_diagnostics,
-    get_component_snapshot, get_mask_progress, get_ollama_diagnostics, get_render_backend_mode,
-    import_inference_model, import_layer_image, import_mask_file, import_mask_png, import_workflow,
-    inference_status, inspect_document_fonts, inspect_image_pixel, inspect_raw,
-    inspect_selection_mask, layer_document_revision, layer_mask_from_selection, layer_store_report,
-    list_operations, list_recovery_snapshots, list_system_fonts, load_layer_project,
+    discard_recovery_snapshot, discover_models, document_plugin_status, export_developed_png16,
+    export_image, export_layer_composite, export_mask_file, export_mask_png,
+    export_raw_layer_png16, export_with_profile, export_workflow, flatten_layer_document,
+    generate_edit_plan, generate_histogram, generate_ollama_plan, get_batch_status,
+    get_component_diagnostics, get_component_snapshot, get_mask_progress, get_ollama_diagnostics,
+    get_render_backend_mode, import_inference_model, import_layer_image, import_mask_file,
+    import_mask_png, import_workflow, inference_status, inspect_document_fonts,
+    inspect_image_pixel, inspect_plugin_package, inspect_raw, inspect_selection_mask,
+    install_plugin_package, layer_document_revision, layer_mask_from_selection, layer_store_report,
+    list_operations, list_plugins, list_recovery_snapshots, list_system_fonts, load_layer_project,
     magic_wand_selection, measure_component_performance, merge_layer_pixels, open_image,
-    open_raw_image, open_raw_layer, plan_layer_workflow, preview_batch_workflow,
-    rasterize_layer_transform, rasterize_selection, rasterize_semantic_layer,
-    refine_selection_mask, refresh_ollama_models, relink_raw_source, remap_selection_masks,
-    remove_inference_model, render_diagnostics, render_layer_composite, render_layer_thumbnail,
-    render_preview, restore_recovery_snapshot, retain_layer_pixels, save_layer_project,
+    open_raw_image, open_raw_layer, plan_layer_workflow, plugin_remembered_values,
+    preview_batch_workflow, rasterize_layer_transform, rasterize_selection,
+    rasterize_semantic_layer, refine_selection_mask, refresh_ollama_models, relink_raw_source,
+    remap_selection_masks, remove_inference_model, remove_plugin, remove_plugin_version,
+    render_diagnostics, render_layer_composite, render_layer_thumbnail, render_preview,
+    restore_recovery_snapshot, retain_layer_pixels, run_plugin_command, save_layer_project,
     scan_plugins, select_planner_provider, select_restoration_engine, selection_from_layer_mask,
-    set_render_backend_mode, set_render_cache_budget, start_batch_workflow, test_ollama_connection,
-    transform_selection_mask, update_component_configuration, validate_guided_plan,
-    validate_layer_document, validate_mask_snapshot, validate_ollama_json,
-    validate_plugin_manifest, validate_shortcut_bindings, validate_workflow_json,
-    validate_workspace_layout, verify_raw_source, write_recovery_snapshot,
+    set_plugin_enabled, set_plugin_grants, set_render_backend_mode, set_render_cache_budget,
+    start_batch_workflow, test_ollama_connection, test_plugin, transform_selection_mask,
+    update_component_configuration, validate_guided_plan, validate_layer_document,
+    validate_mask_snapshot, validate_ollama_json, validate_plugin_manifest,
+    validate_shortcut_bindings, validate_workflow_json, validate_workspace_layout,
+    verify_raw_source, write_recovery_snapshot,
 };
 
 /// Registers the commands of the RAW flow — probe, preview, open (whole or as a
@@ -106,6 +109,36 @@ pub fn register_operation_commands<R: tauri::Runtime>(
     ])
 }
 
+/// Registers the plugin commands, the transaction command they run through, and the
+/// rest of what an end-to-end plugin test needs. The shipped binary registers them in
+/// `run`.
+#[doc(hidden)]
+pub fn register_plugin_commands<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        list_plugins,
+        inspect_plugin_package,
+        install_plugin_package,
+        set_plugin_enabled,
+        set_plugin_grants,
+        remove_plugin,
+        remove_plugin_version,
+        test_plugin,
+        document_plugin_status,
+        plugin_remembered_values,
+        run_plugin_command,
+        apply_transaction,
+        render_layer_composite,
+        export_layer_composite,
+        flatten_layer_document,
+        merge_layer_pixels,
+        save_layer_project,
+        load_layer_project,
+        create_blank_layer_document
+    ])
+}
+
 use commands::{
     convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
     inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
@@ -129,6 +162,17 @@ pub fn run() {
             apply_transaction,
             list_operations,
             layer_document_revision,
+            list_plugins,
+            inspect_plugin_package,
+            install_plugin_package,
+            set_plugin_enabled,
+            set_plugin_grants,
+            remove_plugin,
+            remove_plugin_version,
+            test_plugin,
+            document_plugin_status,
+            plugin_remembered_values,
+            run_plugin_command,
             create_blank_layer_document,
             render_preview,
             analyze_image,

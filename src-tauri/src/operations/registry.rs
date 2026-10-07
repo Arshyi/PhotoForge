@@ -146,10 +146,11 @@ pub enum OperationKind {
     MergeDown,
     Flatten,
     ApplyPluginFilter,
+    AddPluginAdjustment,
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 21] = [
+    pub const ALL: [OperationKind; 22] = [
         Self::Select,
         Self::SetVisible,
         Self::SetLocked,
@@ -171,6 +172,7 @@ impl OperationKind {
         Self::MergeDown,
         Self::Flatten,
         Self::ApplyPluginFilter,
+        Self::AddPluginAdjustment,
     ];
 
     pub const fn id(self) -> &'static str {
@@ -196,6 +198,7 @@ impl OperationKind {
             Self::MergeDown => "core.layer.merge_down",
             Self::Flatten => "core.document.flatten",
             Self::ApplyPluginFilter => "core.plugin.apply_filter",
+            Self::AddPluginAdjustment => "core.plugin.add_adjustment",
         }
     }
 
@@ -543,7 +546,41 @@ impl OperationKind {
                         "parameters",
                         ParamKind::Json,
                         false,
-                        "The filter's parameters, as the plugin declared them.",
+                        "The filter's parameters by name, as the plugin declared them.",
+                    ),
+                ],
+            ),
+            Self::AddPluginAdjustment => base(
+                "New plugin adjustment layer",
+                "Adds a non-destructive adjustment layer that runs a plugin's filter.",
+                Plugin,
+                NoEffect,
+                Ignored,
+                false,
+                vec![
+                    param(
+                        "plugin",
+                        ParamKind::Text { max_chars: 64 },
+                        true,
+                        "The plugin's id.",
+                    ),
+                    param(
+                        "filter",
+                        ParamKind::Text { max_chars: 64 },
+                        true,
+                        "The filter's id within the plugin.",
+                    ),
+                    param(
+                        "parameters",
+                        ParamKind::Json,
+                        false,
+                        "The filter's parameters by name, as the plugin declared them.",
+                    ),
+                    param(
+                        "name",
+                        ParamKind::Text { max_chars: 120 },
+                        false,
+                        "The layer's name; the filter's title if absent.",
                     ),
                 ],
             ),
@@ -659,6 +696,17 @@ pub struct PluginFilterParams {
     pub parameters: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginAdjustmentParams {
+    pub plugin: String,
+    pub filter: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// A call whose parameters have been parsed.
 #[derive(Debug, Clone)]
 pub enum Operation {
@@ -683,6 +731,7 @@ pub enum Operation {
     MergeDown(SelectorParams),
     Flatten,
     ApplyPluginFilter(PluginFilterParams),
+    AddPluginAdjustment(PluginAdjustmentParams),
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(call: &OperationCall) -> Result<T, AppError> {
@@ -727,6 +776,7 @@ impl Operation {
                 Self::Flatten
             }
             OperationKind::ApplyPluginFilter => Self::ApplyPluginFilter(parse(call)?),
+            OperationKind::AddPluginAdjustment => Self::AddPluginAdjustment(parse(call)?),
         })
     }
 
@@ -753,6 +803,7 @@ impl Operation {
             Self::MergeDown(_) => OperationKind::MergeDown,
             Self::Flatten => OperationKind::Flatten,
             Self::ApplyPluginFilter(_) => OperationKind::ApplyPluginFilter,
+            Self::AddPluginAdjustment(_) => OperationKind::AddPluginAdjustment,
         }
     }
 
@@ -779,9 +830,11 @@ impl Operation {
             Self::Group(p) => p.selectors.iter().collect(),
             Self::ApplyEdit(p) => vec![&p.selector],
             Self::ApplyPluginFilter(p) => vec![&p.selector],
-            Self::AddGroup(_) | Self::AddAdjustment(_) | Self::AddPixel(_) | Self::Flatten => {
-                Vec::new()
-            }
+            Self::AddGroup(_)
+            | Self::AddAdjustment(_)
+            | Self::AddPixel(_)
+            | Self::AddPluginAdjustment(_)
+            | Self::Flatten => Vec::new(),
         }
     }
 }
@@ -816,7 +869,7 @@ mod tests {
             assert_eq!(kind.spec().id, id);
             assert!(kind.spec().version >= 1);
         }
-        assert_eq!(OperationKind::ALL.len(), 21);
+        assert_eq!(OperationKind::ALL.len(), 22);
     }
 
     #[test]
@@ -895,6 +948,7 @@ mod tests {
             OperationKind::MergeDown,
             OperationKind::Flatten,
             OperationKind::ApplyPluginFilter,
+            OperationKind::AddPluginAdjustment,
             OperationKind::SetLocked,
         ] {
             assert!(!kind.spec().planner_safe, "{}", kind.id());
@@ -916,7 +970,7 @@ mod tests {
     fn specs_serialise_for_the_interface() {
         let specs = operation_specs();
         let json = serde_json::to_value(&specs).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 21);
+        assert_eq!(json.as_array().unwrap().len(), 22);
         let opacity = json
             .as_array()
             .unwrap()
