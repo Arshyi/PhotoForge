@@ -2571,7 +2571,9 @@
     );
     commitLayers(
       insertLayer(document, layer, null, document.layers.length),
-      'New adjustment layer'
+      'New adjustment layer',
+      undefined,
+      () => recorder.record('core.layer.add_adjustment', { operation, name: layer.name })
     );
     closeAdjustmentEditor();
   }
@@ -2592,7 +2594,9 @@
       const layer = createAdjustmentLayer(definitionFor(base.type)?.label ?? base.type, base);
       return commitLayers(
         insertLayer(layerDocument, layer, null, layerDocument.layers.length),
-        'New adjustment layer'
+        'New adjustment layer',
+        undefined,
+        () => recorder.record('core.layer.add_adjustment', { operation: base, name: layer.name })
       );
     }
     void applyOperationsDestructively(base);
@@ -2624,7 +2628,9 @@
             height: result.height
           }
         })),
-        'Apply to layer'
+        'Apply to layer',
+        undefined,
+        () => recorder.recordOnLayer(document, layerId, 'core.layer.apply_edit', { operations: [operation] })
       );
     } catch (error) {
       notify(errorMessage(error), 'error');

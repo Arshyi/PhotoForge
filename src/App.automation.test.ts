@@ -324,6 +324,25 @@ describe('recording a macro in the application', () => {
     expect(calls('apply_transaction')).toHaveLength(0);
   });
 
+  it('records an adjustment layer as the registered operation that makes it', async () => {
+    render(App);
+    await openImage();
+    await runPaletteCommand('record a macro');
+    await screen.findByText('Recording a macro.');
+    await fireEvent.click(screen.getByRole('button', { name: 'New adjustment layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Create layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop recording' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Macros' });
+    const [saved] = JSON.parse(localStorage.getItem(MACRO_STORAGE_KEY)!) as Macro[];
+    expect(saved.steps).toHaveLength(1);
+    expect(saved.steps[0].op).toBe('core.layer.add_adjustment');
+    expect(saved.steps[0].params.operation).toMatchObject({ type: expect.any(String) });
+    expect(typeof saved.steps[0].params.name).toBe('string');
+    // What was recorded is something the registry accepts, so it can be run.
+    expect(within(dialog).queryByRole('alert', { name: 'Problems with this macro' })).toBeNull();
+    expect(within(dialog).getByRole('button', { name: 'Run' })).toBeTruthy();
+  });
+
   it('can be discarded, leaving no macro behind', async () => {
     render(App);
     await openImage();
