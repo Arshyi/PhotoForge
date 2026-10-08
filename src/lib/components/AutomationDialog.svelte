@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { rememberFocus } from '../utils/focus';
   import {
     defaultParams,
     defaultValue,
@@ -228,6 +229,10 @@
       onclose();
     }
   }
+
+  // Where the person was, so closing the dialog returns them there.
+  const restoreFocus = rememberFocus();
+  onDestroy(restoreFocus);
 
   onMount(() => {
     dialogElement?.querySelector<HTMLElement>('button, input, select')?.focus();

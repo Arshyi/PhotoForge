@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { rememberFocus } from '../utils/focus';
   import { open } from '@tauri-apps/plugin-dialog';
   import { errorMessage } from '../utils/format';
   import { describeLocality } from '../plugins/params';
@@ -67,6 +68,10 @@
       loadError = errorMessage(error);
     }
   }
+
+  // Where the person was, so closing the dialog returns them there.
+  const restoreFocus = rememberFocus();
+  onDestroy(restoreFocus);
 
   onMount(() => {
     void refresh();

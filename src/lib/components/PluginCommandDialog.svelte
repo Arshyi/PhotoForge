@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { rememberFocus } from '../utils/focus';
   import ParamForm from './ParamForm.svelte';
   import { firstProblem, initialValues } from '../plugins/params';
   import type { CommandDecl, PluginSummary } from '../plugins/types';
@@ -26,6 +27,10 @@
       oncancel();
     }
   }
+
+  // Where the person was, so closing the dialog returns them there.
+  const restoreFocus = rememberFocus();
+  onDestroy(restoreFocus);
 
   onMount(() => dialogElement?.querySelector<HTMLElement>('input, select, button.primary')?.focus());
 </script>
