@@ -55,6 +55,17 @@ pub struct ResourceStatus {
     pub reduction_pending: bool,
 }
 
+/// Whether a lower budget has been *chosen* and is waiting for the next document.
+///
+/// Only a saved setting that differs from the one in force counts. In Automatic mode
+/// the budget follows free memory, which changes all the time; a budget that is lower
+/// than the one fixed at start-up only because other programs have since taken memory
+/// is the policy working as designed, and reporting it as "a lower budget is saved"
+/// would be false, and constant. (Found by running the packaged application.)
+fn reduction_pending(saved: BudgetMode, current: &Budget, wanted_bytes: u64) -> bool {
+    saved != current.mode && wanted_bytes < current.bytes
+}
+
 fn status(state: &AppState) -> Result<ResourceStatus, AppError> {
     let resident = state
         .layers
@@ -78,7 +89,7 @@ fn status(state: &AppState) -> Result<ResourceStatus, AppError> {
             measurable: false,
             reason: GPU_MEMORY_REASON,
         },
-        reduction_pending: wanted.bytes < current.bytes,
+        reduction_pending: reduction_pending(saved, &current, wanted.bytes),
     })
 }
 
@@ -101,4 +112,55 @@ pub async fn set_memory_budget(
 ) -> Result<(ModeChange, ResourceStatus), AppError> {
     let change = resources::change_mode(mode, &OsProbe)?;
     Ok((change, status(&state)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resources::policy::{Budget, BudgetBasis};
+
+    fn in_force(mode: BudgetMode, bytes: u64) -> Budget {
+        Budget {
+            mode,
+            basis: BudgetBasis::Measured,
+            bytes,
+            reserve_bytes: 0,
+            ceiling_bytes: bytes * 2,
+            clamped: false,
+        }
+    }
+
+    #[test]
+    fn automatic_following_free_memory_down_is_not_a_saved_reduction() {
+        // Nothing was chosen; other programs simply took memory since start-up.
+        let current = in_force(BudgetMode::Automatic, 80 << 30);
+        assert!(!reduction_pending(
+            BudgetMode::Automatic,
+            &current,
+            70 << 30
+        ));
+    }
+
+    #[test]
+    fn a_lower_manual_choice_is_pending_until_the_next_document() {
+        let current = in_force(BudgetMode::Automatic, 80 << 30);
+        let manual = BudgetMode::Manual { bytes: 4 << 30 };
+        assert!(reduction_pending(manual, &current, 4 << 30));
+        // A manual figure replaced by a lower one.
+        let manual_now = in_force(BudgetMode::Manual { bytes: 8 << 30 }, 8 << 30);
+        assert!(reduction_pending(manual, &manual_now, 4 << 30));
+    }
+
+    #[test]
+    fn a_higher_or_unchanged_choice_is_not_pending() {
+        let current = in_force(BudgetMode::Manual { bytes: 4 << 30 }, 4 << 30);
+        // Raising applies at once, so there is nothing waiting.
+        assert!(!reduction_pending(
+            BudgetMode::Manual { bytes: 8 << 30 },
+            &current,
+            8 << 30
+        ));
+        // Saving what is already in force.
+        assert!(!reduction_pending(current.mode, &current, 4 << 30));
+    }
 }
