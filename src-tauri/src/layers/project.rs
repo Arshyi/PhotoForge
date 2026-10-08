@@ -1105,6 +1105,113 @@ mod tests {
         }
     }
 
+    fn origin(view: crate::source::SourceView) -> Box<crate::source::SourceOrigin> {
+        Box::new(crate::source::SourceOrigin {
+            source: crate::source::SourceIdentity {
+                path: r"C:\photos\very-large.jpg".into(),
+                sha256: "ab".repeat(32),
+                bytes: 123_456_789,
+                kind: crate::resources::admission::SourceKind::Jpeg,
+                width: 8_000,
+                height: 8_000,
+            },
+            view,
+        })
+    }
+
+    fn region_of(width: u32, height: u32) -> crate::source::SourceView {
+        crate::source::SourceView::Region {
+            rect: crate::source::Rect {
+                x: 3_000,
+                y: 2_500,
+                width,
+                height,
+            },
+        }
+    }
+
+    /// A region or a reduced copy is not a crop: the layer remembers which file and
+    /// which part. That has to be in the project, and a project whose source is not
+    /// there has to open exactly as if it were.
+    #[test]
+    fn a_source_view_survives_a_project_round_trip_and_a_missing_source_changes_nothing() {
+        use crate::source::SourceView;
+        let mut document = sample_document();
+        document.layers[0].origin = Some(origin(region_of(8, 8)));
+        if let LayerContent::Group { children, .. } = &mut document.layers[1].content {
+            children[0].origin = Some(origin(SourceView::Reduced {
+                width: 4,
+                height: 4,
+            }));
+        }
+        let bytes = encode(&document, &sample_pixels());
+        // The path in the project names a file that does not exist on this machine, and
+        // opening the project neither looks for it nor minds.
+        assert!(!std::path::Path::new(r"C:\photos\very-large.jpg").exists());
+        let loaded = decode_project(&bytes).unwrap();
+        assert_eq!(loaded.document, document);
+        assert!(matches!(
+            loaded.document.layers[0].origin.as_deref().map(|o| o.view),
+            Some(SourceView::Region { rect }) if rect.x == 3_000 && rect.y == 2_500
+        ));
+        // Pixels are in the project as for any layer: the origin is provenance, not a dependency.
+        assert_eq!(loaded.pixels.len(), 2);
+    }
+
+    /// A project that does not use a source view is written as before: the new field is
+    /// absent, not null, so a reader that checks fields strictly can still read it.
+    #[test]
+    fn a_project_without_a_source_view_carries_no_trace_of_the_field() {
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("\"origin\""), "an unused field was written");
+        assert!(!text.contains("plugin_filter"));
+    }
+
+    /// The path in a project is text that came from somewhere. One that points off the
+    /// machine, at a device or through a stream is refused by the validator every
+    /// project passes through, so nothing can follow it later.
+    #[test]
+    fn a_source_path_that_could_reach_beyond_the_machine_is_refused() {
+        for path in [
+            r"\\attacker\share\x.jpg",
+            r"\\.\pipe\x",
+            r"C:\photos\x.jpg:stream",
+            r"C:\photos\..\x.jpg",
+            "relative.jpg",
+        ] {
+            let mut document = sample_document();
+            let mut hostile = origin(region_of(8, 8));
+            hostile.source.path = path.into();
+            document.layers[0].origin = Some(hostile);
+            assert!(
+                encode_project(
+                    &document,
+                    &[],
+                    &borrowed(&sample_pixels()),
+                    "0.14.0",
+                    "c",
+                    "m"
+                )
+                .is_err(),
+                "{path:?} was accepted"
+            );
+        }
+        // And a view that disagrees with the pixels it describes.
+        let mut document = sample_document();
+        document.layers[0].origin = Some(origin(region_of(400, 300)));
+        assert!(encode_project(
+            &document,
+            &[],
+            &borrowed(&sample_pixels()),
+            "0.14.0",
+            "c",
+            "m"
+        )
+        .is_err());
+    }
+
     #[test]
     fn smart_sources_links_masks_and_pixels_survive_a_project_round_trip() {
         let mut document = LayerDocument::new(8, 8);
