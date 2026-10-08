@@ -40,7 +40,7 @@ ranges and resolved by the committed lockfile. Builds and every gate in this pha
 | Licence | Apache-2.0 WITH LLVM-exception |
 | Brings | about 45 packages, a few of them dev-only: Cranelift and its code generator, `regalloc2`, `object`, `gimli`, `wasmparser`, `postcard` and friends |
 | Raises | the minimum Rust version from 1.91 to **1.96** |
-| Costs | about **9.5 MB** of the executable; a cold build of about 9 minutes, once |
+| Costs | The release executable grew from 45.3 MB (0.13.0) to **59.0 MB** (+13.8 MB, +30%) across everything Phase 14 added; the engine is the largest part, estimated at about 9.5 MB in the earlier evaluation and **not separately measured in the product** (a no-plugins release build was not made). A cold build of about 9 minutes, once |
 | Alternatives | Wasmi 2.0.0 (an interpreter): measured **10.9× slower** with fuel metering on the compute-bound kernel, which would put a 45 MP filter at about four minutes instead of twenty seconds. Wasmer: not measured, a scoping decision rather than a finding. A native-DLL plugin model: rejected on security grounds |
 | Why | The only candidate measured fast enough *with the limits switched on* to make filters usable at 12–45 MP; it has fuel and epoch interruption, a resource limiter, and a stable embedding API |
 | Risk accepted | A JIT compiler in the process; an engine bug is a bug in PhotoForge. Stated in `docs/plugin-security.md` as the first residual risk, not worked around |
