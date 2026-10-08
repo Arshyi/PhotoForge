@@ -135,7 +135,8 @@ again when it runs, and is the authority.
 *Record a macro…* closes the editor, shows a banner (*Recording a macro* with a count,
 **Stop recording** and **Discard**), and writes down what you do in the Layers panel as
 registered operations: show or hide, lock, collapse, opacity, blend mode, rename, move,
-group, ungroup, duplicate, delete, merge down, flatten, new group and new pixel layer.
+group, ungroup, duplicate, delete, merge down, flatten, new group, new pixel layer, new
+adjustment layer, and applying an adjustment directly to a layer.
 
 Recording is **deliberately narrow** and says what it left out. An action with no
 registered operation — editing text, placing an image, developing RAW, painting, Undo
@@ -158,6 +159,25 @@ a folder that exists, replacing an existing file atomically. They are not a gene
 to read or write files. A file with an unknown field in a step, an unknown condition
 kind, or a step count over 100 is refused with "the macro in the file is malformed", not
 repaired. Imported steps are checked like any others when they run.
+
+## What goes through the engine today, and what does not
+
+Stated plainly, because "one path" is a claim that should be checkable.
+
+| Change | Path |
+| --- | --- |
+| Macros, workflow and planner **layer steps**, plugin filters, plugin commands | The transaction engine, at commit time |
+| Merge down, flatten | The transaction engine (`core.layer.merge_down`, `core.document.flatten`) |
+| Show/hide, lock, collapse, select, opacity, blend mode, rename, move, new group, duplicate, delete, group, ungroup, reset transform, new adjustment layer | The interface's own tree functions, so a drag of the opacity slider is instant, **pinned to the engine** by 25 shared parity vectors over these 15 operations (`tests/fixtures/operations_parity.json`, run against both implementations), and checked by the same document validator the engine uses on save and load. Each has a registered operation that does the same thing, which is what a macro runs |
+| New pixel layer | The backend registers the buffer (`create_layer_pixels`) and the interface inserts the layer. `core.layer.add_pixel` does both inside the engine. **Not covered by a parity vector** |
+| Text, shape and smart-object editing, RAW development, transforms, painting a mask | The interface and their own commands. **No registered operation exists for them**, so a macro cannot contain them and the recorder says so |
+| The single-image edit stack (sliders on a photo that is not a layered document) | The interface; unchanged by this phase |
+
+The middle row is the one that matters. It is two implementations of the same operations,
+agreed by test and not by construction. If they disagree on a case the vectors do not
+cover, a macro would do something different from the panel. Moving those actions onto the
+engine (one round trip per commit, with a local preview for gestures) is the way to make
+the claim true by construction; it was not done in this phase.
 
 ## Workflows, the planner and batch
 

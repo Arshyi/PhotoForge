@@ -165,3 +165,22 @@ The optional Ollama planner is a separate subsystem that suggests plans as
 text. It never receives image pixels and is not an inference provider. See
 [local-ai-privacy.md](local-ai-privacy.md) and
 [local-inference.md](local-inference.md).
+
+## Plugins, macros and memory settings (0.14.0)
+
+* **Plugins add no network access.** A plugin has no network capability to be granted,
+  PhotoForge never downloads, updates or checks for plugins, and there is no marketplace.
+  A plugin is a file the person chose, read from a local path that is refused if it is a
+  network share, device name or stream.
+* **A plugin sees the pixels it is run on**: the tile of a layer the person chose, with
+  the margin its filter declares, and its own parameters; not other layers, file names,
+  other plugins, the clock or the disk. It can return pixels, an error code and up to 32
+  short log lines, which are shown to the person.
+* **Nothing a plugin, macro or setting stores leaves the machine.** Macros live in the
+  interface's local storage and in files the person exports; plugin settings in
+  `%LOCALAPPDATA%\PhotoForge\plugins`; the memory budget in
+  `%LOCALAPPDATA%\PhotoForge\settings\resources.json`. None is image content.
+* **The memory page reads** installed and free memory, this process's own counters and the
+  free space of one volume, from the operating system, and sends them nowhere.
+* WebView2's own network behaviour is unchanged by any of this and is still disclosed in
+  [webview-network-boundary.md](webview-network-boundary.md); no zero-network claim is made.

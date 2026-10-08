@@ -262,3 +262,21 @@ The settings dialog makes the application shell inert while open, traps keyboard
 - Guided planners: implement `EditPlanner` and return the same validated `EditPlan`; the approval boundary remains unchanged.
 - Restoration engines: implement `RestorationEngine` while preserving typed operation validation and export safety.
 - Provider registration: extend the factory and truthful typed registry metadata, then add bounded initialization/unload/failure tests.
+
+## Extensibility and resources (0.14.0)
+
+Three structures were added beneath the existing editor, each with its own document:
+
+* **The operation registry and transaction engine** (`src-tauri/src/operations`) are the
+  only path by which a layer document changes: typed operation, validation, resource
+  admission, transaction (private copy, dry run, journal, rollback), document invariants,
+  one undo entry, renderer and cache. Plugins, macros, workflows and the planner are
+  clients of it. [automation.md](automation.md).
+* **The resource manager** (`src-tauri/src/resources`) derives one memory budget from the
+  machine, and every ceiling from the budget; the admission planner decides whether a source
+  opens whole, as a region, as a reduced copy, or not at all; per-format decoders
+  (`src-tauri/src/source`) state what they hold, and a test measures it.
+  [resource-management.md](resource-management.md), [oversized-images.md](oversized-images.md).
+* **The plugin runtime and store** (`src-tauri/src/plugins`, behind the `plugins` feature):
+  manifest, package reader, Wasmtime sandbox, store, and the render node that makes a plugin
+  filter an ordinary edit. [plugins.md](plugins.md).

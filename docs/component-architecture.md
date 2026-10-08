@@ -77,4 +77,4 @@ An explicit local measurement action samples registry lookup, real rule-planner 
 6. Make network, download, or model-loading behavior explicit and opt-in; Phase 5 authorizes only the documented loopback Ollama requests.
 7. Add unit, integration, UI, offline, resource, packaging, and failure tests before marking it installed.
 
-Do not expand the manifest scanner into an arbitrary code loader. A future executable plugin system requires a separate threat model, signature/trust policy, sandbox boundary, permission model, and explicit user approval.
+Do not expand the manifest scanner into an arbitrary code loader. It is still not one: it describes components that PhotoForge discovers and never runs. Executable plugins arrived in 0.14.0 as a separate system with its own format, threat model, sandbox boundary, permission model and install-time approval; see [plugins.md](plugins.md) and [plugin-security.md](plugin-security.md). That system is unsigned by design: PhotoForge does not verify who made a plugin and says so before installing one.

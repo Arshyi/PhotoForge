@@ -242,3 +242,33 @@ startup PhotoForge offers the newest readable snapshot. Recovered work remains
 unsaved until the user saves it, while saving a project, accepting a recovery,
 or explicitly discarding it removes the applicable recovery data. The user's
 project file is never overwritten by recovery and nothing is uploaded.
+
+## What 0.14.0 adds
+
+The container and `formatVersion` (2) are unchanged. Three things may now appear in the
+manifest, each only when used, so a project that uses none of them is written as before
+(with the new `applicationVersion`):
+
+* **`origin` on a pixel layer** — which file and which part of it the pixels are, when
+  they are a region or a reduced copy of a larger source: the file's path, size, kind,
+  dimensions and **SHA-256**, and either `{"view": "region", "rect": …}` or
+  `{"view": "reduced", "width": …, "height": …}`. It is provenance, not a dependency:
+  the pixels are in the project as for any layer, and a project whose source is missing
+  opens and edits exactly as one without. The stored path is inert text; it is checked
+  (absolute, local, no traversal, stream or device syntax) only when the person asks to
+  check or reopen it. A camera-RAW layer's `source` gains an optional `view` rectangle in
+  sensor coordinates.
+* **A `plugin_filter` edit** in an adjustment layer or a layer's edits — the plugin's id,
+  exact version, content hash, filter, declared locality and parameters. The plugin
+  itself is **not** stored in the project. Opening a project never runs a plugin and
+  never needs one: a plugin that is missing, turned off, damaged or a different version
+  leaves the reference in the project untouched, the layer is hidden in the preview and
+  marked, and anything that would write pixels out (export, merge, flatten, rasterize)
+  refuses and names the plugin. See [plugins.md](plugins.md).
+* Nothing else. Macros, plugin settings and the memory budget are **not** part of a
+  project; they are application settings.
+
+The manifest is parsed strictly, so a PhotoForge older than 0.14.0 refuses a project that
+uses any of the above with a parse error rather than ignoring the fields and showing a
+document that is not the one that was saved. That is by construction of the strict
+parser; it has not been tested against a 0.13.0 build.

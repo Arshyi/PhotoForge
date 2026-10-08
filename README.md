@@ -2,11 +2,33 @@
 
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through Phase 13 semantic layer
-editing and optional local inference. The target version is **0.13.0**. See
-[Phase 13 results](docs/phase-13-results.md) for current verification and
-release limits; Phase 10 remains the precision and colour baseline and Phase 11
-the tiled-render baseline.
+This repository contains the Phase 0 foundation through Phase 14: extensibility,
+resource management, oversized images, safe automation and a sandboxed plugin
+architecture. The target version is **0.14.0**. See
+[Phase 14 results](docs/phase-14-results.md) for current verification, measurements
+and release limits, and what is not claimed; Phase 10 remains the precision and colour
+baseline, Phase 11 the tiled-render baseline and Phase 13 the layer baseline.
+
+## Extensibility, resources and oversized images (Phase 14)
+
+* **One way a layer document changes.** The Layers panel, macros, workflows, the
+  guided-edit planner and plugin commands all send typed operations from one registry
+  to one transaction engine: validated, admitted against the memory budget, all or
+  nothing, one undo entry. Batch processing renders through the same evaluator and never
+  edits a layer tree. See [Automation](docs/automation.md).
+* **Macros, without scripting.** Record Layers-panel actions or build a macro from the
+  registry; steps may carry one condition; Check shows what would run; Run is one Undo.
+* **Plugins in a WebAssembly sandbox.** Filters (pixels to pixels), commands, panels
+  and tools, installed from a `.photoforge-plugin` file, with no authority until granted
+  and no filesystem, network, process or shell capability that could be granted. Not
+  signed, and the residual risks are listed. See [Plugins](docs/plugins.md) and
+  [Plugin security](docs/plugin-security.md).
+* **A memory budget that follows the machine** (Settings, Memory), replacing one
+  compile-time constant. Files too large to open whole are offered a **region at full
+  resolution** or a **reduced copy**, and the document remembers where it came from.
+  Out-of-core editing is not offered, and the dialog says why. See
+  [Resource management](docs/resource-management.md) and
+  [Oversized images](docs/oversized-images.md).
 
 ## Restoration (Phase 12)
 
@@ -138,7 +160,7 @@ PhotoForge does not support PSD, general GPU compositing, general TIFF import, C
 printer proofing or proprietary RAW formats. Earlier phase reports remain
 historical evidence; [Phase 13 results](docs/phase-13-results.md) records current
 verification, the packaged 0.13.0 artifacts and their checksums, and what is
-still not claimed.
+still not claimed; [Phase 14 results](docs/phase-14-results.md) does the same for 0.14.0.
 
 ## What works
 
@@ -281,14 +303,18 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 
 ## Honest scope
 
-PhotoForge 0.13.0 adds deterministic local layers, editable projects, bounded local
+PhotoForge 0.14.0 adds the operation registry and transaction engine, structured
+automation, a sandboxed WebAssembly plugin runtime, a machine-derived memory budget and
+bounded opening of oversized images (see above and [Phase 14
+results](docs/phase-14-results.md)). PhotoForge 0.13.0 added deterministic local layers, editable projects, bounded local
 recovery, layer-aware workflows, semantic text/vector layers, bounded smart
 objects, and project batch rendering while preserving the Phase 7.1 mask
 boundary. Rule Planner remains the default; optional Ollama remains
 a text-only local planning adapter and receives no image, mask, layer tree, or
 path. The Deterministic Engine remains the only component that changes pixels.
 PhotoForge does not install or download models, execute model-supplied code, call
-cloud providers, execute plugins, generate missing content, or reconstruct
+cloud providers, load native plugin libraries, run scripts, download or update plugins,
+generate missing content, or reconstruct
 factual detail that was never captured. RAW decoding, demosaicing, and
 source-backed RAW projects are implemented for the documented DNG subset.
 Phase 10 adds float compositing, RGB ICC input, sRGB/P3/Adobe RGB output and

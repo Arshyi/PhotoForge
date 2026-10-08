@@ -161,4 +161,21 @@ claimed; see [Phase 13 results](phase-13-results.md).
 - Explicit model downloads with source, size, memory disclosure, and user approval
 - Visible labels for any generated or reconstructed detail
 
-No OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, chatbot, Python runtime, model download, or executable plugin integration is implemented in the current deliverable. Perspective correction and batch processing are deterministic local Phase 6 features. Ollama remains a text-to-validated-plan adapter only; it receives no image, mask, or pixel/tool authority.
+As of Phase 6, no OpenAI/cloud planning, neural restoration, ONNX inference, Real-ESRGAN, OCR, chatbot, Python runtime, model download, or executable plugin integration was implemented; later phases changed some of that (see Phases 12 to 14), and none of the cloud, Python or model-download items. Perspective correction and batch processing are deterministic local Phase 6 features. Ollama remains a text-to-validated-plan adapter only; it receives no image, mask, or pixel/tool authority.
+
+## Phase 14 — Extensibility, resources and oversized images (0.14.0)
+
+- An operation registry (22 operations) and a transaction engine in Rust that every
+  layer-document change goes through; macros with conditions and a recorder; batch and
+  the planner on the same evaluator
+- A sandboxed WebAssembly plugin runtime (Wasmtime, no WASI, default authority none),
+  a `.photoforge-plugin` package read as hostile input, a plugin manager, filters that
+  tile with a declared and verified reach, commands, panels and tools, and documents
+  that open and report when a plugin is missing
+- A memory budget derived from the machine and settable by the person, admission
+  planning that offers a region or a reduced copy of an oversized source, region
+  decoding by format with its real costs stated, and documents that remember where a
+  region came from
+- Not implemented, and said so in the product: out-of-core editing, a plugin marketplace
+  or any plugin download, native plugin libraries, scripting, signing, generative fill,
+  cloud AI. See [phase-14-results.md](phase-14-results.md).
