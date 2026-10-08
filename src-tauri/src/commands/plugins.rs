@@ -21,6 +21,7 @@ use crate::plugins::Runtime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::Path;
 use tauri::State;
 
@@ -48,9 +49,20 @@ fn read_chosen_package(path: &str) -> Result<Vec<u8>, AppError> {
             "the package is not a file, or is larger than 48 MiB".into(),
         ));
     }
-    std::fs::read(Path::new(&checked)).map_err(|error| {
-        AppError::InvalidPluginManifest(format!("the package cannot be read: {error}"))
-    })
+    // Through a hard cap as well as the size check above, so a file that grows between
+    // the two is still not read past the limit.
+    let mut bytes = Vec::new();
+    std::fs::File::open(Path::new(&checked))
+        .and_then(|file| file.take(MAX_PACKAGE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| {
+            AppError::InvalidPluginManifest(format!("the package cannot be read: {error}"))
+        })?;
+    if bytes.len() as u64 > MAX_PACKAGE_BYTES {
+        return Err(AppError::InvalidPluginManifest(
+            "the package is not a file, or is larger than 48 MiB".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn now() -> String {

@@ -9,6 +9,7 @@
 use crate::error::AppError;
 use serde_json::Value;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The most a macro file may hold. A hundred steps of any registered operation are
@@ -52,7 +53,15 @@ pub fn read_macro_file(path: &Path) -> Result<String, AppError> {
             "it is not a regular file within the {MAX_MACRO_FILE_BYTES}-byte limit"
         )));
     }
-    let text = fs::read_to_string(path).map_err(|error| invalid(error.to_string()))?;
+    // Read through a hard cap as well as checking the size above: a file that grows
+    // between the check and the read is still not read past the limit.
+    let mut text = String::new();
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_MACRO_FILE_BYTES + 1)
+                .read_to_string(&mut text)
+        })
+        .map_err(|error| invalid(error.to_string()))?;
     check_macro_text(&text)?;
     Ok(text)
 }
