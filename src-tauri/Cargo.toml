@@ -8,7 +8,10 @@ rust-version = "1.96"
 
 [lib]
 name = "photoforge_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop links the library statically into the executable. `cdylib` and `staticlib`
+# are for Tauri mobile; on desktop they only produced a second, unused 19 MB
+# `photoforge_lib.dll` that the MSI then shipped beside the executable.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
