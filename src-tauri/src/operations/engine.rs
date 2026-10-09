@@ -47,8 +47,10 @@ use crate::commands::layers::{
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::layers::workflow::{resolve, LayerSelector};
-use crate::layers::{LayerContent, LayerDocument, LayerKind, LayerMask};
-use crate::mask::MaskSnapshot;
+use crate::layers::{
+    mask_geometry_layer, mask_space, BlendMode, LayerContent, LayerDocument, LayerKind, LayerMask,
+};
+use crate::mask::{MaskBitmap, MaskSnapshot};
 use image::{Rgba, RgbaImage};
 
 /// Runs a transaction with random identifiers and the system clock.
@@ -399,6 +401,13 @@ fn preflight(
                 ));
             }
         }
+        // An operation that names something outside the document is a person's to
+        // issue, whatever else is true of the request.
+        if spec.user_only && origin != Origin::User {
+            return Err(fail(
+                "only a person acting directly may do this, not a macro, plugin or planner.".into(),
+            ));
+        }
         if origin == Origin::Planner {
             if !spec.planner_safe {
                 return Err(fail(
@@ -442,6 +451,7 @@ fn preflight(
                 | OperationKind::Group
                 | OperationKind::MergeDown
                 | OperationKind::AddPluginAdjustment
+                | OperationKind::PlacePixels
                 | OperationKind::Flatten
         ) {
             created_before = true;
@@ -903,8 +913,154 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
             insert_layer(&mut tx.document, layer, None, top)?;
             tx.created(&id, &mut outcome);
         }
+        Operation::SetPassThrough(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                let LayerContent::Group { isolated, .. } = &mut layer.content else {
+                    return Err(AppError::InvalidOperation(format!(
+                        "pass-through applies to groups, and {} is not one",
+                        layer.name
+                    )));
+                };
+                *isolated = !p.pass_through;
+                // A pass-through group has no blend mode of its own, so choosing it
+                // also returns the mode to Normal; the document validator refuses
+                // the other combination.
+                if p.pass_through {
+                    layer.blend_mode = BlendMode::Normal;
+                }
+                Ok(())
+            })?;
+        }
+        Operation::MaskAdd(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let layer = tx
+                .document
+                .find(&id)
+                .ok_or_else(|| AppError::LayerNotFound(id.clone()))?;
+            let geometry = mask_geometry_layer(&tx.document, layer)?;
+            let (width, height) = mask_space(
+                &geometry,
+                tx.document.canvas_width,
+                tx.document.canvas_height,
+            );
+            crate::layers::validate_dimensions(width, height)?;
+            // Built in the dry run too: a later step may act on this mask, and the
+            // document validator checks its size against the layer's.
+            let bitmap = if p.filled {
+                MaskBitmap::full(width, height)?
+            } else {
+                MaskBitmap::empty(width, height)?
+            };
+            let snapshot = MaskSnapshot::encode(&bitmap);
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                layer.mask = Some(LayerMask {
+                    snapshot,
+                    enabled: true,
+                    inverted: false,
+                });
+                Ok(())
+            })?;
+        }
+        Operation::MaskSetEnabled(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                mask_of(layer)?.enabled = p.enabled;
+                Ok(())
+            })?;
+        }
+        Operation::MaskSetInverted(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                mask_of(layer)?.inverted = p.inverted;
+                Ok(())
+            })?;
+        }
+        Operation::MaskRemove(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                mask_of(layer)?;
+                layer.mask = None;
+                Ok(())
+            })?;
+        }
+        Operation::UpdateAdjustment(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            if !p.operation.supports_adjustment_layer() {
+                return Err(AppError::UnsupportedAdjustmentLayer(
+                    p.operation.kind().to_string(),
+                ));
+            }
+            p.operation.validate()?;
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                let LayerContent::Adjustment { operation } = &mut layer.content else {
+                    return Err(AppError::InvalidOperation(format!(
+                        "{} is not an adjustment layer",
+                        layer.name
+                    )));
+                };
+                *operation = p.operation.clone();
+                Ok(())
+            })?;
+        }
+        Operation::PlacePixels(p) => {
+            let name = name_or(&p.name, "Layer")?;
+            // The buffer must already be held by the session and be the size the
+            // caller says: a layer that pointed at nothing, or at something else,
+            // would fail later in the compositor instead of here.
+            let held = tx
+                .state
+                .layers
+                .lock()
+                .map_err(|_| store_unavailable())?
+                .full_typed(&p.pixel_id)?
+                .dimensions();
+            if held != (p.width, p.height) {
+                return Err(AppError::InvalidOperation(format!(
+                    "the buffer {} is {}x{} pixels, not {}x{}",
+                    p.pixel_id, held.0, held.1, p.width, p.height
+                )));
+            }
+            let id = tx.ids.next("l");
+            let mut layer = new_layer(
+                &id,
+                &name,
+                LayerContent::Pixel {
+                    pixel_id: p.pixel_id.clone(),
+                    width: p.width,
+                    height: p.height,
+                },
+                &tx.now(),
+            );
+            layer.raw = p.raw.clone();
+            layer.origin = p.origin.clone();
+            let top = tx.document.layers.len();
+            insert_layer(&mut tx.document, layer, None, top)?;
+            tx.created(&id, &mut outcome);
+        }
     }
     Ok(outcome)
+}
+
+/// A layer's mask, or the error that says it has none.
+fn mask_of(layer: &mut crate::layers::Layer) -> Result<&mut LayerMask, AppError> {
+    let name = layer.name.clone();
+    layer
+        .mask
+        .as_mut()
+        .ok_or_else(|| AppError::InvalidOperation(format!("{name} has no mask")))
 }
 
 /// The title of a filter, for naming a layer made from it.

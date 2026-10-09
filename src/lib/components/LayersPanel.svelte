@@ -32,7 +32,10 @@
   export let onselect: (id: string, additive: boolean) => void;
   export let ontoggle: (id: string, field: 'visible' | 'locked' | 'collapsed') => void;
   export let onrename: (id: string, name: string) => void;
+  /** Called on every step of the slider, so the change can be drawn as it is dragged. */
   export let onopacity: (id: string, value: number) => void;
+  /** Called when the slider is released, so the change can be made for good. */
+  export let onopacityend: ((id: string) => void) | undefined = undefined;
   export let onblend: (id: string, mode: BlendMode) => void;
   export let onreorder: (id: string, parentId: string | null, index: number) => void;
   export let oncreate: (kind: 'pixel' | 'group' | 'adjustment' | 'import') => void;
@@ -327,6 +330,7 @@
           disabled={disabled || locked}
           on:input={(event) =>
             onopacity(selected?.id ?? '', Number((event.currentTarget as HTMLInputElement).value) / 100)}
+          on:change={() => onopacityend?.(selected?.id ?? '')}
         />
         <output>{opacityPercent(selected)}%</output>
       </div>

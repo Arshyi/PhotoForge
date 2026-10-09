@@ -860,6 +860,343 @@ async fn a_locked_descendant_is_not_discarded_by_a_merge_into_its_group() {
     assert!(error.to_string().contains("child"), "{error}");
 }
 
+// ---- the operations the Layers panel needs ----------------------------------------
+//
+// Phase 15.0 routes the panel's own edits through the engine, so each of these is an
+// operation a person can now trigger from the panel and a macro can record.
+
+fn rotate() -> Value {
+    serde_json::to_value(EditOperation::Rotate { degrees: 15 }).unwrap()
+}
+
+/// A document with one group (`g`) holding one pixel layer (`a`), plus a layer `b`.
+fn grouped() -> (AppState, LayerDocument) {
+    let (state, mut document) = world(&["a", "b"]);
+    let a = document.layers.remove(0);
+    let group = new_layer(
+        "g",
+        "g",
+        LayerContent::Group {
+            children: vec![a],
+            isolated: true,
+        },
+        "t0",
+    );
+    document.layers.insert(0, group);
+    document.active_layer_id = Some("b".into());
+    (state, document)
+}
+
+#[tokio::test]
+async fn pass_through_is_set_and_returns_the_blend_mode_to_normal() {
+    let (state, mut document) = grouped();
+    document.layer_mut("g").unwrap().blend_mode = photoforge_lib::layers::BlendMode::Multiply;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("g"), "passThrough": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let group = result.document.find("g").unwrap();
+    assert!(matches!(
+        group.content,
+        LayerContent::Group {
+            isolated: false,
+            ..
+        }
+    ));
+    assert_eq!(group.blend_mode, photoforge_lib::layers::BlendMode::Normal);
+
+    // And back: isolating the group again does not invent a blend mode.
+    let back = run(
+        &state,
+        request(
+            &result.document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("g"), "passThrough": false}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        back.document.find("g").unwrap().content,
+        LayerContent::Group { isolated: true, .. }
+    ));
+}
+
+#[tokio::test]
+async fn pass_through_is_refused_for_a_layer_that_is_not_a_group() {
+    let (state, document) = world(&["a"]);
+    let error = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("a"), "passThrough": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("not one"), "{error}");
+}
+
+#[tokio::test]
+async fn a_mask_can_be_added_inverted_disabled_and_removed_in_one_transaction() {
+    let (state, document) = world(&["a"]);
+    // The later steps act on a mask the first step makes, so the dry run must make it too.
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![
+                call(
+                    "core.layer.mask_add",
+                    json!({"selector": id("a"), "filled": false}),
+                ),
+                call(
+                    "core.layer.mask_set_inverted",
+                    json!({"selector": id("a"), "inverted": true}),
+                ),
+                call(
+                    "core.layer.mask_set_enabled",
+                    json!({"selector": id("a"), "enabled": false}),
+                ),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    let mask = result.document.find("a").unwrap().mask.as_ref().unwrap();
+    assert!(mask.inverted);
+    assert!(!mask.enabled);
+    assert_eq!((mask.snapshot.width, mask.snapshot.height), (8, 8));
+
+    let removed = run(
+        &state,
+        request(
+            &result.document,
+            vec![call("core.layer.mask_remove", json!({"selector": id("a")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(removed.document.find("a").unwrap().mask.is_none());
+}
+
+#[tokio::test]
+async fn a_revealing_mask_and_a_hiding_mask_differ() {
+    let (state, document) = world(&["a"]);
+    let make = |filled: bool| {
+        request(
+            &document,
+            vec![call(
+                "core.layer.mask_add",
+                json!({"selector": id("a"), "filled": filled}),
+            )],
+        )
+    };
+    let reveal = run(&state, make(true)).await.unwrap();
+    let hide = run(&state, make(false)).await.unwrap();
+    let decode = |result: &TransactionResult| {
+        result
+            .document
+            .find("a")
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .decode()
+            .unwrap()
+    };
+    assert_ne!(decode(&reveal), decode(&hide));
+}
+
+#[tokio::test]
+async fn editing_a_mask_that_is_not_there_names_the_layer() {
+    let (state, document) = world(&["a"]);
+    for (op, params) in [
+        ("core.layer.mask_remove", json!({"selector": id("a")})),
+        (
+            "core.layer.mask_set_enabled",
+            json!({"selector": id("a"), "enabled": true}),
+        ),
+        (
+            "core.layer.mask_set_inverted",
+            json!({"selector": id("a"), "inverted": true}),
+        ),
+    ] {
+        let error = run(&state, request(&document, vec![call(op, params)]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("a has no mask"), "{op}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn an_automation_cannot_edit_the_mask_of_a_locked_layer_but_a_person_can() {
+    let (state, mut document) = world(&["a"]);
+    document.layer_mut("a").unwrap().locked = true;
+    let add = |origin: Origin| {
+        let mut req = request(
+            &document,
+            vec![call(
+                "core.layer.mask_add",
+                json!({"selector": id("a"), "filled": true}),
+            )],
+        );
+        req.origin = origin;
+        req
+    };
+    assert!(run(&state, add(Origin::Automation)).await.is_err());
+    // Matches what the Layers panel has always allowed: its lock stops automation.
+    assert!(run(&state, add(Origin::User)).await.is_ok());
+}
+
+#[tokio::test]
+async fn an_adjustment_layer_can_be_changed_but_nothing_else_can() {
+    let (state, document) = world(&["a"]);
+    let added = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.add_adjustment",
+                json!({"operation": contrast(), "name": "Punch"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let adjustment = added.last_created.clone().unwrap();
+
+    let changed = run(
+        &state,
+        request(
+            &added.document,
+            vec![call(
+                "core.layer.update_adjustment",
+                json!({"selector": id(&adjustment), "operation": brightness()}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    match &changed.document.find(&adjustment).unwrap().content {
+        LayerContent::Adjustment { operation } => {
+            assert_eq!(**operation, EditOperation::Contrast { amount: -0.1 });
+        }
+        other => panic!("expected an adjustment layer, got {other:?}"),
+    }
+
+    // A pixel layer is not an adjustment layer, and a geometry edit cannot be one.
+    for (selector, operation) in [(id("a"), brightness()), (id(&adjustment), rotate())] {
+        let error = run(
+            &state,
+            request(
+                &added.document,
+                vec![call(
+                    "core.layer.update_adjustment",
+                    json!({"selector": selector, "operation": operation}),
+                )],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn placing_pixels_shows_a_buffer_the_session_already_holds() {
+    let (state, document) = world(&["a"]);
+    let pixel_id = state
+        .layers
+        .lock()
+        .unwrap()
+        .register(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .unwrap();
+    let before = buffers(&state);
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.place_pixels",
+                json!({"pixelId": pixel_id, "width": 8, "height": 8, "name": "Placed"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let layer = result
+        .document
+        .find(result.last_created.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(layer.name, "Placed");
+    assert_eq!(layer.pixel_id(), Some(pixel_id.as_str()));
+    assert_eq!(
+        result.document.active_layer_id.as_deref(),
+        Some(layer.id.as_str())
+    );
+    // Placing registers nothing: the buffer was already there.
+    assert_eq!(buffers(&state), before);
+    assert!(result.created_pixel_ids.is_empty());
+}
+
+#[tokio::test]
+async fn placing_pixels_checks_the_buffer_exists_and_is_the_size_claimed() {
+    let (state, document) = world(&["a"]);
+    let held = document.find("a").unwrap().pixel_id().unwrap().to_string();
+    for params in [
+        json!({"pixelId": "px-nowhere", "width": 8, "height": 8}),
+        json!({"pixelId": held, "width": 9, "height": 8}),
+    ] {
+        let error = run(
+            &state,
+            request(&document, vec![call("core.layer.place_pixels", params)]),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn only_a_person_may_place_pixels() {
+    let (state, document) = world(&["a"]);
+    let pixel_id = document.find("a").unwrap().pixel_id().unwrap().to_string();
+    for origin in [Origin::Automation, Origin::Planner, Origin::Batch] {
+        let mut req = request(
+            &document,
+            vec![call(
+                "core.layer.place_pixels",
+                json!({"pixelId": pixel_id, "width": 8, "height": 8}),
+            )],
+        );
+        req.origin = origin;
+        let error = run(&state, req).await.unwrap_err();
+        assert!(
+            error.to_string().contains("only a person"),
+            "{origin:?}: {error}"
+        );
+    }
+}
+
 // ---- the registry the interface is tested against ---------------------------------
 
 /// The interface tests read this file to know which operation ids exist. If the

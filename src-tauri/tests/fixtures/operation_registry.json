@@ -18,6 +18,7 @@
     "plannerSafe": true,
     "summary": "Makes a layer the active one.",
     "title": "Select layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -47,6 +48,7 @@
     "plannerSafe": true,
     "summary": "Sets whether a layer is drawn.",
     "title": "Show or hide layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -76,6 +78,7 @@
     "plannerSafe": false,
     "summary": "Sets whether a layer is protected from automation.",
     "title": "Lock or unlock layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -107,6 +110,7 @@
     "plannerSafe": true,
     "summary": "Sets how opaque a layer is, from 0 to 1.",
     "title": "Set layer opacity",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -136,6 +140,7 @@
     "plannerSafe": true,
     "summary": "Sets how a layer combines with what is beneath it.",
     "title": "Set blend mode",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -166,6 +171,7 @@
     "plannerSafe": false,
     "summary": "Changes a layer's name.",
     "title": "Rename layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -195,6 +201,7 @@
     "plannerSafe": false,
     "summary": "Sets whether a group is shown collapsed in the Layers panel.",
     "title": "Collapse or expand group",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -234,6 +241,7 @@
     "plannerSafe": false,
     "summary": "Moves a layer to a position in a stack, optionally inside a group.",
     "title": "Move layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -255,6 +263,7 @@
     "plannerSafe": false,
     "summary": "Removes a layer and everything inside it.",
     "title": "Delete layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -276,6 +285,7 @@
     "plannerSafe": false,
     "summary": "Copies a layer and everything inside it, just above the original.",
     "title": "Duplicate layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -306,6 +316,7 @@
     "plannerSafe": false,
     "summary": "Wraps layers that share a parent in a new group.",
     "title": "Group layers",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -327,6 +338,7 @@
     "plannerSafe": false,
     "summary": "Replaces a group with the layers inside it.",
     "title": "Ungroup",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -348,6 +360,7 @@
     "plannerSafe": false,
     "summary": "Returns a layer's placement, scale and rotation to the identity.",
     "title": "Reset layer transform",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -370,6 +383,7 @@
     "plannerSafe": false,
     "summary": "Adds an empty group at the top of the stack.",
     "title": "New group",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -400,6 +414,7 @@
     "plannerSafe": true,
     "summary": "Adds a non-destructive adjustment at the top of the stack.",
     "title": "New adjustment layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -422,6 +437,7 @@
     "plannerSafe": false,
     "summary": "Adds an empty, transparent pixel layer the size of the canvas.",
     "title": "New pixel layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -451,6 +467,7 @@
     "plannerSafe": true,
     "summary": "Applies adjustments to a pixel layer's pixels, producing new pixels.",
     "title": "Apply edits to layer",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -472,6 +489,7 @@
     "plannerSafe": true,
     "summary": "Gives a layer a mask made from the current selection.",
     "title": "Mask from selection",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -493,6 +511,7 @@
     "plannerSafe": false,
     "summary": "Merges a pixel layer into the layer beneath it.",
     "title": "Merge down",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -505,6 +524,7 @@
     "plannerSafe": false,
     "summary": "Merges every layer into a single background layer.",
     "title": "Flatten document",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -552,6 +572,7 @@
     "plannerSafe": false,
     "summary": "Runs a plugin's filter on a pixel layer, producing new pixels.",
     "title": "Apply plugin filter",
+    "userOnly": false,
     "version": 1
   },
   {
@@ -600,6 +621,247 @@
     "plannerSafe": false,
     "summary": "Adds a non-destructive adjustment layer that runs a plugin's filter.",
     "title": "New plugin adjustment layer",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_pass_through",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "True for pass-through, false for an isolated group.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "passThrough",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a group's children see and change the layers beneath it. A pass-through group always uses the Normal blend mode.",
+    "title": "Set group pass-through",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.mask_add",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "True to reveal everything, false to hide everything.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "filled",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Gives a layer a mask that reveals everything or hides everything, replacing any mask it already has.",
+    "title": "Add layer mask",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.mask_set_enabled",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Whether the mask is applied.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "enabled",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a layer's mask is applied. The mask is kept either way.",
+    "title": "Enable or disable layer mask",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.mask_set_inverted",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "Whether the mask is inverted.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "inverted",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a layer's mask is applied inverted.",
+    "title": "Invert layer mask",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.mask_remove",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Removes a layer's mask without changing the layer's pixels.",
+    "title": "Delete layer mask",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "adjustment",
+    "effects": "none",
+    "id": "core.layer.update_adjustment",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "The adjustment the layer applies from now on.",
+        "kind": {
+          "kind": "editOperation"
+        },
+        "name": "operation",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Replaces the adjustment an adjustment layer applies.",
+    "title": "Change adjustment layer",
+    "userOnly": false,
+    "version": 1
+  },
+  {
+    "category": "pixels",
+    "effects": "none",
+    "id": "core.layer.place_pixels",
+    "lock": "ignored",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The session buffer to show.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 64
+        },
+        "name": "pixelId",
+        "required": true
+      },
+      {
+        "description": "The buffer's width in pixels.",
+        "kind": {
+          "kind": "integer",
+          "max": 131072,
+          "min": 1
+        },
+        "name": "width",
+        "required": true
+      },
+      {
+        "description": "The buffer's height in pixels.",
+        "kind": {
+          "kind": "integer",
+          "max": 131072,
+          "min": 1
+        },
+        "name": "height",
+        "required": true
+      },
+      {
+        "description": "The layer's name; \"Layer\" if absent.",
+        "kind": {
+          "kind": "text",
+          "maxChars": 120
+        },
+        "name": "name",
+        "required": false
+      },
+      {
+        "description": "The camera file the buffer was developed from, if it was.",
+        "kind": {
+          "kind": "json"
+        },
+        "name": "raw",
+        "required": false
+      },
+      {
+        "description": "The larger file the buffer is a region or reduced copy of, if it is.",
+        "kind": {
+          "kind": "json"
+        },
+        "name": "origin",
+        "required": false
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Adds a pixel layer that shows a buffer already held by the session, as when an image file is placed. Only a person acting directly may name a buffer.",
+    "title": "Place pixels as layer",
+    "userOnly": true,
     "version": 1
   }
 ]

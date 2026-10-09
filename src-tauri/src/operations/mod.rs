@@ -29,12 +29,12 @@
 //!
 //! It does not touch the screen. It does not hold the document: the document is a
 //! value passed in and a value passed out, which is what makes undo a pointer swap
-//! and a failed transaction a no-op. And it is not yet the only code that edits a
-//! document: the Layers panel still edits through the TypeScript tree functions
-//! for the rapid-fire cases (a dragged opacity slider, a rename), and the two are
-//! held to the same behaviour by the vectors in
-//! `src-tauri/tests/fixtures/operations_parity.json`. `docs/automation.md` lists
-//! which interface actions go through here.
+//! and a failed transaction a no-op. And it is still not the only code that edits a
+//! document: text, shape and smart-object editing, transforms, RAW development and
+//! the panel's mask-from-selection, apply-mask and rasterize have their own
+//! commands. The Layers panel's own structural and property edits, though, are made
+//! here — one transaction each, as origin `user` — and `docs/automation.md` lists
+//! exactly which interface actions go through and which do not.
 pub mod condition;
 pub mod engine;
 pub mod model;

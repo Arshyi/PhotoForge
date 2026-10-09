@@ -119,6 +119,10 @@ pub struct OperationSpec {
     /// are decisions, not suggestions.
     pub planner_safe: bool,
     pub needs_selection: bool,
+    /// Whether only a person acting directly may issue it. An operation that names
+    /// something outside the document (a buffer already in the session store) is not
+    /// something a macro, a plugin or a planner has any business saying.
+    pub user_only: bool,
     pub params: Vec<ParamSpec>,
 }
 
@@ -147,10 +151,17 @@ pub enum OperationKind {
     Flatten,
     ApplyPluginFilter,
     AddPluginAdjustment,
+    SetPassThrough,
+    MaskAdd,
+    MaskSetEnabled,
+    MaskSetInverted,
+    MaskRemove,
+    UpdateAdjustment,
+    PlacePixels,
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 22] = [
+    pub const ALL: [OperationKind; 29] = [
         Self::Select,
         Self::SetVisible,
         Self::SetLocked,
@@ -173,6 +184,13 @@ impl OperationKind {
         Self::Flatten,
         Self::ApplyPluginFilter,
         Self::AddPluginAdjustment,
+        Self::SetPassThrough,
+        Self::MaskAdd,
+        Self::MaskSetEnabled,
+        Self::MaskSetInverted,
+        Self::MaskRemove,
+        Self::UpdateAdjustment,
+        Self::PlacePixels,
     ];
 
     pub const fn id(self) -> &'static str {
@@ -199,6 +217,13 @@ impl OperationKind {
             Self::Flatten => "core.document.flatten",
             Self::ApplyPluginFilter => "core.plugin.apply_filter",
             Self::AddPluginAdjustment => "core.plugin.add_adjustment",
+            Self::SetPassThrough => "core.layer.set_pass_through",
+            Self::MaskAdd => "core.layer.mask_add",
+            Self::MaskSetEnabled => "core.layer.mask_set_enabled",
+            Self::MaskSetInverted => "core.layer.mask_set_inverted",
+            Self::MaskRemove => "core.layer.mask_remove",
+            Self::UpdateAdjustment => "core.layer.update_adjustment",
+            Self::PlacePixels => "core.layer.place_pixels",
         }
     }
 
@@ -231,6 +256,7 @@ impl OperationKind {
             lock,
             planner_safe,
             needs_selection: false,
+            user_only: false,
             params,
         };
         use Category::{Adjustment, Document, Layer, Pixels, Plugin};
@@ -584,6 +610,159 @@ impl OperationKind {
                     ),
                 ],
             ),
+            Self::SetPassThrough => base(
+                "Set group pass-through",
+                "Sets whether a group's children see and change the layers beneath it. \
+                 A pass-through group always uses the Normal blend mode.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "passThrough",
+                        ParamKind::Bool,
+                        true,
+                        "True for pass-through, false for an isolated group.",
+                    ),
+                ],
+            ),
+            Self::MaskAdd => base(
+                "Add layer mask",
+                "Gives a layer a mask that reveals everything or hides everything, \
+                 replacing any mask it already has.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "filled",
+                        ParamKind::Bool,
+                        true,
+                        "True to reveal everything, false to hide everything.",
+                    ),
+                ],
+            ),
+            Self::MaskSetEnabled => base(
+                "Enable or disable layer mask",
+                "Sets whether a layer's mask is applied. The mask is kept either way.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "enabled",
+                        ParamKind::Bool,
+                        true,
+                        "Whether the mask is applied.",
+                    ),
+                ],
+            ),
+            Self::MaskSetInverted => base(
+                "Invert layer mask",
+                "Sets whether a layer's mask is applied inverted.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "inverted",
+                        ParamKind::Bool,
+                        true,
+                        "Whether the mask is inverted.",
+                    ),
+                ],
+            ),
+            Self::MaskRemove => base(
+                "Delete layer mask",
+                "Removes a layer's mask without changing the layer's pixels.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![selector()],
+            ),
+            Self::UpdateAdjustment => base(
+                "Change adjustment layer",
+                "Replaces the adjustment an adjustment layer applies.",
+                Adjustment,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "operation",
+                        ParamKind::EditOperation,
+                        true,
+                        "The adjustment the layer applies from now on.",
+                    ),
+                ],
+            ),
+            Self::PlacePixels => OperationSpec {
+                user_only: true,
+                ..base(
+                    "Place pixels as layer",
+                    "Adds a pixel layer that shows a buffer already held by the session, \
+                     as when an image file is placed. Only a person acting directly may \
+                     name a buffer.",
+                    Pixels,
+                    NoEffect,
+                    Ignored,
+                    false,
+                    vec![
+                        param(
+                            "pixelId",
+                            ParamKind::Text { max_chars: 64 },
+                            true,
+                            "The session buffer to show.",
+                        ),
+                        param(
+                            "width",
+                            ParamKind::Integer {
+                                min: 1,
+                                max: i64::from(crate::resources::HARD_MAX_CANVAS_DIMENSION),
+                            },
+                            true,
+                            "The buffer's width in pixels.",
+                        ),
+                        param(
+                            "height",
+                            ParamKind::Integer {
+                                min: 1,
+                                max: i64::from(crate::resources::HARD_MAX_CANVAS_DIMENSION),
+                            },
+                            true,
+                            "The buffer's height in pixels.",
+                        ),
+                        param(
+                            "name",
+                            ParamKind::Text { max_chars: 120 },
+                            false,
+                            "The layer's name; \"Layer\" if absent.",
+                        ),
+                        param(
+                            "raw",
+                            ParamKind::Json,
+                            false,
+                            "The camera file the buffer was developed from, if it was.",
+                        ),
+                        param(
+                            "origin",
+                            ParamKind::Json,
+                            false,
+                            "The larger file the buffer is a region or reduced copy of, if it is.",
+                        ),
+                    ],
+                )
+            },
         }
     }
 }
@@ -688,6 +867,55 @@ pub struct ApplyEditParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PassThroughParams {
+    pub selector: LayerSelector,
+    pub pass_through: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaskAddParams {
+    pub selector: LayerSelector,
+    pub filled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaskEnabledParams {
+    pub selector: LayerSelector,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaskInvertedParams {
+    pub selector: LayerSelector,
+    pub inverted: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateAdjustmentParams {
+    pub selector: LayerSelector,
+    pub operation: Box<EditOperation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlacePixelsParams {
+    pub pixel_id: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub raw: Option<crate::raw::RawLayerSource>,
+    #[serde(default)]
+    pub origin: Option<Box<crate::source::SourceOrigin>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginFilterParams {
     pub selector: LayerSelector,
     pub plugin: String,
@@ -732,6 +960,13 @@ pub enum Operation {
     Flatten,
     ApplyPluginFilter(PluginFilterParams),
     AddPluginAdjustment(PluginAdjustmentParams),
+    SetPassThrough(PassThroughParams),
+    MaskAdd(MaskAddParams),
+    MaskSetEnabled(MaskEnabledParams),
+    MaskSetInverted(MaskInvertedParams),
+    MaskRemove(SelectorParams),
+    UpdateAdjustment(UpdateAdjustmentParams),
+    PlacePixels(Box<PlacePixelsParams>),
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(call: &OperationCall) -> Result<T, AppError> {
@@ -777,6 +1012,13 @@ impl Operation {
             }
             OperationKind::ApplyPluginFilter => Self::ApplyPluginFilter(parse(call)?),
             OperationKind::AddPluginAdjustment => Self::AddPluginAdjustment(parse(call)?),
+            OperationKind::SetPassThrough => Self::SetPassThrough(parse(call)?),
+            OperationKind::MaskAdd => Self::MaskAdd(parse(call)?),
+            OperationKind::MaskSetEnabled => Self::MaskSetEnabled(parse(call)?),
+            OperationKind::MaskSetInverted => Self::MaskSetInverted(parse(call)?),
+            OperationKind::MaskRemove => Self::MaskRemove(parse(call)?),
+            OperationKind::UpdateAdjustment => Self::UpdateAdjustment(parse(call)?),
+            OperationKind::PlacePixels => Self::PlacePixels(Box::new(parse(call)?)),
         })
     }
 
@@ -804,6 +1046,13 @@ impl Operation {
             Self::Flatten => OperationKind::Flatten,
             Self::ApplyPluginFilter(_) => OperationKind::ApplyPluginFilter,
             Self::AddPluginAdjustment(_) => OperationKind::AddPluginAdjustment,
+            Self::SetPassThrough(_) => OperationKind::SetPassThrough,
+            Self::MaskAdd(_) => OperationKind::MaskAdd,
+            Self::MaskSetEnabled(_) => OperationKind::MaskSetEnabled,
+            Self::MaskSetInverted(_) => OperationKind::MaskSetInverted,
+            Self::MaskRemove(_) => OperationKind::MaskRemove,
+            Self::UpdateAdjustment(_) => OperationKind::UpdateAdjustment,
+            Self::PlacePixels(_) => OperationKind::PlacePixels,
         }
     }
 
@@ -817,7 +1066,13 @@ impl Operation {
             | Self::Ungroup(p)
             | Self::ResetTransform(p)
             | Self::MaskFromSelection(p)
+            | Self::MaskRemove(p)
             | Self::MergeDown(p) => vec![&p.selector],
+            Self::SetPassThrough(p) => vec![&p.selector],
+            Self::MaskAdd(p) => vec![&p.selector],
+            Self::MaskSetEnabled(p) => vec![&p.selector],
+            Self::MaskSetInverted(p) => vec![&p.selector],
+            Self::UpdateAdjustment(p) => vec![&p.selector],
             Self::SetVisible(p) => vec![&p.selector],
             Self::SetLocked(p) => vec![&p.selector],
             Self::SetOpacity(p) => vec![&p.selector],
@@ -834,6 +1089,7 @@ impl Operation {
             | Self::AddAdjustment(_)
             | Self::AddPixel(_)
             | Self::AddPluginAdjustment(_)
+            | Self::PlacePixels(_)
             | Self::Flatten => Vec::new(),
         }
     }
@@ -869,7 +1125,7 @@ mod tests {
             assert_eq!(kind.spec().id, id);
             assert!(kind.spec().version >= 1);
         }
-        assert_eq!(OperationKind::ALL.len(), 22);
+        assert_eq!(OperationKind::ALL.len(), 29);
     }
 
     #[test]
@@ -979,7 +1235,7 @@ mod tests {
     fn specs_serialise_for_the_interface() {
         let specs = operation_specs();
         let json = serde_json::to_value(&specs).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 22);
+        assert_eq!(json.as_array().unwrap().len(), 29);
         let opacity = json
             .as_array()
             .unwrap()
