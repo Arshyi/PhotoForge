@@ -25,6 +25,7 @@ pub use image_processing::{fixtures, kernels as image_processing_kernels, metric
 pub mod infrastructure;
 pub mod layers;
 pub mod mask;
+pub mod metadata;
 mod network_policy;
 /// The operation registry and transaction engine: the one path by which a plugin, a
 /// macro, a workflow, a planner or a batch run edits a document.

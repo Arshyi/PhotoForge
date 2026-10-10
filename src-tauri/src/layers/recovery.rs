@@ -117,6 +117,33 @@ pub fn write_snapshot_typed(
     write_snapshot_bytes(bytes, project_path, document_name, saved_at, directory)
 }
 
+/// As [`write_snapshot_typed`], with the source's metadata kept in the snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn write_snapshot_typed_with_metadata(
+    document: &LayerDocument,
+    operations: &[EditOperation],
+    pixels: &[(String, crate::pixel::PixelBuffer)],
+    project_path: Option<&str>,
+    document_name: &str,
+    application_version: &str,
+    saved_at: &str,
+    directory: Option<&Path>,
+    metadata: Option<&crate::metadata::SourceMetadata>,
+) -> Result<RecoveryRecord, AppError> {
+    let mut bytes = encode_project_typed(
+        document,
+        operations,
+        pixels,
+        application_version,
+        saved_at,
+        saved_at,
+    )?;
+    if let Some(metadata) = metadata {
+        bytes = super::project::attach_source_metadata(bytes, metadata)?;
+    }
+    write_snapshot_bytes(bytes, project_path, document_name, saved_at, directory)
+}
+
 fn write_snapshot_bytes(
     bytes: Vec<u8>,
     project_path: Option<&str>,

@@ -36,17 +36,18 @@ pub use model::{
     LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS,
 };
 pub use project::{
-    decode_project, encode_project, encode_project_typed, load_project, save_project,
-    save_project_typed, LoadedProject, ProjectManifest, MAX_PROJECT_BYTES, PROJECT_EXTENSION,
-    PROJECT_FORMAT_VERSION,
+    attach_source_metadata, decode_project, encode_project, encode_project_typed, load_project,
+    save_project, save_project_typed, save_project_typed_with_metadata, LoadedProject,
+    ProjectManifest, MAX_PROJECT_BYTES, PROJECT_EXTENSION, PROJECT_FORMAT_VERSION,
 };
 pub use recovery::{
     discard_all as discard_recovery_snapshots, discard_managed_snapshot,
     discard_snapshot as discard_recovery_snapshot, list_snapshots as list_recovery_snapshots,
     read_managed_snapshot, read_snapshot as read_recovery_snapshot,
     write_snapshot as write_recovery_snapshot,
-    write_snapshot_typed as write_recovery_snapshot_typed, RecoveryRecord, MAX_RECOVERY_SNAPSHOTS,
-    RECOVERY_EXTENSION,
+    write_snapshot_typed as write_recovery_snapshot_typed,
+    write_snapshot_typed_with_metadata as write_recovery_snapshot_typed_with_metadata,
+    RecoveryRecord, MAX_RECOVERY_SNAPSHOTS, RECOVERY_EXTENSION,
 };
 pub use selection::{
     intersect_with_layer_bounds, layer_mask_to_selection, mask_geometry_layer, mask_space,

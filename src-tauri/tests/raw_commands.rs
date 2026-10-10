@@ -45,6 +45,7 @@ impl Harness {
                     original: original.clone(),
                     preview: original,
                     working: None,
+                    source_metadata: None,
                     metadata: photoforge_lib::domain::ImageMetadata {
                         filename: "test.png".into(),
                         width: 2,
@@ -60,6 +61,7 @@ impl Harness {
                         exif_available: false,
                         raw: None,
                         origin: None,
+                        source_metadata: None,
                     },
                 },
             });

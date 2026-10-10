@@ -4,7 +4,7 @@ use crate::domain::{
 };
 use crate::error::AppError;
 use crate::image_processing::high_precision::{check_cancel, pipeline_typed};
-use crate::infrastructure::{load_image, save_image_with_profile};
+use crate::infrastructure::{load_image, save_image_with_metadata};
 use crate::pixel::PixelBuffer;
 use std::collections::HashSet;
 use std::fs;
@@ -136,8 +136,9 @@ pub fn run_batch(
                 let result = (|| {
                     let _job = crate::resources::acquire_job(Some(&cancelled))?;
                     check_cancel(Some(&cancelled))?;
-                    let (source, source_path) = if is_project(path) {
-                        load_project_composite_typed(path)?
+                    let (source, source_path, source_metadata) = if is_project(path) {
+                        let (pixels, path) = load_project_composite_typed(path)?;
+                        (pixels, path, None)
                     } else if path
                         .extension()
                         .and_then(|s| s.to_str())
@@ -155,14 +156,14 @@ pub fn run_batch(
                             crate::raw::develop::RenderScale::Full,
                         )
                         .map_err(|e| AppError::RawInspection(e.to_string()))?;
-                        (developed.image.into(), path.clone())
+                        (developed.image.into(), path.clone(), None)
                     } else {
                         let loaded = load_image(path)?;
                         let pixels = match loaded.working {
                             Some(image) => PixelBuffer::LinearRgbaF32(image),
                             None => loaded.original.to_rgba8().into(),
                         };
-                        (pixels, loaded.path)
+                        (pixels, loaded.path, loaded.source_metadata)
                     };
                     check_cancel(Some(&cancelled))?;
                     // A plugin filter is a function of linear float pixels, and the legacy
@@ -180,6 +181,18 @@ pub fn run_batch(
                         source
                     };
                     let processed = pipeline_typed(source, &workflow.operations, Some(&cancelled))?;
+                    let (out_width, out_height) = processed.dimensions();
+                    let mut plan = crate::metadata::Plan::new(
+                        source_metadata.as_deref(),
+                        options.metadata_policy,
+                        crate::metadata::OutputFacts {
+                            width: out_width,
+                            height: out_height,
+                            wide_gamut_profile: options.color.is_some_and(|color| {
+                                color.color_space != crate::color_management::RgbColorSpace::Srgb
+                            }),
+                        },
+                    );
                     if options.color.is_some() || matches!(processed, PixelBuffer::LinearRgbaF32(_))
                     {
                         let color =
@@ -196,21 +209,23 @@ pub fn run_batch(
                                     },
                                     ..Default::default()
                                 });
-                        crate::infrastructure::save_color_image(
+                        crate::infrastructure::save_color_image_with_metadata(
                             processed.linear()?.as_ref(),
                             &source_path,
                             &target,
                             options.export_profile,
                             color,
                             Some(&cancelled),
+                            Some(&mut plan),
                         )?;
                     } else {
                         check_cancel(Some(&cancelled))?;
-                        save_image_with_profile(
+                        save_image_with_metadata(
                             &image::DynamicImage::ImageRgba8((*processed.encoded8()).clone()),
                             &source_path,
                             &target,
                             options.export_profile,
+                            Some(&mut plan),
                         )?;
                     }
                     Ok(())
@@ -506,6 +521,7 @@ mod tests {
             export_profile: ExportProfile::Lossless,
             color: None,
             dry_run: false,
+            metadata_policy: crate::metadata::MetadataPolicy::default(),
         }
     }
 

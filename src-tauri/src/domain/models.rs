@@ -653,6 +653,10 @@ pub struct ImageMetadata {
     /// the file's are in here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<crate::source::SourceOrigin>,
+    /// What the file carried in EXIF, XMP and IPTC, summarised. Absent when it carried none or
+    /// the document has no file of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_metadata: Option<crate::metadata::SourceSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -690,6 +694,10 @@ pub struct ExportResult {
     pub width: u32,
     pub height: u32,
     pub processing_time_ms: f64,
+    /// What the export did with the source's EXIF, XMP and IPTC. Absent for exports that never
+    /// had a source file's metadata to consider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::metadata::MetadataReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -141,7 +141,7 @@
   } from './lib/selections/workflowGuards';
   import { buildRefineApplyTransaction } from './lib/selections/refineApply';
   import { developRawLayer, isRawPath, metadataRows, verifyRawSource } from './lib/utils/raw';
-  import type { ColorExportOptions, OpenRawImageResult, RawDevelopmentParameters, RawLayerSource } from './lib/types/editor';
+  import type { ColorExportOptions, MetadataPolicy, OpenRawImageResult, RawDevelopmentParameters, RawLayerSource } from './lib/types/editor';
   import LayersPanel from './lib/components/LayersPanel.svelte';
   import TextPanel from './lib/components/TextPanel.svelte';
   import ShapePanel from './lib/components/ShapePanel.svelte';
@@ -226,6 +226,14 @@
     type PsdImportReport
   } from './lib/layers/psd';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
+  import {
+    describeSource,
+    loadMetadataPolicy,
+    metadataSentence,
+    METADATA_POLICIES,
+    policyHint,
+    saveMetadataPolicy
+  } from './lib/metadata';
   import { shareUnchanged } from './lib/layers/sharing';
   import {
     applyOperationsToLayer,
@@ -359,6 +367,8 @@
   let outputColorSpace: ColorExportOptions['colorSpace'] = 'srgb';
   let outputBitDepth: 8 | 16 = 16;
   let outputDither = false;
+  /** What an export does with the photograph's EXIF, XMP and IPTC. */
+  let metadataPolicy: MetadataPolicy = 'remove_private';
   let shortcuts: ShortcutBinding[] = [];
   let selectionState: SelectionState = createSelectionState();
   let selectionBusy = false;
@@ -497,6 +507,7 @@
     void checkForRecovery();
     startRecoveryTimer();
     exportProfile = (localStorage.getItem('photoforge.lastExportProfile') as ExportProfile | null) ?? 'lossless';
+    metadataPolicy = loadMetadataPolicy();
     let unlisten: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
     const persistBeforeClose = (event: BeforeUnloadEvent) => {
@@ -4064,11 +4075,11 @@
         // A Photoshop file holds the layers, not a flattened picture, so the profile and colour
         // choices above do not apply to it.
         if (!layerDocument) throw new Error('Photoshop export needs a layered document.');
-        const written = await exportPsdDocument(outputPath, layerDocument, exportOperations, null);
+        const written = await exportPsdDocument(outputPath, layerDocument, exportOperations, null, metadataPolicy);
         processingTime = written.processingTimeMs;
         const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
         psdReport = { report: written.report, fileName, mode: 'export' };
-        notify(exportSentence(fileName, written.report));
+        notify([exportSentence(fileName, written.report), metadataSentence(written.metadata)].filter(Boolean).join(' '));
         return;
       }
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
@@ -4076,14 +4087,15 @@
       // flattened just because a flattened image was written.
       const composite = layerDocument;
       const result = composite
-        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile, selectedColor)
+        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile, selectedColor, metadataPolicy)
         : await invoke<ExportResult>('export_with_profile', {
             outputPath,
             operations: exportOperations,
-            profile: selectedProfile
+            profile: selectedProfile,
+            metadataPolicy
           });
       processingTime = result.processingTimeMs;
-      notify(`Exported ${result.width} × ${result.height} image`);
+      notify([`Exported ${result.width} × ${result.height} image.`, metadataSentence(result.metadata)].filter(Boolean).join(' '));
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -4328,7 +4340,28 @@
           <label>Output color space <select aria-label="Output color space" bind:value={outputColorSpace}><option value="srgb">sRGB</option><option value="display_p3">Display P3</option><option value="adobe_rgb">Adobe RGB (1998)</option></select></label>
           <label>PNG bit depth <select aria-label="PNG bit depth" bind:value={outputBitDepth}><option value={16}>16-bit</option><option value={8}>8-bit</option></select></label>
           <label><input type="checkbox" bind:checked={outputDither} /> Deterministic dither for 8-bit output (16-bit unaffected)</label>
-          <p>ICC profile embedded. JPEG and WebP are 8-bit. Camera EXIF/GPS is not exported.</p>
+          <p>ICC profile embedded. JPEG and WebP are 8-bit.</p>
+        </details>
+        <details class="raw-card">
+          <summary>Metadata</summary>
+          {#each describeSource(metadata.sourceMetadata) as line}
+            <p>{line}</p>
+          {:else}
+            <p>The source file carried no EXIF, XMP or IPTC.</p>
+          {/each}
+          <label>On export
+            <select
+              aria-label="Metadata on export"
+              bind:value={metadataPolicy}
+              on:change={() => saveMetadataPolicy(metadataPolicy)}
+            >
+              {#each METADATA_POLICIES as policy}
+                <option value={policy.value}>{policy.label}</option>
+              {/each}
+            </select>
+          </label>
+          <p>{policyHint(metadataPolicy)}</p>
+          <p>Photoshop files keep all three; PNG and WebP have no place for IPTC.</p>
         </details>
         {#if layerDocument && activeLayerOf(layerDocument)?.raw}
           <RawSourcePanel source={activeLayerOf(layerDocument)!.raw!} disabled={fileMutationBusy} onapply={redevelopSelectedRaw} />

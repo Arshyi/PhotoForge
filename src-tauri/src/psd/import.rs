@@ -365,6 +365,16 @@ impl<'a> Importer<'a> {
         }
         document.validate()?;
 
+        // The photograph's own EXIF, XMP and IPTC. The pixels of a Photoshop file are upright
+        // whatever an orientation tag in its EXIF says, so that tag is treated as spent.
+        let resources = &self.document.resources;
+        let mut source_metadata = crate::metadata::SourceMetadata::from_blocks(
+            resources.exif.clone(),
+            resources.xmp.clone(),
+            resources.iptc.clone(),
+        );
+        source_metadata.orientation_applied = true;
+        let source_metadata = (!source_metadata.is_empty()).then_some(source_metadata);
         let now = self.clock.now();
         let project = LoadedProject {
             document,
@@ -374,6 +384,7 @@ impl<'a> Importer<'a> {
             application_version: env!("CARGO_PKG_VERSION").into(),
             created_at: now.clone(),
             modified_at: now,
+            source_metadata,
         };
         Ok(Imported {
             project,

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { EditOperation } from '../types/editor';
+import type { EditOperation, MetadataPolicy, MetadataReport } from '../types/editor';
 import type { LayerDocument, ProjectLoadResult } from './types';
 
 /**
@@ -49,6 +49,8 @@ export interface PsdExportResult {
   /** Where the file went: a document too large for a PSD is written as a PSB. */
   outputPath: string;
   report: PsdExportReport;
+  /** What the file does with the photograph's EXIF, XMP and IPTC. */
+  metadata?: MetadataReport;
   processingTimeMs: number;
 }
 
@@ -69,9 +71,16 @@ export function exportPsdDocument(
   outputPath: string,
   document: LayerDocument,
   operations: EditOperation[],
-  bitDepth: number | null = null
+  bitDepth: number | null = null,
+  metadataPolicy?: MetadataPolicy
 ): Promise<PsdExportResult> {
-  return invoke<PsdExportResult>('export_psd_document', { outputPath, document, operations, bitDepth });
+  return invoke<PsdExportResult>('export_psd_document', {
+    outputPath,
+    document,
+    operations,
+    bitDepth,
+    ...(metadataPolicy ? { metadataPolicy } : {})
+  });
 }
 
 /** The counts the toast and the report heading use, for either direction. */

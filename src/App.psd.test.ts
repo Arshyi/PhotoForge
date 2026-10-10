@@ -310,8 +310,54 @@ describe('writing a Photoshop document', () => {
 
   it('still writes flattened images through the image path', async () => {
     await openAndClose();
-    await exportTo(String.raw`C:\worklat.png`);
+    await exportTo(String.raw`C:\work\flat.png`);
     await waitFor(() => expect(calls('export_layer_composite')).toHaveLength(1));
     expect(calls('export_psd_document')).toHaveLength(0);
+  });
+
+  it('sends the metadata policy with both kinds of export, private by default', async () => {
+    await openAndClose();
+    await exportTo(String.raw`C:\work\out.psd`);
+    await screen.findByRole('dialog', { name: /out\.psd/ });
+    const [, psd] = calls('export_psd_document')[0] as [string, Record<string, any>];
+    expect(psd.metadataPolicy).toBe('remove_private');
+    await exportTo(String.raw`C:\work\flat.png`);
+    await waitFor(() => expect(calls('export_layer_composite')).toHaveLength(1));
+    const [, flat] = calls('export_layer_composite')[0] as [string, Record<string, any>];
+    expect(flat.metadataPolicy).toBe('remove_private');
+  });
+
+  it('remembers a chosen policy and sends it', async () => {
+    await openAndClose();
+    const select = screen.getByLabelText('Metadata on export') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'keep_all' } });
+    expect(localStorage.getItem('photoforge.metadataPolicy')).toBe('keep_all');
+    await exportTo(String.raw`C:\work\flat.png`);
+    await waitFor(() => expect(calls('export_layer_composite')).toHaveLength(1));
+    const [, flat] = calls('export_layer_composite')[0] as [string, Record<string, any>];
+    expect(flat.metadataPolicy).toBe('keep_all');
+  });
+
+  it('says in the notice what an export removed', async () => {
+    exportResult = () => ({
+      outputPath: String.raw`C:\work\out.psd`,
+      processingTimeMs: 12,
+      report: {
+        format: 'PSD', width: 16, height: 12, bitDepth: 8, colorMode: 'RGB',
+        layersWritten: 2, groupsWritten: 0, bytes: 2048, entries: []
+      },
+      metadata: {
+        policy: 'remove_private',
+        notes: [
+          { kind: 'kept', detail: 'EXIF, Acme Cam-One' },
+          { kind: 'removed', detail: 'the place the picture was taken (GPS)' },
+          { kind: 'removed', detail: 'the camera owner name and serial numbers' },
+          { kind: 'removed', detail: 'the small embedded preview' }
+        ]
+      }
+    });
+    await openAndClose();
+    await exportTo(String.raw`C:\work\out.psd`);
+    expect(await screen.findByText(/Metadata removed: the place the picture was taken \(GPS\); the camera owner name and serial numbers and 1 more\./)).toBeTruthy();
   });
 });

@@ -76,6 +76,9 @@ pub struct ExportOptions {
     pub operations: Vec<EditOperation>,
     /// Writes a PSB whatever the size. For tests of the format, mostly.
     pub force_large_format: bool,
+    /// The photograph's EXIF, XMP and IPTC as the policy left them, written as the file's
+    /// image resources (1058, 1060, 1028).
+    pub metadata: Option<crate::metadata::Prepared>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -1466,6 +1469,23 @@ pub fn export_psd(
         resources.extend_from_slice(&icc);
         if icc.len() % 2 == 1 {
             resources.push(0);
+        }
+    }
+    if let Some(metadata) = &options.metadata {
+        for (id, block) in [
+            (1058_u16, &metadata.exif),
+            (1060, &metadata.xmp),
+            (1028, &metadata.iptc),
+        ] {
+            let Some(block) = block else { continue };
+            resources.extend_from_slice(b"8BIM");
+            put_u16(&mut resources, id);
+            resources.extend_from_slice(&[0, 0]);
+            put_u32(&mut resources, block.len() as u32);
+            resources.extend_from_slice(block);
+            if block.len() % 2 == 1 {
+                resources.push(0);
+            }
         }
     }
     put_u32(&mut out, resources.len() as u32);

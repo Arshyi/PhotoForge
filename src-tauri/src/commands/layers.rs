@@ -3,9 +3,7 @@ use crate::domain::{EditOperation, ExportProfile, ExportResult, ImageMetadata, P
 use crate::error::AppError;
 use crate::image_processing::high_precision::pipeline_typed;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
-use crate::infrastructure::{
-    encode_preview, load_image, save_color_image_streaming, save_image_with_profile, LoadedImage,
-};
+use crate::infrastructure::{encode_preview, load_image, LoadedImage};
 use crate::layers::{
     layer_mask_to_selection, preview_dimensions, selection_to_layer_mask, BlendMode, Layer,
     LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
@@ -236,6 +234,7 @@ pub async fn export_layer_composite(
     operations: Vec<EditOperation>,
     profile: ExportProfile,
     color: Option<crate::color_management::ColorExportOptions>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     document.validate()?;
@@ -249,23 +248,22 @@ pub async fn export_layer_composite(
     crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
     let _permit = state.export_gate.lock().await;
 
-    let original_path = {
+    let (original_path, source_metadata) = {
         let session = state
             .session
             .lock()
             .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
-        session
-            .as_ref()
-            .ok_or(AppError::NoImageOpen)?
-            .source
-            .path
-            .clone()
+        let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
+        (source.path.clone(), source.source_metadata.clone())
     };
+    let policy = metadata_policy.unwrap_or_default();
+    let wide_gamut_profile = color
+        .is_some_and(|options| options.color_space != crate::color_management::RgbColorSpace::Srgb);
     let (resolved, _) = resolve_pixels(&state, &document, false)?;
     let output_path = PathBuf::from(output_path);
 
     let started = Instant::now();
-    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+    let (saved_path, width, height, report) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         // Protect both RAW inputs and explicit smart links, including content
         // nested inside a source stack. An export must never replace a file
@@ -298,7 +296,16 @@ pub async fn export_layer_composite(
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
         if streams_directly {
-            let saved = save_color_image_streaming(
+            let mut plan = crate::metadata::Plan::new(
+                source_metadata.as_deref(),
+                policy,
+                crate::metadata::OutputFacts {
+                    width: document.canvas_width,
+                    height: document.canvas_height,
+                    wide_gamut_profile,
+                },
+            );
+            let saved = crate::infrastructure::save_color_image_streaming_with_metadata(
                 document.canvas_width,
                 document.canvas_height,
                 &original_path,
@@ -309,6 +316,7 @@ pub async fn export_layer_composite(
                     ..Default::default()
                 }),
                 None,
+                Some(&mut plan),
                 |emit| {
                     render_document_streaming(
                         &document,
@@ -321,7 +329,12 @@ pub async fn export_layer_composite(
                     .map(|_| ())
                 },
             )?;
-            return Ok((saved, document.canvas_width, document.canvas_height));
+            return Ok((
+                saved,
+                document.canvas_width,
+                document.canvas_height,
+                plan.report,
+            ));
         }
 
         let rendered = render_document_typed(&document, &resolved, RenderOptions::default())?;
@@ -335,39 +348,53 @@ pub async fn export_layer_composite(
         }
         let processed = pipeline_typed(rendered, &operations, None)?;
         let (width, height) = processed.dimensions();
+        let mut plan = crate::metadata::Plan::new(
+            source_metadata.as_deref(),
+            policy,
+            crate::metadata::OutputFacts {
+                width,
+                height,
+                wide_gamut_profile,
+            },
+        );
         let saved = match processed {
-            PixelBuffer::LinearRgbaF32(image) => crate::infrastructure::save_color_image(
-                &image,
-                &original_path,
-                &output_path,
-                profile,
-                color.unwrap_or(crate::color_management::ColorExportOptions {
-                    bit_depth: 8,
-                    ..Default::default()
-                }),
-                None,
-            )?,
+            PixelBuffer::LinearRgbaF32(image) => {
+                crate::infrastructure::save_color_image_with_metadata(
+                    &image,
+                    &original_path,
+                    &output_path,
+                    profile,
+                    color.unwrap_or(crate::color_management::ColorExportOptions {
+                        bit_depth: 8,
+                        ..Default::default()
+                    }),
+                    None,
+                    Some(&mut plan),
+                )?
+            }
             PixelBuffer::EncodedSrgba8(image) => {
                 if let Some(color) = color {
-                    crate::infrastructure::save_color_image(
+                    crate::infrastructure::save_color_image_with_metadata(
                         &crate::color::FloatImage::from_rgba8(&image)?,
                         &original_path,
                         &output_path,
                         profile,
                         color,
                         None,
+                        Some(&mut plan),
                     )?
                 } else {
-                    save_image_with_profile(
+                    crate::infrastructure::save_image_with_metadata(
                         &DynamicImage::ImageRgba8(image.as_ref().clone()),
                         &original_path,
                         &output_path,
                         profile,
+                        Some(&mut plan),
                     )?
                 }
             }
         };
-        Ok::<_, AppError>((saved, width, height))
+        Ok::<_, AppError>((saved, width, height, plan.report))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("layer export worker stopped".into()))??;
@@ -377,6 +404,7 @@ pub async fn export_layer_composite(
         width,
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        metadata: Some(report),
     })
 }
 
@@ -973,6 +1001,7 @@ pub async fn save_layer_project(
     document.validate()?;
     let _permit = state.export_gate.lock().await;
     let path = PathBuf::from(output_path);
+    let source_metadata = session_source_metadata(&state);
 
     let buffers = {
         let store = state
@@ -990,7 +1019,7 @@ pub async fn save_layer_project(
     let started = Instant::now();
     let (saved_path, bytes) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        let bytes = crate::layers::save_project_typed(
+        let bytes = crate::layers::save_project_typed_with_metadata(
             &path,
             &document,
             &operations,
@@ -998,6 +1027,7 @@ pub async fn save_layer_project(
             env!("CARGO_PKG_VERSION"),
             &created_at,
             &modified_at,
+            source_metadata.as_deref(),
         )?;
         Ok::<_, AppError>((path, bytes))
     })
@@ -1016,6 +1046,18 @@ struct PreparedProject {
     store: LayerPixelStore,
     source: LoadedImage,
     result: ProjectLoadResult,
+}
+
+/// What the open document's source file carried, if the session has one.
+fn session_source_metadata(state: &AppState) -> Option<Arc<crate::metadata::SourceMetadata>> {
+    state
+        .session
+        .lock()
+        .ok()?
+        .as_ref()?
+        .source
+        .source_metadata
+        .clone()
 }
 
 fn prepare_project(
@@ -1055,6 +1097,7 @@ fn prepare_project(
         Arc::new(original.thumbnail(preview_width, preview_height))
     };
     let original_preview_data_url = encode_preview(&preview)?;
+    let source_metadata = loaded.source_metadata.clone().map(Arc::new);
     let operations = prepare_preview_operations(
         &renderable_operations,
         (width, height),
@@ -1087,10 +1130,18 @@ fn prepare_project(
         has_alpha: true,
         created_at: Some(loaded.created_at.clone()).filter(|value| !value.is_empty()),
         modified_at: Some(loaded.modified_at.clone()).filter(|value| !value.is_empty()),
-        camera_model: None,
-        exif_available: false,
+        camera_model: source_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.summary().model),
+        exif_available: source_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.exif.is_some()),
         raw: None,
         origin: None,
+        source_metadata: source_metadata
+            .as_ref()
+            .filter(|metadata| !metadata.is_empty())
+            .map(|metadata| metadata.summary()),
     };
     let plugin_requirements = {
         let mut needed = crate::plugins::document::requirements(&loaded.document);
@@ -1106,6 +1157,7 @@ fn prepare_project(
             preview,
             metadata: metadata.clone(),
             working,
+            source_metadata,
         },
         store,
         result: ProjectLoadResult {
@@ -1191,6 +1243,7 @@ pub async fn create_blank_layer_document(
             application_version: env!("CARGO_PKG_VERSION").into(),
             created_at: String::new(),
             modified_at: String::new(),
+            source_metadata: None,
         };
         // An empty path denotes an unsaved source, not a real input file.
         let mut prepared = prepare_project(loaded, PathBuf::new(), request_id)?;
@@ -1263,6 +1316,8 @@ pub struct PsdExportResult {
     /// PSD is written as a PSB, with that extension.
     pub output_path: String,
     pub report: crate::psd::ExportReport,
+    /// What the file does with the photograph's EXIF, XMP and IPTC.
+    pub metadata: crate::metadata::MetadataReport,
     pub processing_time_ms: f64,
 }
 
@@ -1276,6 +1331,7 @@ pub async fn export_psd_document(
     document: LayerDocument,
     operations: Vec<EditOperation>,
     bit_depth: Option<u16>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<PsdExportResult, AppError> {
     document.validate()?;
@@ -1287,6 +1343,16 @@ pub async fn export_psd_document(
     crate::plugins::document::ensure_available(&plugins, &document)?;
     crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
     let _permit = state.export_gate.lock().await;
+    let mut plan = crate::metadata::Plan::new(
+        session_source_metadata(&state).as_deref(),
+        metadata_policy.unwrap_or_default(),
+        crate::metadata::OutputFacts {
+            width: document.canvas_width,
+            height: document.canvas_height,
+            wide_gamut_profile: false,
+        },
+    );
+    let prepared_metadata = plan.prepared.clone();
 
     let mut destination = PathBuf::from(output_path);
     let extension = destination
@@ -1325,6 +1391,7 @@ pub async fn export_psd_document(
             bit_depth,
             operations,
             force_large_format,
+            metadata: Some(prepared_metadata),
         };
         let mut report = crate::psd::export_psd(&document, &resolved, &destination, &options)?;
         // A file that needed the large format is a PSB whatever it was called, unless that
@@ -1359,9 +1426,12 @@ pub async fn export_psd_document(
     .await
     .map_err(|_| AppError::ProcessingFailure("Photoshop export worker stopped".into()))??;
 
+    // A Photoshop file holds all three blocks, so nothing is left unplaced.
+    let metadata = std::mem::take(&mut plan.report);
     Ok(PsdExportResult {
         output_path: written.to_string_lossy().into_owned(),
         report,
+        metadata,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
     })
 }
@@ -1398,9 +1468,10 @@ pub async fn write_recovery_snapshot(
         buffers
     };
 
+    let source_metadata = session_source_metadata(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        crate::layers::write_recovery_snapshot_typed(
+        crate::layers::write_recovery_snapshot_typed_with_metadata(
             &document,
             &operations,
             &buffers,
@@ -1409,6 +1480,7 @@ pub async fn write_recovery_snapshot(
             env!("CARGO_PKG_VERSION"),
             &saved_at,
             None,
+            source_metadata.as_deref(),
         )
     })
     .await
@@ -1550,6 +1622,7 @@ mod project_session_tests {
             application_version: "test".into(),
             created_at: String::new(),
             modified_at: String::new(),
+            source_metadata: None,
         }
     }
 

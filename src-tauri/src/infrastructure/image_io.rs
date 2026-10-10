@@ -37,6 +37,10 @@ pub struct LoadedImage {
     /// Present for high-bit-depth or ICC sources. The byte preview is never
     /// substituted for these authoritative samples in a linear document.
     pub working: Option<Arc<crate::color::FloatImage>>,
+    /// What the source file carried (EXIF, XMP, IPTC), kept with the document so that an export
+    /// can write it back under the policy the person chose. `None` for a document that never
+    /// had a file of its own (a blank canvas, a RAW development).
+    pub source_metadata: Option<Arc<crate::metadata::SourceMetadata>>,
 }
 
 pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
@@ -78,8 +82,27 @@ pub fn load_image(path: &Path) -> Result<LoadedImage, AppError> {
         return Err(AppError::OutOfMemoryRisk);
     }
     let icc = decoder.icc_profile().map_err(map_image_error)?;
-    let decoded = DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
-    assemble_loaded(canonical_path, &file_metadata, format, decoded, icc, None)
+    let mut source_metadata = crate::metadata::scan::read(&canonical_path);
+    let mut decoded = DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    // Phone and camera files are stored in the sensor's orientation with a tag saying how to turn
+    // them; every other viewer applies it, so the document does too, and the tag is then spent.
+    if let Some(metadata) = source_metadata.as_mut() {
+        if let Some(turn) = image::metadata::Orientation::from_exif(metadata.source_orientation)
+            .filter(|turn| *turn != image::metadata::Orientation::NoTransforms)
+        {
+            decoded.apply_orientation(turn);
+            metadata.orientation_applied = true;
+        }
+    }
+    assemble_loaded(
+        canonical_path,
+        &file_metadata,
+        format,
+        decoded,
+        icc,
+        None,
+        source_metadata,
+    )
 }
 
 /// Everything after the pixels are decoded: colour management, the preview and
@@ -96,6 +119,7 @@ pub(crate) fn assemble_loaded(
     decoded: DynamicImage,
     icc: Option<Vec<u8>>,
     origin: Option<crate::source::SourceOrigin>,
+    source_metadata: Option<crate::metadata::SourceMetadata>,
 ) -> Result<LoadedImage, AppError> {
     let (width, height) = decoded.dimensions();
     let color = decoded.color();
@@ -126,6 +150,7 @@ pub(crate) fn assemble_loaded(
         (color.bits_per_pixel() / u16::from(color.channel_count())).min(255) as u8,
         color.has_alpha(),
         origin,
+        source_metadata.as_ref(),
     );
     Ok(LoadedImage {
         path: canonical_path,
@@ -133,6 +158,7 @@ pub(crate) fn assemble_loaded(
         preview: Arc::new(preview),
         metadata,
         working,
+        source_metadata: source_metadata.map(Arc::new),
     })
 }
 
@@ -154,6 +180,7 @@ pub(crate) fn assemble_reduced(
     reduced: crate::color::FloatImage,
     traits: SourceTraits,
     origin: crate::source::SourceOrigin,
+    source_metadata: Option<crate::metadata::SourceMetadata>,
 ) -> Result<LoadedImage, AppError> {
     let (width, height) = reduced.dimensions();
     let (pw, ph) = crate::layers::preview_dimensions(width, height);
@@ -170,6 +197,7 @@ pub(crate) fn assemble_reduced(
         traits.bit_depth,
         traits.has_alpha,
         Some(origin),
+        source_metadata.as_ref(),
     );
     Ok(LoadedImage {
         path: canonical_path,
@@ -177,6 +205,7 @@ pub(crate) fn assemble_reduced(
         preview: Arc::new(preview),
         metadata,
         working: Some(Arc::new(reduced)),
+        source_metadata: source_metadata.map(Arc::new),
     })
 }
 
@@ -190,6 +219,7 @@ fn metadata_for(
     bit_depth: u8,
     has_alpha: bool,
     origin: Option<crate::source::SourceOrigin>,
+    source_metadata: Option<&crate::metadata::SourceMetadata>,
 ) -> ImageMetadata {
     let filename = canonical_path
         .file_name()
@@ -216,6 +246,9 @@ fn metadata_for(
         camera_model,
         raw: None,
         origin,
+        source_metadata: source_metadata
+            .filter(|metadata| !metadata.is_empty())
+            .map(|metadata| metadata.summary()),
     }
 }
 
@@ -244,11 +277,24 @@ pub fn save_image_with_profile(
     output_path: &Path,
     profile: ExportProfile,
 ) -> Result<PathBuf, AppError> {
+    save_image_with_metadata(image, original_path, output_path, profile, None)
+}
+
+/// As [`save_image_with_profile`], writing the metadata of `plan` into the file and recording in
+/// its report what the file had no place for.
+pub fn save_image_with_metadata(
+    image: &DynamicImage,
+    original_path: &Path,
+    output_path: &Path,
+    profile: ExportProfile,
+    plan: Option<&mut crate::metadata::Plan>,
+) -> Result<PathBuf, AppError> {
     let safe_path = validate_output_path(original_path, output_path)?;
     let format = output_format(&safe_path)?;
-    let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
-    let writer = BufWriter::new(file);
     let (width, height) = image.dimensions();
+    // Encoded in memory so that the metadata can be inserted; the file is made only once, whole.
+    let mut encoded = Vec::new();
+    let writer = &mut encoded;
 
     match format {
         ImageFormat::Png => {
@@ -276,7 +322,29 @@ pub fn save_image_with_profile(
         }
         _ => return Err(AppError::InvalidOutputPath),
     }
+    if let Some(plan) = plan {
+        encoded = embed_metadata(format, encoded, plan)?;
+    }
+    let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
+    let mut writer = BufWriter::new(file);
+    std::io::Write::write_all(&mut writer, &encoded).map_err(map_export_io_error)?;
+    std::io::Write::flush(&mut writer).map_err(map_export_io_error)?;
     Ok(safe_path)
+}
+
+/// Inserts a plan's metadata into a finished file of `format`.
+pub(crate) fn embed_metadata(
+    format: ImageFormat,
+    encoded: Vec<u8>,
+    plan: &mut crate::metadata::Plan,
+) -> Result<Vec<u8>, AppError> {
+    let kind = match format {
+        ImageFormat::Jpeg => crate::metadata::container::Format::Jpeg,
+        ImageFormat::Png => crate::metadata::container::Format::Png,
+        ImageFormat::WebP => crate::metadata::container::Format::WebP,
+        _ => return Ok(encoded),
+    };
+    crate::metadata::embed_into(kind, encoded, &plan.prepared, &mut plan.report)
 }
 
 /// Writes a high-precision development result as a true 16-bit RGBA PNG.
@@ -287,13 +355,22 @@ pub fn save_float_png16(
     original_path: &Path,
     output_path: &Path,
 ) -> Result<PathBuf, AppError> {
+    save_float_png16_with_metadata(image, original_path, output_path, None)
+}
+
+/// As [`save_float_png16`], with the metadata of `plan`.
+pub fn save_float_png16_with_metadata(
+    image: &crate::color::FloatImage,
+    original_path: &Path,
+    output_path: &Path,
+    plan: Option<&mut crate::metadata::Plan>,
+) -> Result<PathBuf, AppError> {
     let safe_path = validate_output_path(original_path, output_path)?;
     if output_format(&safe_path)? != ImageFormat::Png {
         return Err(AppError::InvalidOutputPath);
     }
-    let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
-    let writer = BufWriter::new(file);
-    PngEncoder::new(writer)
+    let mut encoded = Vec::new();
+    PngEncoder::new(&mut encoded)
         .write_image(
             &image.to_rgba16_native_bytes(),
             image.width(),
@@ -301,6 +378,13 @@ pub fn save_float_png16(
             ExtendedColorType::Rgba16,
         )
         .map_err(map_export_error)?;
+    if let Some(plan) = plan {
+        encoded = embed_metadata(ImageFormat::Png, encoded, plan)?;
+    }
+    let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
+    let mut writer = BufWriter::new(file);
+    std::io::Write::write_all(&mut writer, &encoded).map_err(map_export_io_error)?;
+    std::io::Write::flush(&mut writer).map_err(map_export_io_error)?;
     Ok(safe_path)
 }
 

@@ -950,6 +950,7 @@ mod tests {
                 original: image.clone(),
                 preview: image,
                 working: None,
+                source_metadata: None,
                 metadata: ImageMetadata {
                     filename: "test.png".into(),
                     width: dimensions.0,
@@ -965,6 +966,7 @@ mod tests {
                     exif_available: false,
                     raw: None,
                     origin: None,
+                    source_metadata: None,
                 },
             },
             document_id,

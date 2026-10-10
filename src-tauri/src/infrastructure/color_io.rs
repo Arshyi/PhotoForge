@@ -50,6 +50,26 @@ fn persist_export(
     Ok(path.to_path_buf())
 }
 
+/// The metadata of a plan, as the PNG encoder's own fields: an `eXIf` chunk and an `iTXt` XMP
+/// packet. IPTC has no chunk of its own in PNG, which the report says.
+fn png_metadata(info: &mut png::Info<'_>, plan: &mut crate::metadata::Plan) {
+    let mut placed = crate::metadata::container::Placed::default();
+    if let Some(exif) = &plan.prepared.exif {
+        info.exif_metadata = Some(std::borrow::Cow::Owned(exif.clone()));
+        placed.exif = true;
+    }
+    if let Some(xmp) = &plan.prepared.xmp {
+        if let Ok(text) = String::from_utf8(xmp.clone()) {
+            info.utf8_text.push(png::text_metadata::ITXtChunk::new(
+                "XML:com.adobe.xmp",
+                text,
+            ));
+            placed.xmp = true;
+        }
+    }
+    crate::metadata::report_unplaced(&mut plan.report, &plan.prepared, placed);
+}
+
 pub fn save_color_image(
     image: &FloatImage,
     original: &Path,
@@ -57,6 +77,20 @@ pub fn save_color_image(
     profile: ExportProfile,
     options: ColorExportOptions,
     cancel: Option<&AtomicBool>,
+) -> Result<PathBuf, AppError> {
+    save_color_image_with_metadata(image, original, output, profile, options, cancel, None)
+}
+
+/// As [`save_color_image`], writing the metadata of `plan` and completing its report.
+#[allow(clippy::too_many_arguments)]
+pub fn save_color_image_with_metadata(
+    image: &FloatImage,
+    original: &Path,
+    output: &Path,
+    profile: ExportProfile,
+    options: ColorExportOptions,
+    cancel: Option<&AtomicBool>,
+    mut plan: Option<&mut crate::metadata::Plan>,
 ) -> Result<PathBuf, AppError> {
     options.validate()?;
     image.validate()?;
@@ -83,6 +117,9 @@ pub fn save_color_image(
                 png::BitDepth::Eight
             };
             info.icc_profile = Some(std::borrow::Cow::Owned(icc));
+            if let Some(plan) = plan.as_deref_mut() {
+                png_metadata(&mut info, plan);
+            }
             let encoder =
                 png::Encoder::with_info(writer, info).map_err(|_| AppError::ExportFailure)?;
             let mut writer = encoder
@@ -130,8 +167,9 @@ pub fn save_color_image(
                     ExportProfile::Print | ExportProfile::HighJpeg => 95,
                     _ => 90,
                 };
+                let mut encoded = Vec::new();
                 let mut encoder =
-                    image::codecs::jpeg::JpegEncoder::new_with_quality(writer, quality);
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, quality);
                 encoder
                     .set_icc_profile(icc)
                     .map_err(|_| AppError::ExportFailure)?;
@@ -143,8 +181,17 @@ pub fn save_color_image(
                         ExtendedColorType::Rgb8,
                     )
                     .map_err(|_| AppError::ExportFailure)?;
+                if let Some(plan) = plan.as_deref_mut() {
+                    encoded = super::image_io::embed_metadata(format, encoded, plan)?;
+                }
+                let mut writer = writer;
+                writer
+                    .write_all(&encoded)
+                    .and_then(|_| writer.flush())
+                    .map_err(|_| AppError::ExportFailure)?;
             } else {
-                let mut encoder = image::codecs::webp::WebPEncoder::new_lossless(writer);
+                let mut encoded = Vec::new();
+                let mut encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut encoded);
                 encoder
                     .set_icc_profile(icc)
                     .map_err(|_| AppError::ExportFailure)?;
@@ -155,6 +202,14 @@ pub fn save_color_image(
                         image.height(),
                         ExtendedColorType::Rgba8,
                     )
+                    .map_err(|_| AppError::ExportFailure)?;
+                if let Some(plan) = plan {
+                    encoded = super::image_io::embed_metadata(format, encoded, plan)?;
+                }
+                let mut writer = writer;
+                writer
+                    .write_all(&encoded)
+                    .and_then(|_| writer.flush())
                     .map_err(|_| AppError::ExportFailure)?;
             }
         }
@@ -201,6 +256,26 @@ pub fn save_color_image_streaming(
         &mut dyn FnMut(u32, &FloatImage) -> Result<(), AppError>,
     ) -> Result<(), AppError>,
 ) -> Result<PathBuf, AppError> {
+    save_color_image_streaming_with_metadata(
+        width, height, original, output, profile, options, cancel, None, render,
+    )
+}
+
+/// As [`save_color_image_streaming`], writing the metadata of `plan`.
+#[allow(clippy::too_many_arguments)]
+pub fn save_color_image_streaming_with_metadata(
+    width: u32,
+    height: u32,
+    original: &Path,
+    output: &Path,
+    profile: ExportProfile,
+    options: ColorExportOptions,
+    cancel: Option<&AtomicBool>,
+    plan: Option<&mut crate::metadata::Plan>,
+    render: impl FnOnce(
+        &mut dyn FnMut(u32, &FloatImage) -> Result<(), AppError>,
+    ) -> Result<(), AppError>,
+) -> Result<PathBuf, AppError> {
     options.validate()?;
     let path = super::image_io::validate_output_path(original, output)?;
     let format = super::image_io::output_format(&path)?;
@@ -229,6 +304,9 @@ pub fn save_color_image_streaming(
             png::BitDepth::Eight
         };
         info.icc_profile = Some(std::borrow::Cow::Owned(icc));
+        if let Some(plan) = plan {
+            png_metadata(&mut info, plan);
+        }
         let encoder = png::Encoder::with_info(writer, info).map_err(|_| AppError::ExportFailure)?;
         let mut writer = encoder
             .write_header()

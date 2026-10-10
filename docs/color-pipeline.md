@@ -71,7 +71,9 @@ not exhaustively certified.
 Output selection supports sRGB, Display P3 and Adobe RGB. All three transform
 pixels **and embed the corresponding RGB ICC profile** in PNG/JPEG/WebP. PNG
 supports 8/16 bits; JPEG/WebP are 8-bit. JPEG flattens transparency against white
-in linear light. Export strips source EXIF/GPS and embeds only the chosen ICC.
+in linear light. Export embeds the chosen ICC, and writes the source's EXIF, XMP and IPTC
+under the metadata policy the person chose (by default without the place and
+serial numbers; see [metadata.md](metadata.md)).
 Ordered 4x4 Bayer dither affects RGB in 8-bit output only, not alpha, endpoints
 or 16-bit output. Generated profile header timestamps are fixed to the profile
 definition date (2026-09-04), not the export time. Same build/settings/input

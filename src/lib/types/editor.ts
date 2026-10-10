@@ -131,6 +131,40 @@ export interface ImageMetadata {
    * `width` and `height` above are then the document's; the file's are in here.
    */
   origin?: SourceOrigin | null;
+  /** What the file carried in EXIF, XMP and IPTC. Absent when it carried none. */
+  sourceMetadata?: SourceMetadataSummary | null;
+}
+
+/** What an export does with the source's EXIF, XMP and IPTC. */
+export type MetadataPolicy = 'keep_all' | 'remove_private' | 'remove_all';
+
+export interface SourceMetadataSummary {
+  hasExif: boolean;
+  hasXmp: boolean;
+  hasIptc: boolean;
+  make: string | null;
+  model: string | null;
+  lens: string | null;
+  taken: string | null;
+  hasLocation: boolean;
+  hasMakerNote: boolean;
+  hasIdentifiers: boolean;
+  hasThumbnail: boolean;
+  /** The EXIF orientation of the file, 1 to 8. */
+  orientation: number;
+  /** The pixels were turned upright when the file was opened. */
+  orientationApplied: boolean;
+}
+
+export interface MetadataNote {
+  kind: 'kept' | 'removed' | 'note';
+  detail: string;
+}
+
+/** What an export did with the metadata, as it says it. */
+export interface MetadataReport {
+  policy: MetadataPolicy;
+  notes: MetadataNote[];
 }
 
 export interface RawCaptureMetadata {
@@ -315,6 +349,8 @@ export interface ExportResult {
   width: number;
   height: number;
   processingTimeMs: number;
+  /** Present when the export considered a source file's metadata. */
+  metadata?: MetadataReport | null;
 }
 
 export interface ColorCastEstimate {
@@ -710,6 +746,8 @@ export interface BatchOptions {
   exportProfile: ExportProfile;
   color?: ColorExportOptions;
   dryRun: boolean;
+  /** What each output does with its source's EXIF, XMP and IPTC. Defaults to removing the private parts. */
+  metadataPolicy?: MetadataPolicy;
 }
 export type BatchState = 'idle' | 'discovering' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
 export interface BatchFailureRecord { inputPath: string; error: string }

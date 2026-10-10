@@ -92,6 +92,11 @@ pub struct ResourceBlock {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Resources {
     pub icc_profile: Option<Vec<u8>>,
+    /// The photograph's EXIF block (resource 1058), XMP packet (1060) and IPTC stream (1028),
+    /// when each is within the size this code carries.
+    pub exif: Option<Vec<u8>>,
+    pub xmp: Option<Vec<u8>>,
+    pub iptc: Option<Vec<u8>>,
     pub resolution: Option<Resolution>,
     /// Every block's id and size, so a report can say what was present and not carried over.
     pub blocks: Vec<ResourceBlock>,
@@ -400,6 +405,30 @@ fn read_resources<R: Read + Seek>(reader: &mut Reader<R>, end: u64) -> Result<Re
                     resources.icc_profile =
                         Some(reader.bytes(length, MAX_ICC_BYTES, end, "the ICC profile")?);
                 }
+            }
+            1058 if length <= crate::metadata::exif::MAX_EXIF_BYTES as u64 => {
+                resources.exif = Some(reader.bytes(
+                    length,
+                    crate::metadata::exif::MAX_EXIF_BYTES as u64,
+                    end,
+                    "the EXIF block",
+                )?);
+            }
+            1060 if length <= crate::metadata::xmp::MAX_XMP_BYTES as u64 => {
+                resources.xmp = Some(reader.bytes(
+                    length,
+                    crate::metadata::xmp::MAX_XMP_BYTES as u64,
+                    end,
+                    "the XMP packet",
+                )?);
+            }
+            1028 if length <= crate::metadata::iptc::MAX_IPTC_BYTES as u64 => {
+                resources.iptc = Some(reader.bytes(
+                    length,
+                    crate::metadata::iptc::MAX_IPTC_BYTES as u64,
+                    end,
+                    "the IPTC block",
+                )?);
             }
             1005 if length >= 16 => {
                 let horizontal = reader.u32(end, "the resolution")?;

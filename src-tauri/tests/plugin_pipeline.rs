@@ -967,6 +967,7 @@ fn batch_options(
         export_profile: photoforge_lib::domain::ExportProfile::Lossless,
         color: None,
         dry_run: false,
+        metadata_policy: photoforge_lib::metadata::MetadataPolicy::default(),
     }
 }
 

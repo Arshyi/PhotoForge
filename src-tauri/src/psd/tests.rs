@@ -1815,6 +1815,49 @@ mod exporter {
     }
 
     #[test]
+    fn a_photographs_metadata_is_written_as_image_resources_and_comes_back() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [1, 2, 3, 255]);
+        world.document.layers = vec![ground];
+        let exif = crate::metadata::exif::orientation_only(1);
+        let xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".to_vec();
+        // An odd length, which a resource block pads.
+        let iptc = vec![0x1C, 2, 25, 0, 1, b'a'];
+        let options = ExportOptions {
+            metadata: Some(crate::metadata::Prepared {
+                exif: Some(exif.clone()),
+                xmp: Some(xmp.clone()),
+                iptc: Some(iptc.clone()),
+            }),
+            ..ExportOptions::default()
+        };
+        let (_report, path, _dir) = world.export("meta.psd", &options);
+        let document = read_document(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(document.resources.exif.as_deref(), Some(&exif[..]));
+        assert_eq!(document.resources.xmp.as_deref(), Some(&xmp[..]));
+        assert_eq!(document.resources.iptc.as_deref(), Some(&iptc[..]));
+        // The sRGB profile is still there beside them.
+        assert!(document.resources.icc_profile.is_some());
+        // And the importer hands them to the document, with the orientation treated as spent.
+        let imported = import_psd(&path, BIG).unwrap();
+        let carried = imported.project.source_metadata.unwrap();
+        assert_eq!(carried.exif.as_deref().map(Vec::as_slice), Some(&exif[..]));
+        assert_eq!(carried.xmp.as_deref().map(Vec::as_slice), Some(&xmp[..]));
+        assert_eq!(carried.iptc.as_deref().map(Vec::as_slice), Some(&iptc[..]));
+        assert!(carried.orientation_applied);
+    }
+
+    #[test]
+    fn a_file_without_metadata_has_none() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [1, 2, 3, 255]);
+        world.document.layers = vec![ground];
+        let (_report, path, _dir) = world.export("none.psd", &ExportOptions::default());
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(imported.project.source_metadata.is_none());
+    }
+
+    #[test]
     fn a_layer_partly_off_the_canvas_keeps_its_rectangle() {
         let mut world = World::eight_bit(6, 6);
         let ground = world.solid("Ground", (0, 0, 6, 6), [5, 5, 5, 255]);

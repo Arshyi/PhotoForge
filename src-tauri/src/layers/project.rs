@@ -3,6 +3,7 @@ use crate::color::{FloatImage, FloatRgba};
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::mask::{MaskBitmap, MaskSnapshot};
+use crate::metadata::SourceMetadata;
 use crate::pixel::{DocumentPrecision, PixelBuffer, PixelFormat};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbaImage};
@@ -90,6 +91,135 @@ pub struct LoadedProject {
     pub application_version: String,
     pub created_at: String,
     pub modified_at: String,
+    /// The EXIF, XMP and IPTC of the photograph the document came from, when the project kept
+    /// them (the entries are optional, and older versions of the application ignore them).
+    pub source_metadata: Option<SourceMetadata>,
+}
+
+const ENTRY_EXIF: &str = "metadata/exif.bin";
+const ENTRY_XMP: &str = "metadata/xmp.xml";
+const ENTRY_IPTC: &str = "metadata/iptc.bin";
+const ENTRY_SOURCE: &str = "metadata/source.txt";
+
+/// Adds the source's metadata to encoded project bytes as entries of their own.
+///
+/// They are not in the manifest: a reader that does not know them skips them, so a project
+/// carrying them still opens in an older version, without the metadata. The container's
+/// entry count and its checksum are updated, nothing else is touched.
+pub fn attach_source_metadata(
+    bytes: Vec<u8>,
+    metadata: &SourceMetadata,
+) -> Result<Vec<u8>, AppError> {
+    let mut extra: Vec<(&str, Vec<u8>)> = Vec::new();
+    if let Some(exif) = &metadata.exif {
+        extra.push((ENTRY_EXIF, exif.as_ref().clone()));
+    }
+    if let Some(xmp) = &metadata.xmp {
+        extra.push((ENTRY_XMP, xmp.as_ref().clone()));
+    }
+    if let Some(iptc) = &metadata.iptc {
+        extra.push((ENTRY_IPTC, iptc.as_ref().clone()));
+    }
+    if extra.is_empty() {
+        return Ok(bytes);
+    }
+    extra.push((
+        ENTRY_SOURCE,
+        format!(
+            "orientation={}\napplied={}\n",
+            metadata.source_orientation,
+            u8::from(metadata.orientation_applied)
+        )
+        .into_bytes(),
+    ));
+    let malformed = || AppError::ProjectFormat("the project bytes are not a project".into());
+    if bytes.len() < PROJECT_MAGIC.len() + 4 + 8 + 4 + 8
+        || &bytes[..PROJECT_MAGIC.len()] != PROJECT_MAGIC
+    {
+        return Err(malformed());
+    }
+    let manifest_len = u64::from_le_bytes(
+        bytes[PROJECT_MAGIC.len() + 4..PROJECT_MAGIC.len() + 12]
+            .try_into()
+            .map_err(|_| malformed())?,
+    ) as usize;
+    let count_at = PROJECT_MAGIC
+        .len()
+        .checked_add(12)
+        .and_then(|value| value.checked_add(manifest_len))
+        .ok_or_else(malformed)?;
+    let body_end = bytes.len() - 8;
+    if count_at + 4 > body_end {
+        return Err(malformed());
+    }
+    let count = u32::from_le_bytes(
+        bytes[count_at..count_at + 4]
+            .try_into()
+            .map_err(|_| malformed())?,
+    ) as usize;
+    if count + extra.len() > MAX_PROJECT_ENTRIES {
+        return Err(AppError::ProjectFormat(
+            "a project may not hold this many entries".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(bytes.len() + 1024);
+    out.extend_from_slice(&bytes[..count_at]);
+    out.extend_from_slice(&((count + extra.len()) as u32).to_le_bytes());
+    out.extend_from_slice(&bytes[count_at + 4..body_end]);
+    for (name, payload) in &extra {
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.push(ENCODING_RAW);
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&fnv1a64(payload).to_le_bytes());
+        out.extend_from_slice(payload);
+    }
+    if out.len() as u64 + 8 > MAX_PROJECT_BYTES {
+        return Err(AppError::ProjectTooLarge {
+            bytes: out.len() as u64 + 8,
+            limit: MAX_PROJECT_BYTES,
+        });
+    }
+    let trailer = fnv1a64(&out);
+    out.extend_from_slice(&trailer.to_le_bytes());
+    Ok(out)
+}
+
+/// The source metadata a project's entries hold, if any. Entries that are not understood are
+/// ignored, like every entry the manifest does not name.
+fn read_source_metadata(entries: &[ReadEntry<'_>]) -> Option<SourceMetadata> {
+    let payload = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name && entry.encoding == ENCODING_RAW)
+            .map(|entry| entry.payload.to_vec())
+    };
+    let exif = payload(ENTRY_EXIF);
+    let xmp = payload(ENTRY_XMP);
+    let iptc = payload(ENTRY_IPTC);
+    if exif.is_none() && xmp.is_none() && iptc.is_none() {
+        return None;
+    }
+    let mut metadata = SourceMetadata::from_blocks(exif, xmp, iptc);
+    if let Some(text) = payload(ENTRY_SOURCE) {
+        let text = String::from_utf8_lossy(&text).to_string();
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("orientation", value)) => {
+                    if let Ok(value) = value.trim().parse::<u8>() {
+                        if (1..=8).contains(&value) {
+                            metadata.source_orientation = value;
+                        }
+                    }
+                }
+                Some(("applied", value)) => {
+                    metadata.orientation_applied = value.trim() == "1";
+                }
+                _ => {}
+            }
+        }
+    }
+    (!metadata.is_empty()).then_some(metadata)
 }
 
 struct Entry {
@@ -888,6 +1018,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
     }
     document.validate()?;
 
+    let source_metadata = read_source_metadata(&entries);
     Ok(LoadedProject {
         document,
         document_operations: manifest.document_operations,
@@ -896,6 +1027,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         application_version: manifest.application_version,
         created_at: manifest.created_at,
         modified_at: manifest.modified_at,
+        source_metadata,
     })
 }
 
@@ -939,6 +1071,32 @@ pub fn save_project_typed(
         created_at,
         modified_at,
     )?;
+    save_project_bytes(path, &bytes)
+}
+
+/// As [`save_project_typed`], with the source's metadata kept in the project.
+#[allow(clippy::too_many_arguments)]
+pub fn save_project_typed_with_metadata(
+    path: &Path,
+    document: &LayerDocument,
+    document_operations: &[EditOperation],
+    pixels: &[(String, PixelBuffer)],
+    application_version: &str,
+    created_at: &str,
+    modified_at: &str,
+    metadata: Option<&SourceMetadata>,
+) -> Result<u64, AppError> {
+    let mut bytes = encode_project_typed(
+        document,
+        document_operations,
+        pixels,
+        application_version,
+        created_at,
+        modified_at,
+    )?;
+    if let Some(metadata) = metadata {
+        bytes = attach_source_metadata(bytes, metadata)?;
+    }
     save_project_bytes(path, &bytes)
 }
 
@@ -1103,6 +1261,49 @@ mod tests {
             let original = pixels.iter().find(|(name, _)| name == id).unwrap();
             assert_eq!(restored.as_raw(), original.1.as_raw());
         }
+    }
+
+    #[test]
+    fn a_photographs_metadata_survives_a_project_and_a_damaged_entry_is_refused() {
+        let document = sample_document();
+        let pixels = sample_pixels();
+        let plain = encode_project(
+            &document,
+            &[],
+            &borrowed(&pixels),
+            "0.15.0",
+            "created",
+            "modified",
+        )
+        .unwrap();
+        // A project that never had metadata reads as one with none.
+        assert!(decode_project(&plain).unwrap().source_metadata.is_none());
+
+        let source = SourceMetadata {
+            exif: Some(std::sync::Arc::new(
+                crate::metadata::exif::orientation_only(6),
+            )),
+            xmp: Some(std::sync::Arc::new(b"<x:xmpmeta/>".to_vec())),
+            iptc: Some(std::sync::Arc::new(vec![0x1C, 2, 25, 0, 1, b'a'])),
+            source_orientation: 6,
+            orientation_applied: true,
+        };
+        let with = attach_source_metadata(plain.clone(), &source).unwrap();
+        let loaded = decode_project(&with).unwrap();
+        assert_eq!(loaded.source_metadata, Some(source.clone()));
+        // The rest of the project is exactly what it was.
+        assert_eq!(loaded.document, document);
+        assert_eq!(loaded.pixels.len(), 2);
+        // Attaching nothing changes nothing.
+        let nothing = attach_source_metadata(plain.clone(), &SourceMetadata::default()).unwrap();
+        assert_eq!(nothing, plain);
+        // The container's own integrity check covers the new entries.
+        let mut damaged = with.clone();
+        let at = damaged.len() - 20;
+        damaged[at] ^= 0x55;
+        assert!(decode_project(&damaged).is_err());
+        // Bytes that are not a project are refused rather than appended to.
+        assert!(attach_source_metadata(b"not a project".to_vec(), &source).is_err());
     }
 
     fn origin(view: crate::source::SourceView) -> Box<crate::source::SourceOrigin> {
