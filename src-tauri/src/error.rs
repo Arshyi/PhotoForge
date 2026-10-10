@@ -11,6 +11,8 @@ pub enum AppError {
     ImageTooLarge { pixels: u64, limit: u64 },
     #[error("PhotoForge could not decode this image.")]
     DecodeFailure,
+    #[error("{0}")]
+    PsdFile(String),
     #[error("PhotoForge could not process this edit pipeline: {0}")]
     ProcessingFailure(String),
     #[error("PhotoForge could not analyze this image. Try reopening it.")]
@@ -181,6 +183,7 @@ impl AppError {
             Self::CorruptImage => "corrupt_image",
             Self::ImageTooLarge { .. } => "image_too_large",
             Self::DecodeFailure => "decode_failure",
+            Self::PsdFile(_) => "psd_file",
             Self::ProcessingFailure(_) => "processing_failure",
             Self::AnalysisFailure => "analysis_failure",
             Self::AnalysisUnavailable => "analysis_unavailable",

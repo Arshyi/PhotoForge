@@ -33,6 +33,8 @@ pub mod pixel;
 /// Plugins: filters in a WebAssembly sandbox, declarative commands and panels, and the
 /// package format that carries them.
 pub mod plugins;
+/// Reading Photoshop (PSD / PSB) documents, bounded and structural.
+pub mod psd;
 pub mod raw;
 pub mod resources;
 /// Bounded reads of image sources, and the provenance of what was read.
@@ -138,14 +140,15 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
         merge_layer_pixels,
         save_layer_project,
         load_layer_project,
-        create_blank_layer_document
+        create_blank_layer_document,
+        import_psd_document
     ])
 }
 
 use commands::{
-    convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
-    inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
-    update_smart_source,
+    convert_layers_to_smart_object, create_blank_layer_document, import_psd_document,
+    import_smart_object, inspect_smart_links, relink_smart_source, resource_status,
+    set_memory_budget, update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,6 +184,7 @@ pub fn run() {
             remember_plugin_values,
             run_plugin_command,
             create_blank_layer_document,
+            import_psd_document,
             render_preview,
             analyze_image,
             get_component_snapshot,

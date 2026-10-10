@@ -1209,6 +1209,53 @@ pub async fn create_blank_layer_document(
     Ok(prepared.result)
 }
 
+/// A Photoshop document opened as a layered document, and what did not come across.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PsdImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::psd::ImportReport,
+}
+
+/// Opens a Photoshop document (PSD or PSB) as a new, unsaved layered document.
+///
+/// Like opening a project, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. The document comes back with a report of
+/// everything that was approximated or left out; nothing is dropped silently.
+#[tauri::command]
+pub async fn import_psd_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<PsdImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported =
+            crate::psd::import_psd(&checked, crate::psd::ImportLimits::from_resources())?;
+        let format = imported.report.format.clone();
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is a Photoshop file, not a project.
+        prepared.source.metadata.format = format.clone();
+        prepared.result.metadata.format = format;
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("Photoshop import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(PsdImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryListResult {
@@ -1342,6 +1389,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         save_layer_project,
         load_layer_project,
         create_blank_layer_document,
+        import_psd_document,
         write_recovery_snapshot,
         list_recovery_snapshots,
         restore_recovery_snapshot,

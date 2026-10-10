@@ -216,6 +216,8 @@
     validateDocument
   } from './lib/layers/tree';
   import * as panel from './lib/layers/panelOps';
+  import { importPsdDocument, importSentence, isPhotoshopPath, type PsdImportReport } from './lib/layers/psd';
+  import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import { shareUnchanged } from './lib/layers/sharing';
   import {
     applyOperationsToLayer,
@@ -396,6 +398,8 @@
    * (a quick second click is applied after the first, not refused); every other kind of change
    * waits until they have finished.
    */
+  /** The report of the Photoshop document just opened, while it is being read. */
+  let psdReport: { report: PsdImportReport; fileName: string } | null = null;
   let engineInFlight = 0;
   let engineChain: Promise<unknown> = Promise.resolve();
   /**
@@ -671,6 +675,7 @@
         title: 'Open a photo',
         filters: [
           { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
+          { name: 'Photoshop (PSD, PSB)', extensions: ['psd', 'psb'] },
           { name: 'Camera RAW (DNG)', extensions: ['dng'] }
         ]
       });
@@ -1096,6 +1101,12 @@
   }
 
   async function loadPath(path: string, selection?: OpenSelection) {
+    // A Photoshop document opens as a layered document, with a report of what did not
+    // survive; it has its own command and never goes through image admission.
+    if (isPhotoshopPath(path)) {
+      await importPhotoshop(path);
+      return;
+    }
     // Before anything about the open document is touched, so that choosing Cancel
     // in the dialog leaves it exactly as it was.
     if (!selection) {
@@ -2817,6 +2828,32 @@
       notify(errorMessage(error), 'error');
     } finally {
       layerBusy = false;
+    }
+  }
+
+  /**
+   * Opens a Photoshop document (PSD or PSB) as a new, unsaved layered document and shows
+   * what was approximated or left out. The file itself is never changed.
+   */
+  async function importPhotoshop(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importPsdDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the PSD.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName };
+      notify(importSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
     }
   }
 
@@ -4692,6 +4729,14 @@
     remembered={pluginRememberedValues}
     onrun={runPluginFilter}
     oncancel={() => (filterDialogOpen = false)}
+  />
+{/if}
+
+{#if psdReport}
+  <PsdImportReportDialog
+    report={psdReport.report}
+    fileName={psdReport.fileName}
+    onclose={() => (psdReport = null)}
   />
 {/if}
 
