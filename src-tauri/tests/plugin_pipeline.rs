@@ -116,6 +116,7 @@ fn layer(id: &str, content: LayerContent) -> Layer {
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

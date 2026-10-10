@@ -863,5 +863,35 @@
     "title": "Place pixels as layer",
     "userOnly": true,
     "version": 1
+  },
+  {
+    "category": "layer",
+    "effects": "none",
+    "id": "core.layer.set_clipped",
+    "lock": "automationOnly",
+    "needsSelection": false,
+    "params": [
+      {
+        "description": "The layer to act on: by identifier, name, or relative to the document.",
+        "kind": {
+          "kind": "selector"
+        },
+        "name": "selector",
+        "required": true
+      },
+      {
+        "description": "True to clip the layer to the one below, false to release it.",
+        "kind": {
+          "kind": "bool"
+        },
+        "name": "clipped",
+        "required": true
+      }
+    ],
+    "plannerSafe": false,
+    "summary": "Sets whether a layer paints only where the layer beneath it does. The layer beneath is the nearest unclipped one below it in the same stack; it and everything clipped to it are composited as one, with its blend mode and opacity.",
+    "title": "Clip layer to the one below",
+    "userOnly": false,
+    "version": 1
   }
 ]

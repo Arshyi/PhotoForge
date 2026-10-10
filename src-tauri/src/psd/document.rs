@@ -176,6 +176,13 @@ pub struct LayerRecord {
     /// The "fill opacity" (`iOpa`), which multiplies the layer's opacity for a layer with
     /// no effects.
     pub fill_opacity: Option<u8>,
+    /// "Blend clipped layers as group" (`clbl`), which Photoshop switches on unless the file
+    /// says otherwise. Off means the layers clipped to this one blend with what is beneath
+    /// the whole clipping group individually, not as one.
+    pub blend_clipped_as_group: bool,
+    /// The settings block of an adjustment layer this reader knows how to hand on (`curv`,
+    /// `levl`, `nvrt`), with its key. Larger blocks are not kept.
+    pub adjustment: Option<([u8; 4], Vec<u8>)>,
     /// Every additional-information key the layer carries, in file order.
     pub block_keys: Vec<[u8; 4]>,
 }
@@ -685,6 +692,8 @@ fn read_record<R: Read + Seek>(
         divider_blend_key: None,
         layer_id: None,
         fill_opacity: None,
+        blend_clipped_as_group: true,
+        adjustment: None,
         block_keys: Vec::new(),
     };
     read_layer_blocks(reader, big, extra_end, &mut record)?;
@@ -759,6 +768,20 @@ fn read_layer_blocks<R: Read + Seek>(
             }
             b"iOpa" if length >= 1 => {
                 record.fill_opacity = Some(reader.u8(data_end, "a fill opacity")?);
+            }
+            b"clbl" if length >= 1 => {
+                record.blend_clipped_as_group = reader.u8(data_end, "a clipping blend flag")? != 0;
+            }
+            b"curv" | b"levl" | b"nvrt" | b"expA"
+                if length <= super::adjustment::MAX_BLOCK_BYTES && record.adjustment.is_none() =>
+            {
+                let data = reader.bytes(
+                    length,
+                    super::adjustment::MAX_BLOCK_BYTES,
+                    data_end,
+                    "an adjustment layer's settings",
+                )?;
+                record.adjustment = Some((key, data));
             }
             _ => {}
         }

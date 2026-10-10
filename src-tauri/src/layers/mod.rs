@@ -6,6 +6,7 @@
 
 mod blend;
 pub mod cache;
+mod clip;
 mod composite;
 mod disk_cache;
 mod linear;
@@ -78,6 +79,7 @@ pub fn test_pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> La
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

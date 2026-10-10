@@ -4414,6 +4414,198 @@
     ]
   },
   {
+    "name": "clip a layer",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "g",
+          "name": "g",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "group",
+            "children": [
+              {
+                "id": "leaf",
+                "name": "leaf",
+                "visible": true,
+                "locked": false,
+                "opacity": 1,
+                "blendMode": "normal",
+                "transform": {
+                  "translateX": 0,
+                  "translateY": 0,
+                  "scaleX": 1,
+                  "scaleY": 1,
+                  "rotationDegrees": 0,
+                  "flipHorizontal": false,
+                  "flipVertical": false,
+                  "interpolation": "bilinear"
+                },
+                "mask": null,
+                "collapsed": false,
+                "metadata": {
+                  "createdAt": "2026-01-01T00:00:00.000Z",
+                  "modifiedAt": "2026-01-01T00:00:00.000Z",
+                  "custom": {}
+                },
+                "content": {
+                  "type": "pixel",
+                  "pixelId": "px-leaf",
+                  "width": 4,
+                  "height": 4
+                }
+              }
+            ],
+            "isolated": true
+          }
+        },
+        {
+          "id": "m",
+          "name": "m",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": {
+            "snapshot": {
+              "version": 1,
+              "width": 8,
+              "height": 8,
+              "encoding": "placeholder",
+              "data": "",
+              "checksum": ""
+            },
+            "enabled": true,
+            "inverted": false
+          },
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-m",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "adj",
+          "name": "adj",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "adjustment",
+            "operation": {
+              "type": "contrast",
+              "amount": 0.25
+            }
+          }
+        }
+      ],
+      "activeLayerId": "a"
+    },
+    "label": "Clip to layer below",
+    "steps": [
+      {
+        "op": "core.layer.set_clipped",
+        "params": {
+          "selector": {
+            "type": "id",
+            "id": "m"
+          },
+          "clipped": true
+        }
+      }
+    ]
+  },
+  {
     "name": "reveal mask",
     "document": {
       "schemaVersion": 1,

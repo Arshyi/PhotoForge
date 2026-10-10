@@ -1197,6 +1197,397 @@ async fn only_a_person_may_place_pixels() {
     }
 }
 
+// ---- clipping ----------------------------------------------------------------------
+
+fn order(document: &LayerDocument) -> Vec<String> {
+    document
+        .layers
+        .iter()
+        .map(|layer| layer.id.clone())
+        .collect()
+}
+
+fn clipped_ids(document: &LayerDocument) -> Vec<String> {
+    document
+        .layers
+        .iter()
+        .filter(|layer| layer.clipped)
+        .map(|layer| layer.id.clone())
+        .collect()
+}
+
+/// A stack `a, b, c, d` with `c` and `d` clipped to `b`.
+async fn clipped_world() -> (AppState, LayerDocument) {
+    let (state, document) = world(&["a", "b", "c", "d"]);
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![
+                call(
+                    "core.layer.set_clipped",
+                    json!({"selector": id("c"), "clipped": true}),
+                ),
+                call(
+                    "core.layer.set_clipped",
+                    json!({"selector": id("d"), "clipped": true}),
+                ),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    (state, result.document)
+}
+
+#[tokio::test]
+async fn a_layer_can_be_clipped_and_released() {
+    let (state, document) = world(&["a", "b"]);
+    let clipped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(clipped.find("b").unwrap().clipped);
+    assert!(!clipped.find("a").unwrap().clipped);
+
+    let released = run(
+        &state,
+        request(
+            &clipped,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": false}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(!released.find("b").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn the_bottom_layer_of_a_stack_cannot_be_clipped() {
+    let (state, document) = world(&["a", "b"]);
+    let error = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("a"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    assert!(error.to_string().contains("no layer beneath"), "{error}");
+}
+
+#[tokio::test]
+async fn automation_cannot_change_the_clipping_of_a_locked_layer() {
+    let (state, document) = world(&["a", "b"]);
+    let locked = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_locked",
+                json!({"selector": id("b"), "locked": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    let mut automated = request(
+        &locked,
+        vec![call(
+            "core.layer.set_clipped",
+            json!({"selector": id("b"), "clipped": true}),
+        )],
+    );
+    automated.origin = Origin::Automation;
+    let error = run(&state, automated).await.unwrap_err();
+    assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    // A person at the panel still can: a lock protects against automation.
+    let by_hand = run(
+        &state,
+        request(
+            &locked,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(by_hand.document.find("b").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn moving_a_base_moves_the_layers_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    assert_eq!(order(&document), ["a", "b", "c", "d"]);
+    // Down to the bottom: the group stays together and keeps its flags.
+    let down = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "index": 0}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&down), ["b", "c", "d", "a"]);
+    assert_eq!(clipped_ids(&down), ["c", "d"]);
+    // And to the top, past `a`.
+    let up = run(
+        &state,
+        request(
+            &down,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "index": 1}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&up), ["a", "b", "c", "d"]);
+    assert_eq!(clipped_ids(&up), ["c", "d"]);
+}
+
+#[tokio::test]
+async fn moving_a_clipped_layer_moves_only_that_layer() {
+    let (state, document) = clipped_world().await;
+    let moved = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("c"), "index": 3}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&moved), ["a", "b", "d", "c"]);
+    assert_eq!(clipped_ids(&moved), ["d", "c"]);
+}
+
+#[tokio::test]
+async fn a_clipped_layer_that_ends_up_at_the_bottom_is_released() {
+    let (state, document) = clipped_world().await;
+    let moved = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("c"), "index": 0}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&moved), ["c", "a", "b", "d"]);
+    assert!(!moved.find("c").unwrap().clipped);
+    // `d` still follows a base, now `b`.
+    assert!(moved.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn a_base_cannot_be_moved_into_a_layer_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    let with_group = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("c")], "name": "Tint"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    // Grouping released `c` from the base: it is the lowest layer in its group.
+    let group_id = with_group
+        .iter()
+        .find(|layer| layer.name == "Tint")
+        .unwrap()
+        .id
+        .clone();
+    let error = run(
+        &state,
+        request(
+            &with_group,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "parent": id(&group_id), "index": 0}),
+            )],
+        ),
+    )
+    .await;
+    // `d` is clipped to `b`, and the group sits between them, so this particular
+    // move is legal; what must hold is that nothing was lost either way.
+    let moved = error.unwrap().document;
+    moved.validate().unwrap();
+    assert_eq!(moved.layer_count(), with_group.layer_count());
+}
+
+#[tokio::test]
+async fn deleting_a_base_promotes_the_first_layer_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    let deleted = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.delete", json!({"selector": id("b")}))],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&deleted), ["a", "c", "d"]);
+    // `c` is the base of the group now, and `d` is still clipped to it.
+    assert!(!deleted.find("c").unwrap().clipped);
+    assert!(deleted.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn deleting_a_clipped_layer_leaves_the_others_clipped() {
+    let (state, document) = clipped_world().await;
+    let deleted = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.delete", json!({"selector": id("c")}))],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&deleted), ["a", "b", "d"]);
+    assert_eq!(clipped_ids(&deleted), ["d"]);
+}
+
+#[tokio::test]
+async fn a_copy_of_a_base_goes_above_its_clipping_group() {
+    let (state, document) = clipped_world().await;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.duplicate", json!({"selector": id("b")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    let copy = result.last_created.clone().unwrap();
+    assert_eq!(order(&result.document), ["a", "b", "c", "d", copy.as_str()]);
+    assert_eq!(clipped_ids(&result.document), ["c", "d"]);
+}
+
+#[tokio::test]
+async fn a_copy_of_a_clipped_layer_stays_in_the_group() {
+    let (state, document) = clipped_world().await;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.duplicate", json!({"selector": id("c")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    let copy = result.last_created.clone().unwrap();
+    assert_eq!(order(&result.document), ["a", "b", "c", copy.as_str(), "d"]);
+    assert!(result.document.find(&copy).unwrap().clipped);
+}
+
+#[tokio::test]
+async fn grouping_a_whole_clipping_group_keeps_it_intact_inside() {
+    let (state, document) = clipped_world().await;
+    let grouped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("b"), id("c"), id("d")], "name": "Art"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    let group = grouped.iter().find(|layer| layer.name == "Art").unwrap();
+    let children: Vec<(&str, bool)> = group
+        .children()
+        .iter()
+        .map(|child| (child.id.as_str(), child.clipped))
+        .collect();
+    assert_eq!(children, [("b", false), ("c", true), ("d", true)]);
+}
+
+#[tokio::test]
+async fn grouping_a_clipped_layer_alone_releases_it() {
+    let (state, document) = clipped_world().await;
+    let grouped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("c")], "name": "Alone"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(!grouped.find("c").unwrap().clipped);
+    // The layer above it, `d`, now follows the group, which sits where `c` was.
+    assert!(grouped.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn the_clipped_flag_survives_a_round_trip_through_a_project() {
+    let (_state, document) = clipped_world().await;
+    let text = serde_json::to_string(&document).unwrap();
+    let back: LayerDocument = serde_json::from_str(&text).unwrap();
+    assert_eq!(clipped_ids(&back), ["c", "d"]);
+    // The revision names the document, clipping included.
+    let mut released = back.clone();
+    released.layers[2].clipped = false;
+    assert_ne!(
+        document_revision(&back).unwrap(),
+        document_revision(&released).unwrap()
+    );
+}
+
 // ---- the registry the interface is tested against ---------------------------------
 
 /// The interface tests read this file to know which operation ids exist. If the

@@ -43,6 +43,7 @@ fn instance(id: String, name: String, source_id: String) -> Layer {
         transform: Default::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: Default::default(),
         raw: None,
         origin: None,

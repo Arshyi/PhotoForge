@@ -19,6 +19,7 @@
 //! header is read and the mode reported, so the import can refuse them with a reason). It
 //! does not read text, vector, smart-object or effect data: it records that a layer
 //! carries them.
+pub mod adjustment;
 pub mod blend;
 pub mod document;
 pub mod error;

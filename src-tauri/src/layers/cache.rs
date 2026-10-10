@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
 
+use super::clip::clip_groups;
 use super::composite::render_transform;
 use super::disk_cache::DiskTileCache;
 use super::tiles::Region;
@@ -380,12 +381,27 @@ impl DocumentFingerprint {
         base.update((document.precision as u8).to_le_bytes());
         let base = base.finalize().into();
 
+        let buffered = clip_bases(&document.layers);
         let layers = document
             .layers
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(index, layer)| {
+                let mut digest = digest_layer(layer, source)?;
+                if buffered[index] {
+                    // A base drawn through its clipping group's buffer rounds
+                    // differently from the same layer drawn directly, in the
+                    // last bit. The layers clipped to it need not reach a tile
+                    // for it to be drawn that way there, so the base's own
+                    // digest has to say so, or a tile rendered before the
+                    // clipping was added would be served after it.
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"clip-base");
+                    hasher.update(digest);
+                    digest = hasher.finalize().into();
+                }
                 Ok(LayerPrint {
-                    digest: digest_layer(layer, source)?,
+                    digest,
                     influence: influence_of(layer, source, scale, halo, &canvas),
                 })
             })
@@ -416,6 +432,18 @@ impl DocumentFingerprint {
         }
         hasher.finalize().into()
     }
+}
+
+/// For each layer of a stack, whether it is a base that the renderers composite
+/// through the buffer of its clipping group.
+fn clip_bases(layers: &[Layer]) -> Vec<bool> {
+    let mut bases = vec![false; layers.len()];
+    let mut index = 0;
+    for group in clip_groups(layers) {
+        bases[index] = group.needs_buffer();
+        index += 1 + group.clipped.len();
+    }
+    bases
 }
 
 /// Digests everything about a layer that could change a pixel.

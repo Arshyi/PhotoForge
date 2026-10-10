@@ -125,7 +125,8 @@ out of scope.
 ## Layer properties
 
 Every layer carries: a stable identifier, display name, type, visibility, lock,
-opacity, blend mode, transform, optional mask, collapse state, creation and
+opacity, blend mode, transform, optional mask, collapse state, whether it is clipped to
+the layer below (`clipped`; see [compositing.md](compositing.md#clipping)), creation and
 modification timestamps, and bounded custom metadata. Parent and ordering come
 from the layer's position in the tree.
 
@@ -139,6 +140,16 @@ names and missing targets fail closed.
 Supported: reorder, move into and out of groups, move whole groups, duplicate,
 rename, delete, visibility, lock, opacity, blend mode, collapse, and grouping or
 ungrouping siblings.
+
+Clipping follows the tree operations rather than fighting them:
+
+- **Moving a base moves the layers clipped to it**, and they keep their flags. Moving a clipped
+  layer moves only that layer.
+- **Deleting a base promotes** the first layer clipped to it to be the new base, so the group
+  stays together instead of attaching itself to whatever lies beneath.
+- **A copy of a base** is placed above its clipping group; **a copy of a clipped layer** stays in it.
+- **Grouping** releases the lowest layer of the new group, which has nothing beneath it there.
+- The bottom layer of any stack is never clipped: the engine clears the flag after every step.
 
 The following are rejected rather than tolerated:
 

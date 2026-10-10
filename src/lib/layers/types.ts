@@ -26,21 +26,41 @@ export type BlendMode =
   | 'hue'
   | 'saturation'
   | 'color'
-  | 'luminosity';
+  | 'luminosity'
+  | 'linear_burn'
+  | 'linear_dodge'
+  | 'darker_color'
+  | 'lighter_color'
+  | 'vivid_light'
+  | 'linear_light'
+  | 'pin_light'
+  | 'hard_mix'
+  | 'subtract'
+  | 'divide';
 
 export const blendModes: { id: BlendMode; label: string; group: string }[] = [
   { id: 'normal', label: 'Normal', group: 'Normal' },
   { id: 'multiply', label: 'Multiply', group: 'Darken' },
   { id: 'darken', label: 'Darken', group: 'Darken' },
   { id: 'color_burn', label: 'Color Burn', group: 'Darken' },
+  { id: 'linear_burn', label: 'Linear Burn', group: 'Darken' },
+  { id: 'darker_color', label: 'Darker Color', group: 'Darken' },
   { id: 'screen', label: 'Screen', group: 'Lighten' },
   { id: 'lighten', label: 'Lighten', group: 'Lighten' },
   { id: 'color_dodge', label: 'Color Dodge', group: 'Lighten' },
+  { id: 'linear_dodge', label: 'Linear Dodge (Add)', group: 'Lighten' },
+  { id: 'lighter_color', label: 'Lighter Color', group: 'Lighten' },
   { id: 'overlay', label: 'Overlay', group: 'Contrast' },
   { id: 'soft_light', label: 'Soft Light', group: 'Contrast' },
   { id: 'hard_light', label: 'Hard Light', group: 'Contrast' },
+  { id: 'vivid_light', label: 'Vivid Light', group: 'Contrast' },
+  { id: 'linear_light', label: 'Linear Light', group: 'Contrast' },
+  { id: 'pin_light', label: 'Pin Light', group: 'Contrast' },
+  { id: 'hard_mix', label: 'Hard Mix', group: 'Contrast' },
   { id: 'difference', label: 'Difference', group: 'Comparative' },
   { id: 'exclusion', label: 'Exclusion', group: 'Comparative' },
+  { id: 'subtract', label: 'Subtract', group: 'Comparative' },
+  { id: 'divide', label: 'Divide', group: 'Comparative' },
   { id: 'hue', label: 'Hue', group: 'Component' },
   { id: 'saturation', label: 'Saturation', group: 'Component' },
   { id: 'color', label: 'Color', group: 'Component' },
@@ -225,6 +245,14 @@ export interface Layer {
   transform: LayerTransform;
   mask: LayerMask | null;
   collapsed: boolean;
+  /**
+   * Paints only where the layer beneath it does, and takes its transparency from
+   * it. The layer beneath is the nearest unclipped sibling below; it and every
+   * layer clipped to it are composited as one, with its blend mode and opacity.
+   * Absent means not clipped, and so does it in every project written before
+   * clipping existed.
+   */
+  clipped?: boolean;
   metadata: LayerMetadata;
   /**
    * The camera file this layer was developed from, when it came from one.
@@ -361,6 +389,7 @@ export type LayerPanelAction =
   | 'reset_transform'
   | 'rasterize_transform'
   | 'toggle_pass_through'
+  | 'toggle_clipped'
   | 'flip_horizontal'
   | 'flip_vertical'
   | 'transform_mode';

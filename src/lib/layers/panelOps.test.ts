@@ -43,6 +43,8 @@ const everyPlan: Array<[string, panel.PanelPlan]> = [
   ['ungroup', panel.ungroupLayer(group.id)],
   ['reset transform', panel.resetTransform(pixel.id)],
   ['pass through', panel.togglePassThrough(group)],
+  ['clip', panel.toggleClipped(pixel)],
+  ['release clipping', panel.toggleClipped({ ...pixel, clipped: true })],
   ['reveal mask', panel.addMask(pixel.id, true)],
   ['hide mask', panel.addMask(pixel.id, false)],
   ['disable mask', panel.toggleMask(masked)],
@@ -127,6 +129,18 @@ describe('what each action sends', () => {
     });
   });
 
+  it('switches clipping to the opposite of what the layer has now', () => {
+    expect(panel.toggleClipped(pixel)).toMatchObject({
+      label: 'Clip to layer below',
+      steps: [{ op: 'core.layer.set_clipped', params: { selector: { type: 'id', id: pixel.id }, clipped: true } }]
+    });
+    expect(panel.toggleClipped({ ...pixel, clipped: true })).toMatchObject({
+      label: 'Release clipping',
+      steps: [{ params: { clipped: false } }]
+    });
+    expect(panel.toggleClipped(pixel).coalesceKey).toBeUndefined();
+  });
+
   it('switches a mask to the opposite of what it has now', () => {
     expect(panel.toggleMask(masked)).toMatchObject({ label: 'Disable mask', steps: [{ params: { enabled: false } }] });
     const off: Layer = { ...masked, mask: { ...masked.mask!, enabled: false, inverted: true } };
@@ -205,6 +219,7 @@ describe('the plans are accepted by the real engine', () => {
     ['ungroup', panel.ungroupLayer('g')],
     ['reset transform', panel.resetTransform('a')],
     ['pass through', panel.togglePassThrough(layer('g'))],
+    ['clip a layer', panel.toggleClipped(layer('m'))],
     ['reveal mask', panel.addMask('a', true)],
     ['hide mask', panel.addMask('a', false)],
     ['disable mask', panel.toggleMask(layer('m'))],
@@ -221,8 +236,8 @@ describe('the plans are accepted by the real engine', () => {
       'core.layer.add_adjustment', 'core.layer.add_group', 'core.layer.add_pixel', 'core.layer.delete',
       'core.layer.duplicate', 'core.layer.group', 'core.layer.mask_add', 'core.layer.mask_remove',
       'core.layer.mask_set_enabled', 'core.layer.mask_set_inverted', 'core.layer.move', 'core.layer.place_pixels',
-      'core.layer.rename', 'core.layer.reset_transform', 'core.layer.set_blend_mode', 'core.layer.set_collapsed',
-      'core.layer.set_locked', 'core.layer.set_opacity', 'core.layer.set_pass_through', 'core.layer.set_visible',
+      'core.layer.rename', 'core.layer.reset_transform', 'core.layer.set_blend_mode', 'core.layer.set_clipped',
+      'core.layer.set_collapsed', 'core.layer.set_locked', 'core.layer.set_opacity', 'core.layer.set_pass_through', 'core.layer.set_visible',
       'core.layer.ungroup', 'core.layer.update_adjustment'
     ]);
   });

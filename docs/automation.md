@@ -25,11 +25,11 @@ anywhere in it.
 ## The operation registry
 
 `list_operations` returns every operation that may edit a document, as the backend
-publishes them. There are 29:
+publishes them. There are 30:
 
 | Category | Operations |
 | --- | --- |
-| Layer (20) | `core.layer.select`, `set_visible`, `set_locked`, `set_opacity`, `set_blend_mode`, `rename`, `set_collapsed`, `move`, `delete`, `duplicate`, `group`, `ungroup`, `reset_transform`, `add_group`, `mask_from_selection`, `set_pass_through`, `mask_add`, `mask_set_enabled`, `mask_set_inverted`, `mask_remove` |
+| Layer (21) | `core.layer.select`, `set_visible`, `set_locked`, `set_opacity`, `set_blend_mode`, `set_clipped`, `rename`, `set_collapsed`, `move`, `delete`, `duplicate`, `group`, `ungroup`, `reset_transform`, `add_group`, `mask_from_selection`, `set_pass_through`, `mask_add`, `mask_set_enabled`, `mask_set_inverted`, `mask_remove` |
 | Adjustment (2) | `core.layer.add_adjustment`, `update_adjustment` |
 | Pixels (4) | `core.layer.add_pixel`, `apply_edit`, `merge_down`, `place_pixels` |
 | Document (1) | `core.document.flatten` |

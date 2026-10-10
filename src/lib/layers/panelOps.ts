@@ -130,6 +130,18 @@ export function togglePassThrough(group: Layer): PanelPlan {
   });
 }
 
+/**
+ * Clips a layer to the one below it, or releases it. `layer` supplies the state it
+ * has now; the plan switches it.
+ */
+export function toggleClipped(layer: Layer): PanelPlan {
+  const clipped = !(layer.clipped ?? false);
+  return plan(clipped ? 'Clip to layer below' : 'Release clipping', 'core.layer.set_clipped', {
+    selector: byId(layer.id),
+    clipped
+  });
+}
+
 /** A mask that shows everything (`filled`) or hides everything. */
 export function addMask(id: string, filled: boolean): PanelPlan {
   return plan(filled ? 'Add mask' : 'Add hiding mask', 'core.layer.mask_add', { selector: byId(id), filled });

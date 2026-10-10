@@ -305,15 +305,21 @@ fn blend_keys_map_to_the_modes_photoforge_has_and_say_so_for_the_rest() {
     assert_eq!(blend_from_key(b"pass"), BlendKey::PassThrough);
     assert_eq!(
         blend_from_key(b"lbrn"),
-        BlendKey::Unsupported("Linear Burn")
+        BlendKey::Supported(BlendMode::LinearBurn)
     );
-    assert_eq!(blend_from_key(b"hMix"), BlendKey::Unsupported("Hard Mix"));
+    assert_eq!(
+        blend_from_key(b"hMix"),
+        BlendKey::Supported(BlendMode::HardMix)
+    );
+    // The one mode Photoshop has that PhotoForge does not: a dither that cannot be reproduced.
+    assert_eq!(blend_from_key(b"diss"), BlendKey::Unsupported("Dissolve"));
     assert_eq!(blend_from_key(b"????"), BlendKey::Unknown);
-    // Every one of PhotoForge's sixteen modes is reachable from some key.
+    // Every one of PhotoForge's twenty-six modes is reachable from some key.
     let mut reached = std::collections::HashSet::new();
     for key in [
         b"norm", b"dark", b"mul ", b"idiv", b"lite", b"scrn", b"div ", b"over", b"sLit", b"hLit",
-        b"diff", b"smud", b"hue ", b"sat ", b"colr", b"lum ",
+        b"diff", b"smud", b"hue ", b"sat ", b"colr", b"lum ", b"lbrn", b"lddg", b"dkCl", b"lgCl",
+        b"vLit", b"lLit", b"pLit", b"hMix", b"fsub", b"fdiv",
     ] {
         if let BlendKey::Supported(mode) = blend_from_key(key) {
             reached.insert(mode);
@@ -655,9 +661,9 @@ fn eight_byte_aligned_garbage_after_a_valid_header_never_panics() {
 // ---- the importer ---------------------------------------------------------------------------------
 
 mod importer {
-    use super::super::import::{import_psd, ImportLimits, ReportKind};
+    use super::super::import::{import_psd, ImportLimits, Imported, ReportKind};
     use super::super::testing::{build, TestDoc, TestLayer};
-    use crate::layers::{BlendMode, LayerContent};
+    use crate::layers::{BlendMode, Layer, LayerContent};
     use crate::pixel::DocumentPrecision;
     use std::path::PathBuf;
 
@@ -827,8 +833,9 @@ mod importer {
 
     #[test]
     fn a_blend_mode_photoforge_lacks_becomes_normal_and_is_reported() {
-        let mut layer = flat("Burnt", (0, 0, 2, 2), [1, 1, 1]);
-        layer.blend = *b"lbrn";
+        // Dissolve is the one: its dither is not reproducible.
+        let mut layer = flat("Crumbled", (0, 0, 2, 2), [1, 1, 1]);
+        layer.blend = *b"diss";
         let (_dir, path) = write("b.psd", &build(&TestDoc::rgb8(2, 2, vec![layer])));
         let imported = import_psd(&path, BIG).unwrap();
         assert_eq!(
@@ -837,41 +844,383 @@ mod importer {
         );
         let approximated = entries(&imported.report, ReportKind::Approximated);
         assert_eq!(approximated.len(), 1);
-        assert!(approximated[0].contains("Linear Burn"), "{approximated:?}");
-        assert!(approximated[0].starts_with("Burnt:"), "{approximated:?}");
+        assert!(approximated[0].contains("Dissolve"), "{approximated:?}");
+        assert!(approximated[0].starts_with("Crumbled:"), "{approximated:?}");
     }
 
     #[test]
-    fn a_clipped_layer_is_cut_by_its_base_coverage_and_says_so() {
-        // The base is opaque on its left half only; the clipped layer is opaque everywhere.
-        let mut base = flat("Base", (0, 0, 2, 4), [10, 10, 10]);
-        let alpha = vec![255, 255, 0, 0, 255, 255, 0, 0];
-        base.channels[3] = (-1, alpha);
-        let mut clipped = flat("Clipped", (0, 0, 2, 4), [200, 0, 0]);
-        clipped.clipped = true;
-        let (_dir, path) = write("c.psd", &build(&TestDoc::rgb8(4, 2, vec![base, clipped])));
-        let imported = import_psd(&path, BIG).unwrap();
-        let LayerContent::Pixel { pixel_id, .. } = &imported.project.document.layers[1].content
-        else {
+    fn the_blend_modes_photoshop_adds_are_imported_as_themselves() {
+        for (key, mode) in [
+            (*b"lbrn", BlendMode::LinearBurn),
+            (*b"lddg", BlendMode::LinearDodge),
+            (*b"dkCl", BlendMode::DarkerColor),
+            (*b"lgCl", BlendMode::LighterColor),
+            (*b"vLit", BlendMode::VividLight),
+            (*b"lLit", BlendMode::LinearLight),
+            (*b"pLit", BlendMode::PinLight),
+            (*b"hMix", BlendMode::HardMix),
+            (*b"fsub", BlendMode::Subtract),
+            (*b"fdiv", BlendMode::Divide),
+        ] {
+            let mut layer = flat("Mixed", (0, 0, 2, 2), [1, 1, 1]);
+            layer.blend = key;
+            let (_dir, path) = write("m.psd", &build(&TestDoc::rgb8(2, 2, vec![layer])));
+            let imported = import_psd(&path, BIG).unwrap();
+            assert_eq!(imported.project.document.layers[0].blend_mode, mode);
+            assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
+        }
+    }
+
+    /// The pixels the importer stored for a layer.
+    fn stored_pixels<'a>(imported: &'a Imported, layer: &Layer) -> &'a image::RgbaImage {
+        let LayerContent::Pixel { pixel_id, .. } = &layer.content else {
             panic!("expected a pixel layer")
         };
-        let (_, image) = imported
+        &imported
             .project
             .pixels
             .iter()
             .find(|(id, _)| id == pixel_id)
+            .unwrap()
+            .1
+    }
+
+    fn render(imported: &Imported) -> image::RgbaImage {
+        let mut store = crate::layers::LayerPixelStore::default();
+        let document = &imported.project.document;
+        store
+            .reset(document.canvas_width, document.canvas_height)
             .unwrap();
-        assert_eq!(image.get_pixel(0, 0)[3], 255);
-        assert_eq!(image.get_pixel(1, 0)[3], 255);
-        assert_eq!(image.get_pixel(2, 0)[3], 0);
-        assert_eq!(image.get_pixel(3, 1)[3], 0);
+        for (id, image) in &imported.project.pixels {
+            store.register_with_id(id, image.clone()).unwrap();
+        }
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .unwrap();
+        crate::layers::render_document(document, &resolved, crate::layers::RenderOptions::default())
+            .unwrap()
+    }
+
+    /// A layer on the left half of a 4 x 2 canvas that is opaque there and transparent on
+    /// its right half.
+    fn base_on_the_left() -> TestLayer {
+        let mut base = flat("Base", (0, 0, 2, 4), [10, 10, 10]);
+        base.channels[3] = (-1, vec![255, 255, 0, 0, 255, 255, 0, 0]);
+        base
+    }
+
+    #[test]
+    fn a_clipped_layer_stays_clipped_with_its_pixels_untouched() {
+        let mut clipped = flat("Clipped", (0, 0, 2, 4), [200, 0, 0]);
+        clipped.clipped = true;
+        let (_dir, path) = write(
+            "c.psd",
+            &build(&TestDoc::rgb8(4, 2, vec![base_on_the_left(), clipped])),
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        let layers = &imported.project.document.layers;
+        assert!(!layers[0].clipped);
+        assert!(layers[1].clipped);
+        // Not baked: the layer is opaque across its whole rectangle, as Photoshop stored it.
+        let image = stored_pixels(&imported, &layers[1]);
+        assert_eq!(image.get_pixel(3, 1)[3], 255);
+        // And nothing is reported, because nothing was approximated.
+        assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
+        assert!(entries(&imported.report, ReportKind::NotImported).is_empty());
+        // Drawn, it stops at the base.
+        let picture = render(&imported);
+        assert_eq!(picture.get_pixel(1, 0).0, [200, 0, 0, 255]);
+        assert_eq!(picture.get_pixel(3, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn moving_the_base_moves_what_is_clipped_to_it() {
+        let mut clipped = flat("Clipped", (0, 0, 2, 4), [200, 0, 0]);
+        clipped.clipped = true;
+        let (_dir, path) = write(
+            "m.psd",
+            &build(&TestDoc::rgb8(4, 2, vec![base_on_the_left(), clipped])),
+        );
+        let mut imported = import_psd(&path, BIG).unwrap();
+        // The base is shifted two pixels right; the clipped layer stays where it is in the
+        // stack, and is still drawn only where the base is.
+        imported.project.document.layers[0].transform.translate_x = 2.0;
+        let picture = render(&imported);
+        assert_eq!(picture.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(picture.get_pixel(1, 0).0, [0, 0, 0, 0]);
+        assert_eq!(picture.get_pixel(2, 0).0, [200, 0, 0, 255]);
+        assert_eq!(picture.get_pixel(3, 0).0, [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_clipped_layer_with_no_base_is_imported_unclipped_and_says_so() {
+        let mut clipped = flat("Orphan", (0, 0, 2, 2), [1, 2, 3]);
+        clipped.clipped = true;
+        let (_dir, path) = write("o.psd", &build(&TestDoc::rgb8(2, 2, vec![clipped])));
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(!imported.project.document.layers[0].clipped);
         let approximated = entries(&imported.report, ReportKind::Approximated);
         assert!(
             approximated
                 .iter()
-                .any(|line| line.starts_with("Clipped:") && line.contains("baked")),
+                .any(|line| line.starts_with("Orphan:") && line.contains("nothing to clip it to")),
             "{approximated:?}"
         );
+    }
+
+    #[test]
+    fn layers_clipped_to_a_base_that_was_not_imported_are_unclipped_and_reported() {
+        // An empty rectangle with no recognised content imports as nothing.
+        let ground = flat("Ground", (0, 0, 2, 2), [9, 9, 9]);
+        let nothing = TestLayer::pixel("Gone", (0, 0, 0, 0), Vec::new());
+        let mut clipped = flat("Hangs", (0, 0, 2, 2), [1, 2, 3]);
+        clipped.clipped = true;
+        let (_dir, path) = write(
+            "g.psd",
+            &build(&TestDoc::rgb8(2, 2, vec![ground, nothing, clipped])),
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        let document = &imported.project.document;
+        let hangs = document.layers.iter().find(|l| l.name == "Hangs").unwrap();
+        // Attached to the ground it happens to sit above, it would be wrong; it is not.
+        assert!(!hangs.clipped);
+        let approximated = entries(&imported.report, ReportKind::Approximated);
+        assert!(
+            approximated
+                .iter()
+                .any(|line| line.starts_with("Hangs:") && line.contains("nothing to clip it to")),
+            "{approximated:?}"
+        );
+    }
+
+    /// A layer with no pixels that carries one adjustment block.
+    fn adjustment(name: &str, key: &[u8; 4], body: Vec<u8>) -> TestLayer {
+        let mut layer = TestLayer::pixel(name, (0, 0, 0, 0), Vec::new());
+        layer.extra_blocks.push((*key, body));
+        layer
+    }
+
+    #[test]
+    fn an_invert_layer_becomes_an_adjustment_layer_that_inverts() {
+        let ground = flat("Ground", (0, 0, 2, 2), [10, 20, 30]);
+        let invert = adjustment("Invert 1", b"nvrt", Vec::new());
+        let (_dir, path) = write("i.psd", &build(&TestDoc::rgb8(2, 2, vec![ground, invert])));
+        let imported = import_psd(&path, BIG).unwrap();
+        let layers = &imported.project.document.layers;
+        assert_eq!(layers.len(), 2);
+        assert!(matches!(layers[1].content, LayerContent::Adjustment { .. }));
+        assert_eq!(layers[1].name, "Invert 1");
+        assert!(entries(&imported.report, ReportKind::NotImported).is_empty());
+        assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
+        assert_eq!(render(&imported).get_pixel(0, 0).0, [245, 235, 225, 255]);
+    }
+
+    #[test]
+    fn an_adjustment_keeps_its_opacity_visibility_blend_clipping_and_mask() {
+        let ground = flat("Ground", (0, 0, 2, 4), [10, 20, 30]);
+        let base = flat("Base", (0, 0, 2, 2), [100, 100, 100]);
+        let mut invert = adjustment("Invert 1", b"nvrt", Vec::new());
+        invert.opacity = 128;
+        invert.clipped = true;
+        invert.flags |= 0b10; // hidden
+        invert.blend = *b"mul ";
+        let (_dir, path) = write(
+            "k.psd",
+            &build(&TestDoc::rgb8(4, 2, vec![ground, base, invert])),
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        let adjustment = &imported.project.document.layers[2];
+        assert!(adjustment.clipped);
+        assert!(!adjustment.visible);
+        assert_eq!(adjustment.blend_mode, BlendMode::Multiply);
+        assert!((adjustment.opacity - 128.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_curves_layer_is_imported_and_says_it_was_sampled() {
+        let ground = flat("Ground", (0, 0, 2, 2), [10, 20, 30]);
+        // Composite curve through (0,0), (128,200), (255,255), output first.
+        let mut body = vec![0, 0, 1, 0, 0, 0, 1, 0, 3];
+        for (output, input) in [(0_u16, 0_u16), (200, 128), (255, 255)] {
+            body.extend_from_slice(&output.to_be_bytes());
+            body.extend_from_slice(&input.to_be_bytes());
+        }
+        let curves = adjustment("Curves 1", b"curv", body);
+        let (_dir, path) = write("c1.psd", &build(&TestDoc::rgb8(2, 2, vec![ground, curves])));
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(matches!(
+            imported.project.document.layers[1].content,
+            LayerContent::Adjustment { .. }
+        ));
+        let approximated = entries(&imported.report, ReportKind::Approximated);
+        assert!(
+            approximated
+                .iter()
+                .any(|line| line.starts_with("Curves 1:") && line.contains("32 points")),
+            "{approximated:?}"
+        );
+        // The mid-tone was lifted.
+        let lifted = render(&imported).get_pixel(0, 0).0;
+        assert!(lifted[2] > 30, "{lifted:?}");
+    }
+
+    #[test]
+    fn an_adjustment_whose_settings_cannot_be_read_is_left_out_with_the_reason() {
+        let ground = flat("Ground", (0, 0, 2, 2), [10, 20, 30]);
+        let broken = adjustment("Levels 1", b"levl", vec![0, 9, 0, 0]);
+        let (_dir, path) = write("b2.psd", &build(&TestDoc::rgb8(2, 2, vec![ground, broken])));
+        let imported = import_psd(&path, BIG).unwrap();
+        assert_eq!(imported.project.document.layers.len(), 1);
+        let left_out = entries(&imported.report, ReportKind::NotImported);
+        assert!(
+            left_out
+                .iter()
+                .any(|line| line.starts_with("Levels 1:") && line.contains("version 9")),
+            "{left_out:?}"
+        );
+    }
+
+    #[test]
+    fn adjustments_that_are_not_imported_are_still_reported_by_name() {
+        let ground = flat("Ground", (0, 0, 2, 2), [10, 20, 30]);
+        let hue = adjustment("Hue/Saturation 1", b"hue2", vec![0; 8]);
+        let (_dir, path) = write("h.psd", &build(&TestDoc::rgb8(2, 2, vec![ground, hue])));
+        let imported = import_psd(&path, BIG).unwrap();
+        let left_out = entries(&imported.report, ReportKind::NotImported);
+        assert!(
+            left_out.iter().any(|line| line.contains("Hue/Saturation")),
+            "{left_out:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_fill_opacity_over_blending_layers_is_reported() {
+        let ground = flat("Ground", (0, 0, 2, 2), [9, 9, 9]);
+        let mut child = flat("Child", (0, 0, 2, 2), [5, 5, 5]);
+        child.blend = *b"mul ";
+        let mut group = TestLayer::divider("Faded", 1);
+        group.extra_blocks.push((*b"iOpa", vec![120, 0, 0, 0]));
+        let layers = vec![
+            ground.clone(),
+            TestLayer::divider("</Layer group>", 3),
+            child,
+            group,
+        ];
+        let (_dir, path) = write("fo.psd", &build(&TestDoc::rgb8(2, 2, layers)));
+        let imported = import_psd(&path, BIG).unwrap();
+        let approximated = entries(&imported.report, ReportKind::Approximated);
+        assert!(
+            approximated
+                .iter()
+                .any(|line| line.starts_with("Faded:") && line.contains("fill opacity")),
+            "{approximated:?}"
+        );
+        // A fill opacity over layers that only paint is plain opacity, and says nothing.
+        let mut plain = flat("Child", (0, 0, 2, 2), [5, 5, 5]);
+        plain.blend = *b"norm";
+        let mut group = TestLayer::divider("Faded", 1);
+        group.extra_blocks.push((*b"iOpa", vec![120, 0, 0, 0]));
+        let layers = vec![
+            ground,
+            TestLayer::divider("</Layer group>", 3),
+            plain,
+            group,
+        ];
+        let (_dir, path) = write("fo2.psd", &build(&TestDoc::rgb8(2, 2, layers)));
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
+    }
+
+    #[test]
+    fn a_group_can_be_a_clipping_base() {
+        let ground = flat("Ground", (0, 0, 2, 4), [9, 9, 9]);
+        let child = base_on_the_left();
+        let mut clipped = flat("Tint", (0, 0, 2, 4), [0, 0, 200]);
+        clipped.clipped = true;
+        let layers = vec![
+            ground,
+            TestLayer::divider("</Layer group>", 3),
+            child,
+            TestLayer::divider("Art", 1),
+            clipped,
+        ];
+        let (_dir, path) = write("gb.psd", &build(&TestDoc::rgb8(4, 2, layers)));
+        let imported = import_psd(&path, BIG).unwrap();
+        let document = &imported.project.document;
+        assert_eq!(document.layers.len(), 3);
+        assert!(document.layers[2].clipped);
+        assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
+    }
+
+    #[test]
+    fn a_pass_through_group_that_is_a_base_is_imported_isolated_and_says_so() {
+        let ground = flat("Ground", (0, 0, 2, 4), [9, 9, 9]);
+        let child = flat("Child", (0, 0, 2, 4), [5, 5, 5]);
+        let mut through = TestLayer::divider("Through", 1);
+        through.divider_blend = Some(*b"pass");
+        let mut clipped = flat("Tint", (0, 0, 2, 4), [0, 0, 200]);
+        clipped.clipped = true;
+        let layers = vec![
+            ground,
+            TestLayer::divider("</Layer group>", 3),
+            child,
+            through,
+            clipped,
+        ];
+        let (_dir, path) = write("pt.psd", &build(&TestDoc::rgb8(4, 2, layers)));
+        let imported = import_psd(&path, BIG).unwrap();
+        let group = &imported.project.document.layers[1];
+        assert!(matches!(
+            group.content,
+            LayerContent::Group { isolated: true, .. }
+        ));
+        let approximated = entries(&imported.report, ReportKind::Approximated);
+        assert!(
+            approximated
+                .iter()
+                .any(|line| line.starts_with("Through:") && line.contains("isolated group")),
+            "{approximated:?}"
+        );
+    }
+
+    #[test]
+    fn a_base_that_does_not_blend_its_clipped_layers_as_a_group_is_reported() {
+        let mut base = flat("Base", (0, 0, 2, 2), [9, 9, 9]);
+        base.extra_blocks.push((*b"clbl", vec![0, 0, 0, 0]));
+        let mut clipped = flat("Tint", (0, 0, 2, 2), [0, 0, 200]);
+        clipped.clipped = true;
+        let (_dir, path) = write(
+            "cl.psd",
+            &build(&TestDoc::rgb8(
+                2,
+                2,
+                vec![flat("G", (0, 0, 2, 2), [1, 1, 1]), base, clipped],
+            )),
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        let approximated = entries(&imported.report, ReportKind::Approximated);
+        assert!(
+            approximated
+                .iter()
+                .any(|line| line.starts_with("Base:")
+                    && line.contains("Blend Clipped Layers as Group")),
+            "{approximated:?}"
+        );
+        // The switch being on, the default, says nothing.
+        let mut on = flat("Base", (0, 0, 2, 2), [9, 9, 9]);
+        on.extra_blocks.push((*b"clbl", vec![1, 0, 0, 0]));
+        let mut tint = flat("Tint", (0, 0, 2, 2), [0, 0, 200]);
+        tint.clipped = true;
+        let (_dir, path) = write(
+            "cl2.psd",
+            &build(&TestDoc::rgb8(
+                2,
+                2,
+                vec![flat("G", (0, 0, 2, 2), [1, 1, 1]), on, tint],
+            )),
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(entries(&imported.report, ReportKind::Approximated).is_empty());
     }
 
     #[test]

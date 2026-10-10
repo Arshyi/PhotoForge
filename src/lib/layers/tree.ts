@@ -336,14 +336,70 @@ export function insertLayer(
     const parent = findLayer(document, parentId);
     if (!parent || parent.content.type !== 'group') return document;
   }
-  return {
+  return normaliseClipping({
     ...document,
     layers: insertAt(document.layers, parentPath, index, layer),
     activeLayerId: layer.id
-  };
+  });
 }
 
-export function removeLayer(document: LayerDocument, id: string): LayerDocument {
+/** The layer without its clipped flag. Absent and false mean the same on the wire. */
+function released(layer: Layer): Layer {
+  const { clipped: _clipped, ...rest } = layer;
+  return rest;
+}
+
+/**
+ * The identifiers of the layers clipped to `id`, bottom to top: the run of
+ * clipped siblings directly above it. Empty for a layer that is itself clipped to
+ * another, which is a member of a group and not its base.
+ */
+export function clippedRunOf(document: LayerDocument, id: string): string[] {
+  const path = pathTo(document, id);
+  if (!path) return [];
+  const position = path[path.length - 1];
+  const parentPath = path.slice(0, -1);
+  const siblings = parentPath.length
+    ? childrenOf(layerAt(document, parentPath) as Layer)
+    : document.layers;
+  if (position !== 0 && siblings[position].clipped) return [];
+  const run: string[] = [];
+  for (let next = position + 1; next < siblings.length && siblings[next].clipped; next += 1) {
+    run.push(siblings[next].id);
+  }
+  return run;
+}
+
+/**
+ * Clears the clipped flag of the bottom layer of every stack: there is nothing
+ * beneath it to clip to. The engine does the same after every step.
+ */
+export function normaliseClipping(document: LayerDocument): LayerDocument {
+  const walk = (layers: Layer[]): Layer[] => {
+    let changed = false;
+    const next = layers.map((layer, index) => {
+      let current = layer;
+      if (index === 0 && current.clipped) {
+        current = released(current);
+        changed = true;
+      }
+      if (current.content.type === 'group') {
+        const children = walk(current.content.children);
+        if (children !== current.content.children) {
+          current = { ...current, content: { ...current.content, children } };
+          changed = true;
+        }
+      }
+      return current;
+    });
+    return changed ? next : layers;
+  };
+  const layers = walk(document.layers);
+  return layers === document.layers ? document : { ...document, layers };
+}
+
+/** Takes a layer and its subtree out of the tree, whatever was clipped to it. */
+function detachLayer(document: LayerDocument, id: string): LayerDocument {
   const path = pathTo(document, id);
   if (!path) return document;
   const layers = replaceAt(document.layers, path, null);
@@ -353,6 +409,33 @@ export function removeLayer(document: LayerDocument, id: string): LayerDocument 
       ? null
       : document.activeLayerId;
   return { ...document, layers, activeLayerId };
+}
+
+/**
+ * Removes a layer and its subtree. A layer clipped to it is not removed with it:
+ * the first of them takes its place as the base, so the group it formed stays
+ * whole instead of attaching itself to whatever lies beneath.
+ */
+export function removeLayer(document: LayerDocument, id: string): LayerDocument {
+  const promoted = clippedRunOf(document, id)[0];
+  let next = detachLayer(document, id);
+  if (promoted) {
+    next = updateLayerQuiet(next, promoted, released);
+  }
+  return normaliseClipping(next);
+}
+
+/** `updateLayer` without the modification stamp: a promotion is not an edit by the person. */
+function updateLayerQuiet(
+  document: LayerDocument,
+  id: string,
+  change: (layer: Layer) => Layer
+): LayerDocument {
+  const path = pathTo(document, id);
+  if (!path) return document;
+  const existing = layerAt(document, path);
+  if (!existing) return document;
+  return { ...document, layers: replaceAt(document.layers, path, change(existing)) };
 }
 
 function collectIds(layer: Layer | null): string[] {
@@ -385,17 +468,32 @@ export function moveLayer(
     const parent = findLayer(document, parentId);
     if (!parent || parent.content.type !== 'group') return document;
   }
-  if (depthOf(document, parentId) + depthOfSubtree(layer) > MAX_GROUP_DEPTH) return document;
+  // A base takes the layers clipped to it along, so a clipping group that is moved
+  // stays one. They are checked against the destination before anything is
+  // detached, as the layer itself is.
+  const runIds = clippedRunOf(document, id);
+  if (parentId && runIds.some((carried) => isSelfOrDescendant(document, carried, parentId))) {
+    return document;
+  }
+  const carried = runIds.map((carriedId) => findLayer(document, carriedId) as Layer);
+  const deepest = Math.max(depthOfSubtree(layer), ...carried.map(depthOfSubtree));
+  if (depthOf(document, parentId) + deepest > MAX_GROUP_DEPTH) return document;
 
   const active = document.activeLayerId;
-  const detached = removeLayer(document, id);
+  let detached = document;
+  for (const carriedId of runIds) detached = detachLayer(detached, carriedId);
+  detached = detachLayer(detached, id);
   const parentPath = parentId ? pathTo(detached, parentId) : [];
   if (parentPath === null) return document;
-  const inserted = {
-    ...detached,
-    layers: insertAt(detached.layers, parentPath, index, layer)
-  };
-  return { ...inserted, activeLayerId: active };
+  const siblings = parentPath.length
+    ? childrenOf(layerAt(detached, parentPath) as Layer)
+    : detached.layers;
+  const position = Math.max(0, Math.min(index, siblings.length));
+  let layers = insertAt(detached.layers, parentPath, position, layer);
+  carried.forEach((clipped, offset) => {
+    layers = insertAt(layers, parentPath, position + 1 + offset, clipped);
+  });
+  return normaliseClipping({ ...detached, layers, activeLayerId: active });
 }
 
 function depthOf(document: LayerDocument, parentId: string | null): number {
@@ -432,7 +530,9 @@ export function duplicateLayer(
   const path = pathTo(document, id);
   if (!path) return { document, layer: null };
   const parentPath = path.slice(0, -1);
-  const index = path[path.length - 1] + 1;
+  // A copy of a base goes above the layers clipped to the original, not between
+  // them and it, which would take them from the original.
+  const index = path[path.length - 1] + 1 + clippedRunOf(document, id).length;
   return {
     document: {
       ...document,
@@ -487,16 +587,19 @@ export function groupLayers(
   }
 
   let next = document;
-  for (const id of ids) next = removeLayer(next, id);
-  const group = createGroupLayer(name, ordered, now);
+  for (const id of ids) next = detachLayer(next, id);
+  // Clipping is a relation within one stack, and the lowest layer of the new group
+  // has nothing beneath it there.
+  const inside = ordered.map((layer, position) => (position === 0 ? released(layer) : layer));
+  const group = createGroupLayer(name, inside, now);
   const insertionPath = parentId ? pathTo(next, parentId) : [];
   if (insertionPath === null) return { document, group: null };
   return {
-    document: {
+    document: normaliseClipping({
       ...next,
       layers: insertAt(next.layers, insertionPath, indices[0], group),
       activeLayerId: group.id
-    },
+    }),
     group
   };
 }
@@ -515,11 +618,11 @@ export function ungroupLayer(document: LayerDocument, id: string): LayerDocument
   children.forEach((child, offset) => {
     layers = insertAt(layers, parentPath, index + offset, child);
   });
-  return {
+  return normaliseClipping({
     ...document,
     layers,
     activeLayerId: children.at(-1)?.id ?? document.activeLayerId
-  };
+  });
 }
 
 /**

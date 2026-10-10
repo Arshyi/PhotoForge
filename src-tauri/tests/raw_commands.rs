@@ -715,6 +715,7 @@ fn complex_raw_document(
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

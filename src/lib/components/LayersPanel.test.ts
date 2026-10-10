@@ -299,9 +299,9 @@ describe('LayersPanel', () => {
     const options = within(screen.getByLabelText('Blend') as HTMLSelectElement).getAllByRole(
       'option'
     );
-    expect(options).toHaveLength(16);
+    expect(options).toHaveLength(26);
     const labels = options.map((option) => option.textContent?.trim());
-    for (const expected of ['Normal', 'Multiply', 'Screen', 'Overlay', 'Luminosity']) {
+    for (const expected of ['Normal', 'Multiply', 'Screen', 'Overlay', 'Luminosity', 'Linear Burn', 'Vivid Light', 'Divide']) {
       expect(labels).toContain(expected);
     }
   });
@@ -405,6 +405,53 @@ describe('LayersPanel', () => {
     expect(target.className).toContain('drop-above');
     await fireDrag('drop', target, 4);
     expect(value.onreorder).toHaveBeenCalledWith(top.id, null, 1);
+  });
+
+  describe('drops in a taller stack', () => {
+    // Bottom to top: a, b, c, d. The panel lists d first.
+    function stack() {
+      const layers = ['a', 'b', 'c', 'd'].map((name) => pixel(name));
+      const document = { ...createDocument(16, 16, layers), activeLayerId: layers[0].id };
+      return { document, a: layers[0], b: layers[1], c: layers[2], d: layers[3] };
+    }
+
+    it('puts a layer dragged up onto a row directly above that row, not one place higher', async () => {
+      const { document, a, c } = stack();
+      const value = props(document);
+      render(LayersPanel, { props: value });
+      const target = screen.getByTestId(`layer-row-${c.id}`);
+      stubBounds(target);
+      await fireDrag('dragStart', screen.getByTestId(`layer-row-${a.id}`), 0);
+      await fireDrag('drop', target, 4);
+      // With `a` taken out the stack is b, c, d; "above c" is the gap after c, index 2.
+      expect(value.onreorder).toHaveBeenCalledWith(a.id, null, 2);
+    });
+
+    it('leaves a drag downward as it was', async () => {
+      const { document, d, b } = stack();
+      const value = props(document);
+      render(LayersPanel, { props: value });
+      const target = screen.getByTestId(`layer-row-${b.id}`);
+      stubBounds(target);
+      await fireDrag('dragStart', screen.getByTestId(`layer-row-${d.id}`), 0);
+      await fireDrag('drop', target, 4);
+      // "Above b" is the gap after b; nothing of `d` sits below it.
+      expect(value.onreorder).toHaveBeenCalledWith(d.id, null, 2);
+    });
+
+    it('counts the layers clipped to a dragged base as leaving with it', async () => {
+      const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((name) => pixel(name));
+      const layers = [a, b, { ...c, clipped: true }, d];
+      const document = { ...createDocument(16, 16, layers), activeLayerId: b.id };
+      const value = props(document);
+      render(LayersPanel, { props: value });
+      const target = screen.getByTestId(`layer-row-${d.id}`);
+      stubBounds(target);
+      await fireDrag('dragStart', screen.getByTestId(`layer-row-${b.id}`), 0);
+      await fireDrag('drop', target, 4);
+      // b and c leave; the stack is a, d; "above d" is the gap after d, index 2.
+      expect(value.onreorder).toHaveBeenCalledWith(b.id, null, 2);
+    });
   });
 
   it('drops a layer into a group when released over its middle', async () => {
@@ -592,6 +639,46 @@ describe('LayersPanel', () => {
     });
     expect((screen.getByLabelText('Pass through') as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/also affect the layers below it/)).toBeTruthy();
+  });
+
+  describe('clipping', () => {
+    it('raises the clip action for a layer that has something beneath it', async () => {
+      const { document, top } = selectedDocument();
+      const value = props(document);
+      render(LayersPanel, { props: value });
+      const box = screen.getByLabelText('Clip to layer below') as HTMLInputElement;
+      expect(box.checked).toBe(false);
+      expect(box.disabled).toBe(false);
+      await fireEvent.change(box);
+      expect(value.onaction).toHaveBeenCalledWith('toggle_clipped', top.id);
+    });
+
+    it('shows a clipped layer as clipped and the box as checked', () => {
+      const background = pixel('Background');
+      const top = { ...pixel('Sky'), clipped: true };
+      const document = { ...createDocument(16, 16, [background, top]), activeLayerId: top.id };
+      render(LayersPanel, { props: props(document) });
+      expect((screen.getByLabelText('Clip to layer below') as HTMLInputElement).checked).toBe(true);
+      const row = screen.getByTestId(`layer-row-${top.id}`);
+      expect(row.classList.contains('clipped')).toBe(true);
+      expect(within(row).getByText(/Clipped/)).toBeTruthy();
+    });
+
+    it('cannot clip the bottom layer, and says why', () => {
+      const background = pixel('Background');
+      const document = { ...createDocument(16, 16, [background, pixel('Sky')]), activeLayerId: background.id };
+      render(LayersPanel, { props: props(document) });
+      expect((screen.getByLabelText('Clip to layer below') as HTMLInputElement).disabled).toBe(true);
+      expect(screen.getByText(/no layer beneath this one/)).toBeTruthy();
+    });
+
+    it('does not show a dormant flag on the bottom layer as clipped', () => {
+      const background = { ...pixel('Background'), clipped: true };
+      const document = { ...createDocument(16, 16, [background, pixel('Sky')]), activeLayerId: background.id };
+      render(LayersPanel, { props: props(document) });
+      expect(screen.getByTestId(`layer-row-${background.id}`).classList.contains('clipped')).toBe(false);
+      expect((screen.getByLabelText('Clip to layer below') as HTMLInputElement).checked).toBe(false);
+    });
   });
 
   it('locks the blend mode to Normal for a pass-through group', async () => {

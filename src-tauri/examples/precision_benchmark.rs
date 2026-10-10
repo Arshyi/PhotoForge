@@ -56,6 +56,7 @@ fn layer(id: &str, pixel: &str, w: u32, h: u32) -> Layer {
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

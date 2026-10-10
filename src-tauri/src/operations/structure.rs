@@ -29,6 +29,7 @@ pub fn new_layer(id: &str, name: &str, content: LayerContent, now: &str) -> Laye
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata {
             created_at: now.to_string(),
             modified_at: now.to_string(),
@@ -84,7 +85,16 @@ pub fn insert_layer(
 /// Removes a layer and its subtree. The selection is cleared if it was inside.
 pub fn remove_layer(document: &mut LayerDocument, id: &str) -> Result<(), AppError> {
     let removed_ids = subtree_ids(document.find(id).ok_or_else(|| not_found(id))?);
+    // Layers clipped to the one being removed are not removed with it. The first
+    // of them takes its place as the base, so the group it formed stays whole
+    // rather than attaching itself to whatever lies beneath.
+    let promoted = document.clipped_run_ids(id).into_iter().next();
     document.remove(id)?;
+    if let Some(promoted) = promoted {
+        if let Some(layer) = document.layer_mut(&promoted) {
+            layer.clipped = false;
+        }
+    }
     if document
         .active_layer_id
         .as_ref()
@@ -112,11 +122,14 @@ pub fn duplicate_layer(
         ids,
         &now,
     );
+    // A copy of a base goes above the layers clipped to the original, not between
+    // them and it, which would take them from the original.
+    let carried = document.clipped_run_ids(id).len();
     let path = document.path_to(id).ok_or_else(|| not_found(id))?;
     let (position, parent_path) = path.split_last().ok_or_else(|| not_found(id))?;
     let parent = parent_of(document, parent_path);
     let copy_id = copy.id.clone();
-    document.insert(copy, parent.as_deref(), position + 1)?;
+    document.insert(copy, parent.as_deref(), position + 1 + carried)?;
     document.active_layer_id = Some(copy_id.clone());
     Ok(copy_id)
 }
@@ -195,6 +208,11 @@ pub fn group_layers(
     let parent = parent_of(document, &parent_path);
     for id in layer_ids {
         document.remove(id)?;
+    }
+    // Clipping is a relation within one stack. The lowest layer of the new group
+    // has nothing beneath it there, so it is released.
+    if let Some(lowest) = ordered.first_mut() {
+        lowest.clipped = false;
     }
     let group_id = ids.next("l");
     let group = new_layer(

@@ -174,6 +174,15 @@
           'Reset transform'
         );
         return;
+      case 'toggle_clipped':
+        commit(
+          updateLayer(document, layerId as string, (entry) => {
+            const { clipped: _clipped, ...rest } = entry;
+            return entry.clipped ? rest : { ...entry, clipped: true };
+          }),
+          'Clip to layer below'
+        );
+        return;
       case 'toggle_pass_through': {
         if (layer?.content.type !== 'group') return;
         const nextIsolated = !layer.content.isolated;

@@ -2267,7 +2267,7 @@
 
   /** Panel actions the engine makes; they queue behind each other instead of being refused. */
   const ENGINE_ACTIONS: LayerPanelAction[] = [
-    'duplicate', 'delete', 'group', 'ungroup', 'reset_transform', 'toggle_pass_through',
+    'duplicate', 'delete', 'group', 'ungroup', 'reset_transform', 'toggle_pass_through', 'toggle_clipped',
     'mask_white', 'mask_black', 'mask_invert', 'mask_toggle', 'mask_delete'
   ];
 
@@ -2356,6 +2356,20 @@
           const group = findLayer(current, layerId as string);
           return group?.content.type === 'group' ? panel.togglePassThrough(group) : null;
         });
+        return;
+      case 'toggle_clipped':
+        await runPanelPlan(
+          (current) => {
+            const target = findLayer(current, layerId as string);
+            return target ? panel.toggleClipped(target) : null;
+          },
+          {
+            recorded: (before) =>
+              recorder.recordOnLayer(before, layerId as string, 'core.layer.set_clipped', {
+                clipped: !(findLayer(before, layerId as string)?.clipped ?? false)
+              })
+          }
+        );
         return;
       case 'edit_adjustment': {
         if (layer?.content.type !== 'adjustment') return;

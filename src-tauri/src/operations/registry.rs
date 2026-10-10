@@ -158,10 +158,11 @@ pub enum OperationKind {
     MaskRemove,
     UpdateAdjustment,
     PlacePixels,
+    SetClipped,
 }
 
 impl OperationKind {
-    pub const ALL: [OperationKind; 29] = [
+    pub const ALL: [OperationKind; 30] = [
         Self::Select,
         Self::SetVisible,
         Self::SetLocked,
@@ -191,6 +192,7 @@ impl OperationKind {
         Self::MaskRemove,
         Self::UpdateAdjustment,
         Self::PlacePixels,
+        Self::SetClipped,
     ];
 
     pub const fn id(self) -> &'static str {
@@ -218,6 +220,7 @@ impl OperationKind {
             Self::ApplyPluginFilter => "core.plugin.apply_filter",
             Self::AddPluginAdjustment => "core.plugin.add_adjustment",
             Self::SetPassThrough => "core.layer.set_pass_through",
+            Self::SetClipped => "core.layer.set_clipped",
             Self::MaskAdd => "core.layer.mask_add",
             Self::MaskSetEnabled => "core.layer.mask_set_enabled",
             Self::MaskSetInverted => "core.layer.mask_set_inverted",
@@ -628,6 +631,26 @@ impl OperationKind {
                     ),
                 ],
             ),
+            Self::SetClipped => base(
+                "Clip layer to the one below",
+                "Sets whether a layer paints only where the layer beneath it does. \
+                 The layer beneath is the nearest unclipped one below it in the same \
+                 stack; it and everything clipped to it are composited as one, with \
+                 its blend mode and opacity.",
+                Layer,
+                NoEffect,
+                AutomationOnly,
+                false,
+                vec![
+                    selector(),
+                    param(
+                        "clipped",
+                        ParamKind::Bool,
+                        true,
+                        "True to clip the layer to the one below, false to release it.",
+                    ),
+                ],
+            ),
             Self::MaskAdd => base(
                 "Add layer mask",
                 "Gives a layer a mask that reveals everything or hides everything, \
@@ -874,6 +897,13 @@ pub struct PassThroughParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClippedParams {
+    pub selector: LayerSelector,
+    pub clipped: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MaskAddParams {
     pub selector: LayerSelector,
     pub filled: bool,
@@ -961,6 +991,7 @@ pub enum Operation {
     ApplyPluginFilter(PluginFilterParams),
     AddPluginAdjustment(PluginAdjustmentParams),
     SetPassThrough(PassThroughParams),
+    SetClipped(ClippedParams),
     MaskAdd(MaskAddParams),
     MaskSetEnabled(MaskEnabledParams),
     MaskSetInverted(MaskInvertedParams),
@@ -1013,6 +1044,7 @@ impl Operation {
             OperationKind::ApplyPluginFilter => Self::ApplyPluginFilter(parse(call)?),
             OperationKind::AddPluginAdjustment => Self::AddPluginAdjustment(parse(call)?),
             OperationKind::SetPassThrough => Self::SetPassThrough(parse(call)?),
+            OperationKind::SetClipped => Self::SetClipped(parse(call)?),
             OperationKind::MaskAdd => Self::MaskAdd(parse(call)?),
             OperationKind::MaskSetEnabled => Self::MaskSetEnabled(parse(call)?),
             OperationKind::MaskSetInverted => Self::MaskSetInverted(parse(call)?),
@@ -1047,6 +1079,7 @@ impl Operation {
             Self::ApplyPluginFilter(_) => OperationKind::ApplyPluginFilter,
             Self::AddPluginAdjustment(_) => OperationKind::AddPluginAdjustment,
             Self::SetPassThrough(_) => OperationKind::SetPassThrough,
+            Self::SetClipped(_) => OperationKind::SetClipped,
             Self::MaskAdd(_) => OperationKind::MaskAdd,
             Self::MaskSetEnabled(_) => OperationKind::MaskSetEnabled,
             Self::MaskSetInverted(_) => OperationKind::MaskSetInverted,
@@ -1069,6 +1102,7 @@ impl Operation {
             | Self::MaskRemove(p)
             | Self::MergeDown(p) => vec![&p.selector],
             Self::SetPassThrough(p) => vec![&p.selector],
+            Self::SetClipped(p) => vec![&p.selector],
             Self::MaskAdd(p) => vec![&p.selector],
             Self::MaskSetEnabled(p) => vec![&p.selector],
             Self::MaskSetInverted(p) => vec![&p.selector],
@@ -1125,7 +1159,7 @@ mod tests {
             assert_eq!(kind.spec().id, id);
             assert!(kind.spec().version >= 1);
         }
-        assert_eq!(OperationKind::ALL.len(), 29);
+        assert_eq!(OperationKind::ALL.len(), 30);
     }
 
     #[test]
@@ -1235,7 +1269,7 @@ mod tests {
     fn specs_serialise_for_the_interface() {
         let specs = operation_specs();
         let json = serde_json::to_value(&specs).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 29);
+        assert_eq!(json.as_array().unwrap().len(), 30);
         let opacity = json
             .as_array()
             .unwrap()

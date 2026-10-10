@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   activeLayer,
+  clippedRunOf,
   countLayers,
   createAdjustmentLayer,
   createDocument,
@@ -17,6 +18,7 @@ import {
   layerAt,
   moveLayer,
   newLayerId,
+  normaliseClipping,
   parentOf,
   pathTo,
   referencedPixelIds,
@@ -480,5 +482,106 @@ describe('active layer', () => {
     const document = { ...documentWith([target]), activeLayerId: target.id };
     expect(activeLayer(document)?.id).toBe(target.id);
     expect(activeLayer({ ...document, activeLayerId: null })).toBeNull();
+  });
+});
+
+describe('clipping', () => {
+  /** base `b` with `c` and `d` clipped to it, under `a` and over `e`. */
+  function clippedStack() {
+    const [a, b, c, d, e] = ['a', 'b', 'c', 'd', 'e'].map((name) => pixel(name));
+    const document = documentWith([a, b, { ...c, clipped: true }, { ...d, clipped: true }, e]);
+    return { document, ids: { a: a.id, b: b.id, c: c.id, d: d.id, e: e.id } };
+  }
+  const names = (document: LayerDocument) => document.layers.map((layer) => layer.name);
+  const clippedNames = (document: LayerDocument) =>
+    document.layers.filter((layer) => layer.clipped).map((layer) => layer.name);
+
+  it('finds the layers clipped to a base, and none for a clipped layer', () => {
+    const { document, ids } = clippedStack();
+    expect(clippedRunOf(document, ids.b)).toEqual([ids.c, ids.d]);
+    expect(clippedRunOf(document, ids.c)).toEqual([]);
+    expect(clippedRunOf(document, ids.a)).toEqual([]);
+    expect(clippedRunOf(document, 'missing')).toEqual([]);
+  });
+
+  it('moves a base with the layers clipped to it, and keeps them clipped', () => {
+    const { document, ids } = clippedStack();
+    const moved = moveLayer(document, ids.b, null, 0);
+    expect(names(moved)).toEqual(['b', 'c', 'd', 'a', 'e']);
+    expect(clippedNames(moved)).toEqual(['c', 'd']);
+  });
+
+  it('moves a clipped layer on its own', () => {
+    const { document, ids } = clippedStack();
+    const moved = moveLayer(document, ids.c, null, 3);
+    expect(names(moved)).toEqual(['a', 'b', 'd', 'c', 'e']);
+    expect(clippedNames(moved)).toEqual(['d', 'c']);
+  });
+
+  it('releases a layer that ends up at the bottom of a stack', () => {
+    const { document, ids } = clippedStack();
+    const moved = moveLayer(document, ids.c, null, 0);
+    expect(names(moved)).toEqual(['c', 'a', 'b', 'd', 'e']);
+    expect(moved.layers[0].clipped).toBeUndefined();
+    expect(clippedNames(moved)).toEqual(['d']);
+  });
+
+  it('refuses to move a base into a layer clipped to it', () => {
+    const background = pixel('ground');
+    const base = pixel('base');
+    const clippedGroup = { ...createGroupLayer('tint', []), clipped: true };
+    const document = documentWith([background, base, clippedGroup]);
+    expect(moveLayer(document, base.id, clippedGroup.id, 0)).toBe(document);
+  });
+
+  it('promotes the first layer clipped to a base that is removed', () => {
+    const { document, ids } = clippedStack();
+    const removed = removeLayer(document, ids.b);
+    expect(names(removed)).toEqual(['a', 'c', 'd', 'e']);
+    expect(findLayer(removed, ids.c)?.clipped).toBeUndefined();
+    expect(findLayer(removed, ids.d)?.clipped).toBe(true);
+  });
+
+  it('leaves the others clipped when a clipped layer is removed', () => {
+    const { document, ids } = clippedStack();
+    const removed = removeLayer(document, ids.c);
+    expect(names(removed)).toEqual(['a', 'b', 'd', 'e']);
+    expect(clippedNames(removed)).toEqual(['d']);
+  });
+
+  it('places a copy of a base above its clipping group, and a copy of a clipped layer in it', () => {
+    const { document, ids } = clippedStack();
+    const base = duplicateLayer(document, ids.b);
+    expect(names(base.document)).toEqual(['a', 'b', 'c', 'd', 'b copy', 'e']);
+    expect(base.layer?.clipped).toBeUndefined();
+    const member = duplicateLayer(document, ids.c);
+    expect(names(member.document)).toEqual(['a', 'b', 'c', 'c copy', 'd', 'e']);
+    expect(member.layer?.clipped).toBe(true);
+  });
+
+  it('keeps a whole clipping group intact inside a new group, and releases a lone clipped layer', () => {
+    const { document, ids } = clippedStack();
+    const whole = groupLayers(document, [ids.b, ids.c, ids.d], 'Art');
+    const inside = (whole.group?.content as { children: Layer[] }).children;
+    expect(inside.map((layer) => [layer.name, Boolean(layer.clipped)])).toEqual([
+      ['b', false], ['c', true], ['d', true]
+    ]);
+    const alone = groupLayers(document, [ids.c], 'Alone');
+    const only = (alone.group?.content as { children: Layer[] }).children;
+    expect(only[0].clipped).toBeUndefined();
+  });
+
+  it('does not change a document that has nothing to release', () => {
+    const { document } = clippedStack();
+    expect(normaliseClipping(document)).toBe(document);
+  });
+
+  it('clears a flag standing on the bottom layer of a stack or of a group', () => {
+    const inner = [{ ...pixel('x'), clipped: true }, pixel('y')];
+    const document = documentWith([{ ...pixel('a'), clipped: true }, createGroupLayer('g', inner)]);
+    const normal = normaliseClipping(document);
+    expect(normal.layers[0].clipped).toBeUndefined();
+    const group = normal.layers[1].content as { children: Layer[] };
+    expect(group.children[0].clipped).toBeUndefined();
   });
 });

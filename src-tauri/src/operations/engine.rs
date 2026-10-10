@@ -235,7 +235,10 @@ async fn prepare(
         }
         skipped.push(false);
         let result = match run_step(&mut dry, operation).await {
-            Ok(_) => dry.document.validate(),
+            Ok(_) => {
+                dry.document.normalise_clipping();
+                dry.document.validate()
+            }
             Err(error) => Err(error),
         };
         if let Err(error) = result {
@@ -317,7 +320,10 @@ pub async fn execute_with(
             continue;
         }
         let result = match run_step(&mut tx, operation).await {
-            Ok(outcome) => tx.document.validate().map(|()| outcome),
+            Ok(outcome) => {
+                tx.document.normalise_clipping();
+                tx.document.validate().map(|()| outcome)
+            }
             Err(error) => Err(error),
         };
         match result {
@@ -912,6 +918,27 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
             let top = tx.document.layers.len();
             insert_layer(&mut tx.document, layer, None, top)?;
             tx.created(&id, &mut outcome);
+        }
+        Operation::SetClipped(p) => {
+            let id = tx.resolve(&p.selector)?;
+            tx.check_lock(kind, &id, false)?;
+            if p.clipped {
+                let at_bottom = tx
+                    .document
+                    .path_to(&id)
+                    .and_then(|path| path.last().copied())
+                    .is_some_and(|position| position == 0);
+                if at_bottom {
+                    return Err(AppError::InvalidOperation(
+                        "There is no layer beneath this one to clip it to.".into(),
+                    ));
+                }
+            }
+            let now = tx.now();
+            update(&mut tx.document, &id, &now, |layer| {
+                layer.clipped = p.clipped;
+                Ok(())
+            })?;
         }
         Operation::SetPassThrough(p) => {
             let id = tx.resolve(&p.selector)?;

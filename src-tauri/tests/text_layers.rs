@@ -28,6 +28,7 @@ fn base_layer(id: &str) -> Layer {
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

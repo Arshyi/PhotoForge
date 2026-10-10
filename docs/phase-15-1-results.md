@@ -86,8 +86,8 @@ document view were checked on screenshots.
 ## What is not done
 
 * **No writing of Photoshop files** (15.2).
-* **Clipping is baked, not live.** The layer model has no clipping relation yet; Arshyia
-  approved adding one, and it needs the compositors (8-bit, float, tiled) changed together.
+* **Clipping is baked, not live.** *(Done afterwards: [15.1b](phase-15-1b-results.md).)* The layer
+  model had no clipping relation when 15.1 was made.
 * **Shape and fill layers stored as vectors with no pixels, adjustment layers, layer styles,
   text and smart objects as editable content** are left out or imported as pixels, and
   reported. In the 315 files these are the most common reasons a picture differs: layer styles

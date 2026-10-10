@@ -20,13 +20,14 @@
 use std::sync::Arc;
 
 use super::cache::{DocumentFingerprint, TileCache};
+use super::clip::{can_hold_clipped, clip_groups, paints, ClipGroup, Paint};
 use super::composite::{
     decoded_mask, mask_coverage, mask_inverted, render_transform, MAX_RENDER_THREADS,
 };
-use super::linear::{blend_linear, source_over};
+use super::linear::{blend_linear, source_atop, source_over};
 use super::tiles::{document_tiling, DocumentTiling, Region, TileGrid, DEFAULT_TILE_SIZE};
 use super::{
-    Layer, LayerContent, LayerDocument, LayerInterpolation, PixelSource, RenderOptions,
+    BlendMode, Layer, LayerContent, LayerDocument, LayerInterpolation, PixelSource, RenderOptions,
     MAX_GROUP_DEPTH,
 };
 use crate::color::{FloatImage, FloatRgba};
@@ -715,70 +716,148 @@ fn composite_onto(
             limit: MAX_GROUP_DEPTH,
         });
     }
-    for layer in layers {
+    for group in clip_groups(layers) {
         high_precision::check_cancel(context.options.cancel)?;
-        if !layer.visible || layer.opacity <= 0.0 {
+        if group.needs_buffer() {
+            paint_clip_group(canvas, &group, context, depth)?;
             continue;
         }
-        match &layer.content {
-            LayerContent::SmartObject { .. } => {
-                return Err(AppError::InvalidLayerDocument(
-                    "smart content was not prepared for rendering".into(),
-                ));
-            }
-            LayerContent::Pixel { pixel_id, .. } => {
-                let pixels = context.source.resolve_linear(pixel_id)?;
-                draw(canvas, &pixels, layer, context)?;
-            }
-            LayerContent::Group { children, isolated } => {
-                if children.is_empty() {
-                    continue;
-                }
-                if *isolated {
-                    // An isolated group is composited into its own buffer and
-                    // then drawn through the group's transform. The buffer only
-                    // has to cover the part of the canvas this rectangle can
-                    // actually sample, which for an untransformed group is the
-                    // rectangle itself.
-                    let group_region = preimage_region(layer, context)?;
-                    if group_region.is_empty() {
-                        continue;
-                    }
-                    let group_context = Context {
-                        source: context.source,
-                        options: context.options,
-                        canvas_width: context.canvas_width,
-                        canvas_height: context.canvas_height,
-                        region: group_region,
-                    };
-                    // Region sized, not canvas sized: this is the allocation the
-                    // full-frame renderer made at full document size.
-                    let mut group = FloatImage::blank(
-                        group_region.width,
-                        group_region.height,
-                        FloatRgba::TRANSPARENT,
-                    )?;
-                    composite_onto(&mut group, children, &group_context, depth + 1)?;
-                    draw_group(canvas, &group, group_region, layer, context)?;
-                } else {
-                    let mut reworked = canvas.clone();
-                    composite_onto(&mut reworked, children, context, depth + 1)?;
-                    cross_fade(canvas, &reworked, layer, context)?;
-                }
-            }
-            LayerContent::Shape { shape } => {
-                draw_shape(canvas, shape, layer, context)?;
-            }
-            LayerContent::Text { text } => {
-                draw_text(canvas, text, layer, context)?;
-            }
-            LayerContent::Adjustment { operation } => {
-                let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
-                mix_adjustment(canvas, &adjusted, layer, context)?;
+        paint_layer(canvas, group.base, Paint::of(group.base), context, depth)?;
+        // A base with no coverage of its own lets the layers above it paint as
+        // ordinary ones; any other base with nothing visible clipped to it has
+        // nothing more to draw.
+        if !can_hold_clipped(group.base) {
+            for layer in group.clipped {
+                paint_layer(canvas, layer, Paint::of(layer), context, depth)?;
             }
         }
     }
     high_precision::check_cancel(context.options.cancel)
+}
+
+/// Composites one layer onto `canvas`, which holds `context.region`, with the
+/// given paint.
+fn paint_layer(
+    canvas: &mut FloatImage,
+    layer: &Layer,
+    paint: Paint,
+    context: &Context<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    if !paints(layer) {
+        return Ok(());
+    }
+    match &layer.content {
+        LayerContent::SmartObject { .. } => {
+            return Err(AppError::InvalidLayerDocument(
+                "smart content was not prepared for rendering".into(),
+            ));
+        }
+        LayerContent::Pixel { pixel_id, .. } => {
+            let pixels = context.source.resolve_linear(pixel_id)?;
+            draw(canvas, &pixels, layer, paint, context)?;
+        }
+        LayerContent::Group { children, isolated } => {
+            if children.is_empty() {
+                return Ok(());
+            }
+            if *isolated || paint.in_clip_group {
+                // An isolated group is composited into its own buffer and
+                // then drawn through the group's transform. The buffer only
+                // has to cover the part of the canvas this rectangle can
+                // actually sample, which for an untransformed group is the
+                // rectangle itself.
+                let group_region = preimage_region(layer, context)?;
+                if group_region.is_empty() {
+                    return Ok(());
+                }
+                let group_context = Context {
+                    source: context.source,
+                    options: context.options,
+                    canvas_width: context.canvas_width,
+                    canvas_height: context.canvas_height,
+                    region: group_region,
+                };
+                // Region sized, not canvas sized: this is the allocation the
+                // full-frame renderer made at full document size.
+                let mut group = FloatImage::blank(
+                    group_region.width,
+                    group_region.height,
+                    FloatRgba::TRANSPARENT,
+                )?;
+                composite_onto(&mut group, children, &group_context, depth + 1)?;
+                draw_group(canvas, &group, group_region, layer, paint, context)?;
+            } else {
+                let mut reworked = canvas.clone();
+                composite_onto(&mut reworked, children, context, depth + 1)?;
+                cross_fade(canvas, &reworked, layer, context)?;
+            }
+        }
+        LayerContent::Shape { shape } => {
+            draw_shape(canvas, shape, layer, paint, context)?;
+        }
+        LayerContent::Text { text } => {
+            draw_text(canvas, text, layer, paint, context)?;
+        }
+        LayerContent::Adjustment { operation } => {
+            let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
+            mix_adjustment(canvas, &adjusted, layer, context)?;
+        }
+    }
+    Ok(())
+}
+
+/// Composites a base and the layers clipped to it as one unit; see `clip.rs`.
+///
+/// The buffer is the size of the rectangle being produced, like an isolated
+/// group's, so a clipping group costs one more region-sized allocation and no
+/// more. A clipped adjustment layer — including a neighbourhood one such as a
+/// blur — runs on that buffer, whose halo is the same one the rest of the
+/// render already carries.
+fn paint_clip_group(
+    canvas: &mut FloatImage,
+    group: &ClipGroup<'_>,
+    context: &Context<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    let region = context.region;
+    let mut buffer = FloatImage::blank(region.width, region.height, FloatRgba::TRANSPARENT)?;
+    paint_layer(&mut buffer, group.base, Paint::base(), context, depth)?;
+    for layer in group.clipped {
+        paint_layer(&mut buffer, layer, Paint::clipped(layer), context, depth)?;
+    }
+    lay_over(
+        canvas,
+        &buffer,
+        group.base.opacity,
+        group.base.blend_mode,
+        context,
+    )
+}
+
+/// Composites a buffer holding `context.region` onto `canvas`, in place, at an
+/// opacity and in a blend mode. The buffer's own placement has been applied.
+fn lay_over(
+    canvas: &mut FloatImage,
+    buffer: &FloatImage,
+    opacity: f32,
+    blend: BlendMode,
+    context: &Context<'_>,
+) -> Result<(), AppError> {
+    let region = context.region;
+    for y in 0..region.height {
+        high_precision::check_cancel(context.options.cancel)?;
+        for x in 0..region.width {
+            let i = (y * region.width + x) as usize;
+            let mut p = buffer.pixels()[i];
+            p.alpha *= opacity;
+            if p.alpha <= 0.0 {
+                continue;
+            }
+            canvas.pixels_mut()[i] = source_over(canvas.pixels()[i], p, blend);
+        }
+    }
+    Ok(())
 }
 
 /// Draws a shape layer into `canvas`, which holds `region` of the render canvas.
@@ -791,6 +870,7 @@ fn draw_shape(
     canvas: &mut FloatImage,
     shape: &crate::layers::shape::ShapeContent,
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let region = context.region;
@@ -805,7 +885,7 @@ fn draw_shape(
     else {
         return Ok(());
     };
-    composite_coverage(canvas, &colours, &coverage, layer, context)
+    composite_coverage(canvas, &colours, &coverage, layer, paint, context)
 }
 
 /// Draws a text layer into `canvas`, which holds `region` of the render canvas.
@@ -817,6 +897,7 @@ fn draw_text(
     canvas: &mut FloatImage,
     text: &crate::layers::text::TextContent,
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let region = context.region;
@@ -831,7 +912,7 @@ fn draw_text(
     else {
         return Ok(());
     };
-    composite_coverage(canvas, &colours, &coverage, layer, context)
+    composite_coverage(canvas, &colours, &coverage, layer, paint, context)
 }
 
 /// Maps document coordinates to a pixel in the render canvas.
@@ -850,8 +931,8 @@ fn device_mapping(layer: &Layer, context: &Context<'_>) -> impl Fn((f32, f32)) -
     }
 }
 
-/// Composites rasterised coverage onto the canvas through the layer's mask,
-/// opacity and blend mode.
+/// Composites rasterised coverage onto the canvas through the layer's mask and
+/// the opacity and blend mode in `paint`.
 ///
 /// Shared by shapes and text because both arrive the same way — float coverage
 /// with colour, and no buffer of their own — and because a second copy of this
@@ -861,6 +942,7 @@ fn composite_coverage(
     colours: &FloatImage,
     coverage: &[f32],
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let region = context.region;
@@ -877,7 +959,7 @@ fn composite_coverage(
             let mut source = colours.pixels()[index];
             // Neither a shape nor a text layer has a buffer, so the mask lives
             // on the canvas and is sampled in document coordinates.
-            source.alpha *= layer.opacity
+            source.alpha *= paint.opacity
                 * mask_coverage(
                     mask.as_ref(),
                     inverted,
@@ -890,8 +972,11 @@ fn composite_coverage(
             if source.alpha <= 0.0 {
                 continue;
             }
-            canvas.pixels_mut()[index] =
-                source_over(canvas.pixels()[index], source, layer.blend_mode);
+            canvas.pixels_mut()[index] = if paint.atop {
+                source_atop(canvas.pixels()[index], source, paint.blend)
+            } else {
+                source_over(canvas.pixels()[index], source, paint.blend)
+            };
         }
     }
     Ok(())
@@ -906,6 +991,7 @@ pub(super) fn draw_shape_full_frame(
     canvas: &mut FloatImage,
     shape: &crate::layers::shape::ShapeContent,
     layer: &Layer,
+    paint: Paint,
     options: RenderOptions<'_>,
 ) -> Result<(), AppError> {
     let (width, height) = canvas.dimensions();
@@ -916,7 +1002,7 @@ pub(super) fn draw_shape_full_frame(
         canvas_height: height,
         region: Region::whole(width, height),
     };
-    draw_shape(canvas, shape, layer, &context)
+    draw_shape(canvas, shape, layer, paint, &context)
 }
 
 /// Draws text over a whole canvas, for the full-frame reference renderer.
@@ -924,6 +1010,7 @@ pub(super) fn draw_text_full_frame(
     canvas: &mut FloatImage,
     text: &crate::layers::text::TextContent,
     layer: &Layer,
+    paint: Paint,
     options: RenderOptions<'_>,
 ) -> Result<(), AppError> {
     let (width, height) = canvas.dimensions();
@@ -934,7 +1021,7 @@ pub(super) fn draw_text_full_frame(
         canvas_height: height,
         region: Region::whole(width, height),
     };
-    draw_text(canvas, text, layer, &context)
+    draw_text(canvas, text, layer, paint, &context)
 }
 
 /// A source that resolves nothing, for contexts where no pixel buffer is used.
@@ -1012,6 +1099,7 @@ fn draw_group(
     group: &FloatImage,
     group_region: Region,
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let transform = render_transform(&layer.transform, context.options.scale);
@@ -1037,7 +1125,7 @@ fn draw_group(
                 sy - group_region.y as f32,
                 nearest,
             );
-            p.alpha *= layer.opacity
+            p.alpha *= paint.opacity
                 * mask_coverage(
                     mask.as_ref(),
                     inverted,
@@ -1053,7 +1141,11 @@ fn draw_group(
             let local_x = (x - i64::from(region.x)) as u32;
             let local_y = (y - i64::from(region.y)) as u32;
             let i = (local_y * region.width + local_x) as usize;
-            canvas.pixels_mut()[i] = source_over(canvas.pixels()[i], p, layer.blend_mode);
+            canvas.pixels_mut()[i] = if paint.atop {
+                source_atop(canvas.pixels()[i], p, paint.blend)
+            } else {
+                source_over(canvas.pixels()[i], p, paint.blend)
+            };
         }
     }
     Ok(())
@@ -1071,6 +1163,7 @@ fn draw(
     canvas: &mut FloatImage,
     source: &FloatImage,
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let (sw, sh) = source.dimensions();
@@ -1094,7 +1187,7 @@ fn draw(
         for x in x0..x1 {
             let (sx, sy) = inverse.apply(x as f32 + 0.5, y as f32 + 0.5);
             let mut p = source.sample(sx, sy, nearest);
-            p.alpha *= layer.opacity
+            p.alpha *= paint.opacity
                 * mask_coverage(
                     mask.as_ref(),
                     inverted,
@@ -1110,7 +1203,11 @@ fn draw(
             let local_x = (x - i64::from(region.x)) as u32;
             let local_y = (y - i64::from(region.y)) as u32;
             let i = (local_y * region.width + local_x) as usize;
-            canvas.pixels_mut()[i] = source_over(canvas.pixels()[i], p, layer.blend_mode);
+            canvas.pixels_mut()[i] = if paint.atop {
+                source_atop(canvas.pixels()[i], p, paint.blend)
+            } else {
+                source_over(canvas.pixels()[i], p, paint.blend)
+            };
         }
     }
     Ok(())
@@ -1363,6 +1460,12 @@ mod tests {
     /// Builds a small random layer tree: groups, masks, opacity, blend modes,
     /// adjustments, vector shapes, text and transforms, mixed at random.
     fn random_document(rng: &mut Rng, sources: &[&str]) -> LayerDocument {
+        let count = 1 + rng.below(3) as usize;
+        random_document_of(rng, sources, count)
+    }
+
+    /// The same generator with a chosen number of root layers.
+    fn random_document_of(rng: &mut Rng, sources: &[&str], count: usize) -> LayerDocument {
         fn build(rng: &mut Rng, sources: &[&str], depth: usize, index: &mut u32) -> Layer {
             *index += 1;
             let id = format!("n{index}");
@@ -1499,7 +1602,7 @@ mod tests {
                 test_pixel_layer(&id, source, W, H)
             };
             layer.opacity = 0.2 + rng.unit() * 0.8;
-            layer.blend_mode = BlendMode::ALL[rng.below(16) as usize];
+            layer.blend_mode = BlendMode::ALL[rng.below(BlendMode::ALL.len() as u64) as usize];
             // A pass-through group has no blend mode of its own; the document
             // validator enforces that, so the generator must respect it.
             if matches!(
@@ -1528,11 +1631,20 @@ mod tests {
         }
 
         let mut index = 0;
-        let count = 1 + rng.below(3) as usize;
         let layers = (0..count)
             .map(|_| build(rng, sources, 0, &mut index))
             .collect();
         document(layers)
+    }
+
+    /// Flags a random share of the layers of every stack as clipped.
+    fn clip_randomly(layers: &mut [Layer], rng: &mut Rng) {
+        for layer in layers.iter_mut() {
+            layer.clipped = rng.below(5) < 2;
+            if let LayerContent::Group { children, .. } = &mut layer.content {
+                clip_randomly(children, rng);
+            }
+        }
     }
 
     /// The broad equivalence check: many random trees, each rendered both ways.
@@ -1561,6 +1673,40 @@ mod tests {
         // Tile-local trees should agree exactly; anything else means the tiled
         // path is doing arithmetic in a different order somewhere.
         assert_eq!(worst, 0.0, "random trees were not bit-identical");
+    }
+
+    /// Clipping groups through every layer kind the generator builds: pixels,
+    /// groups of both kinds, adjustments, shapes and text - each with its own
+    /// mask, transform, opacity and blend mode, as bases and as clipped layers.
+    #[test]
+    fn random_clipping_groups_match_the_full_frame_renderer() {
+        let store = store_with(&[
+            ("a", source_image(W, H, 41)),
+            ("b", source_image(W, H, 42)),
+            ("c", source_image(W, H, 43)),
+        ]);
+        let mut clipped_documents = 0;
+        for seed in 1..=60u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let count = 3 + rng.below(3) as usize;
+            let mut document = random_document_of(&mut rng, &["a", "b", "c"], count);
+            clip_randomly(&mut document.layers, &mut rng);
+            if document.validate().is_err() {
+                continue;
+            }
+            clipped_documents += 1;
+            for tile_size in [64, 100] {
+                let difference = compare(&document, &store, tile_size);
+                assert_eq!(
+                    difference, 0.0,
+                    "seed {seed} at tile size {tile_size} differed by {difference} between the tiled and full-frame renderers"
+                );
+            }
+        }
+        assert!(
+            clipped_documents >= 50,
+            "only {clipped_documents} generated documents were usable, so the check proved little"
+        );
     }
 
     /// The seam check proper. Without a correct halo the error concentrates in
@@ -2721,8 +2867,10 @@ mod tests {
                     })
                     .fold(0.0f32, f32::max);
                 assert_eq!(
-                    worst, 0.0,
-                    "seed {seed} step {step} served a stale tile differing by {worst}"
+                    worst,
+                    0.0,
+                    "seed {seed} step {step} served a stale tile differing by {worst}: {}",
+                    describe(&document.layers)
                 );
             }
         }
@@ -2734,6 +2882,33 @@ mod tests {
 
     /// Changes a document the way a user would: move something, hide it, dial
     /// an opacity, retype a blend mode, add or remove a layer.
+    /// One line per layer, so a failing seed says what the tree looked like.
+    fn describe(layers: &[Layer]) -> String {
+        layers
+            .iter()
+            .map(|layer| {
+                let kind = match &layer.content {
+                    LayerContent::Group { children, isolated } => format!(
+                        "group{}[{}]",
+                        if *isolated { "" } else { "(pass)" },
+                        describe(children)
+                    ),
+                    other => format!("{:?}", other.kind()),
+                };
+                format!(
+                    "{}:{}{}{}{}@{:.2}",
+                    layer.id,
+                    kind,
+                    if layer.visible { "" } else { " hidden" },
+                    if layer.clipped { " clipped" } else { "" },
+                    if layer.mask.is_some() { " masked" } else { "" },
+                    layer.opacity
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn mutate(document: &mut LayerDocument, rng: &mut Rng) {
         let count = document.layers.len();
         if count == 0 {
@@ -2741,11 +2916,12 @@ mod tests {
             return;
         }
         let index = rng.below(count as u64) as usize;
-        match rng.below(8) {
+        match rng.below(9) {
+            8 => document.layers[index].clipped = !document.layers[index].clipped,
             0 => document.layers[index].visible = !document.layers[index].visible,
             1 => document.layers[index].opacity = rng.unit(),
             2 => {
-                let mode = BlendMode::ALL[rng.below(16) as usize];
+                let mode = BlendMode::ALL[rng.below(BlendMode::ALL.len() as u64) as usize];
                 // A pass-through group is only allowed to be Normal, so respect
                 // the invariant the document validator enforces.
                 let pass_through = matches!(

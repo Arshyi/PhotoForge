@@ -9,7 +9,7 @@
 //! sixteen blend modes, groups (isolated and pass-through, open and closed), raster layer
 //! and group masks, names (Unicode). What is approximated: text, smart-object, shape and
 //! fill layers (imported as the pixels Photoshop stored for them), vector masks (as their
-//! rendered coverage), clipping (baked into the clipped layer's alpha — see below).
+//! rendered coverage), clipping (kept as a live relation; see below for what differs).
 //! What is not imported: layer styles, adjustment layers, blend modes PhotoForge does not
 //! have (the layer is imported as Normal and listed), artboards, and everything else the
 //! reader only recorded the presence of.
@@ -17,10 +17,15 @@
 //! # Clipping
 //!
 //! A layer clipped to the one beneath it is drawn only where that layer is. PhotoForge's
-//! layer model has no such relation yet, so the importer multiplies the clipped layer's
-//! alpha by its base layer's coverage. For a Normal-blended base this gives Photoshop's
-//! picture; it is no longer a live relationship (moving the base does not move the clip),
-//! and the report says so for every clipped layer.
+//! layer model has the same relation, so a clipped layer is imported *as clipped*: it
+//! stays attached to its base, moving or hiding the base moves or hides it, and its pixels
+//! are exactly the ones Photoshop stored.
+//!
+//! What does not carry over exactly: a clipped layer whose base could not be imported (a
+//! fill or adjustment layer with no pixels) has nothing to attach to and is imported
+//! unclipped; a pass-through group that is a clipping base is imported as an isolated one;
+//! and a base with "Blend Clipped Layers as Group" switched off is still composited as one
+//! group. The report names each.
 //!
 //! # Colour
 //!
@@ -241,12 +246,6 @@ struct BuiltMask {
     inverted: bool,
 }
 
-/// An imported pixel layer and the coverage layers clipped to it would use.
-struct ImportedLayer {
-    layer: Layer,
-    coverage: Vec<f32>,
-}
-
 struct Importer<'a> {
     document: &'a Document,
     limits: ImportLimits,
@@ -258,13 +257,6 @@ struct Importer<'a> {
     bytes_used: u64,
     pixels: Vec<(String, RgbaImage)>,
     linear_pixels: Vec<(String, FloatImage)>,
-}
-
-/// What a base layer offers the layers clipped to it.
-struct ClipBase {
-    rect: Rect,
-    /// Coverage 0..1 across the base's rectangle: its alpha times its mask.
-    coverage: Vec<f32>,
 }
 
 impl<'a> Importer<'a> {
@@ -431,40 +423,71 @@ impl<'a> Importer<'a> {
         nodes: &[Node],
         out: &mut Vec<Layer>,
     ) -> Result<(), AppError> {
-        // The last non-clipped pixel layer: what the layers clipped to it are cut by.
-        let mut base: Option<ClipBase> = None;
-        for node in nodes {
-            match node {
-                Node::Layer(index) => {
-                    let document = self.document;
-                    let record = &document.layers.records[*index];
-                    let clipped = record.clipped;
-                    let base_for_this = if clipped { base.as_ref() } else { None };
-                    if clipped && base.is_none() {
+        let document = self.document;
+        let clipped_node = |node: &Node| match node {
+            Node::Layer(index) => document.layers.records[*index].clipped,
+            Node::Group { record, .. } => document.layers.records[*record].clipped,
+        };
+        // Whether something imported in this stack, and not itself clipped, is there for the
+        // next clipped layer to attach to.
+        let mut base_present = false;
+        for (position, node) in nodes.iter().enumerate() {
+            let clipped = clipped_node(node);
+            let followed_by_clipped = nodes.get(position + 1).is_some_and(&clipped_node);
+            let record_index = match node {
+                Node::Layer(index) => *index,
+                Node::Group { record, .. } => *record,
+            };
+            let record = &document.layers.records[record_index];
+            if clipped && !base_present {
+                self.report.push(
+                    ReportKind::Approximated,
+                    Some(record.display_name()),
+                    "Clipped to a layer that could not be imported, so there is nothing to clip it to; imported unclipped.",
+                );
+            }
+            if followed_by_clipped && !record.blend_clipped_as_group {
+                self.report.push(
+                    ReportKind::Approximated,
+                    Some(record.display_name()),
+                    "\"Blend Clipped Layers as Group\" is switched off for this layer; PhotoForge composites a layer and the layers clipped to it as one group, so their blending may differ.",
+                );
+            }
+            let imported = match node {
+                Node::Layer(index) => self.import_pixel_layer(reader, *index)?,
+                Node::Group {
+                    record: group_index,
+                    children,
+                } => {
+                    let mut layer = self.import_group(reader, *group_index, children)?;
+                    if followed_by_clipped && layer.is_pass_through() {
+                        // A pass-through group has no buffer of its own, so there is nothing
+                        // for the layers clipped to it to take their shape from.
+                        if let LayerContent::Group { isolated, .. } = &mut layer.content {
+                            *isolated = true;
+                        }
                         self.report.push(
                             ReportKind::Approximated,
                             Some(record.display_name()),
-                            "Clipped to a layer that could not be used as a clipping base; imported unclipped.",
+                            "Layers are clipped to this pass-through group, so it was imported as an isolated group.",
                         );
                     }
-                    if let Some(imported) =
-                        self.import_pixel_layer(reader, *index, base_for_this)?
-                    {
-                        if !clipped {
-                            base = Some(ClipBase {
-                                rect: record.rect,
-                                coverage: imported.coverage,
-                            });
-                        }
-                        out.push(imported.layer);
-                    }
+                    Some(layer)
                 }
-                Node::Group { record, children } => {
-                    let layer = self.import_group(reader, *record, children)?;
-                    // A group is not a clipping base: layers clipped to one are reported.
-                    base = None;
+            };
+            match imported {
+                Some(mut layer) => {
+                    if clipped && base_present {
+                        layer.clipped = true;
+                    }
+                    if !clipped {
+                        base_present = true;
+                    }
                     out.push(layer);
                 }
+                // A base that could not be imported leaves nothing to attach to.
+                None if !clipped => base_present = false,
+                None => {}
             }
         }
         Ok(())
@@ -596,6 +619,26 @@ impl<'a> Importer<'a> {
         let name = self.name_of(record, "Group");
         let (blend, pass_through) = self.blend_of(record, true);
         self.describe_keys(record);
+        // Fill opacity on a group is not the same thing as opacity in Photoshop once the
+        // group's layers blend with what is beneath: the picture it stores for a pass-through
+        // group at 47% fill is not what a cross-fade at 47% gives. Measured on a file made
+        // for the case (psd-tools' passthrough_fill_blendmode.psd, mean error 3 levels), and
+        // not understood well enough to reproduce, so it is reported rather than guessed at.
+        fn blends(layers: &[Layer]) -> bool {
+            layers.iter().any(|layer| {
+                layer.blend_mode != BlendMode::Normal
+                    || layer.is_pass_through()
+                    || blends(layer.children())
+            })
+        }
+        if record.fill_opacity.is_some_and(|fill| fill < 255) && (pass_through || blends(&members))
+        {
+            self.report.push(
+                ReportKind::Approximated,
+                Some(&name),
+                "This group has a fill opacity below 100% and its layers blend with what is beneath; it was imported with the fill applied as opacity, which Photoshop does not do exactly.",
+            );
+        }
         let id = self.fresh_layer_id();
         let now = self.clock.now();
         let mut layer = new_layer(
@@ -630,17 +673,19 @@ impl<'a> Importer<'a> {
         Ok(layer)
     }
 
-    /// The pixels of one layer, its mask, and the coverage a layer clipped to it would use.
+    /// The pixels of one layer and its mask, as a layer. `None` when nothing could be made.
     fn import_pixel_layer<R: std::io::Read + std::io::Seek>(
         &mut self,
         reader: &mut Reader<R>,
         index: usize,
-        clip_to: Option<&ClipBase>,
-    ) -> Result<Option<ImportedLayer>, AppError> {
+    ) -> Result<Option<Layer>, AppError> {
         let document = self.document;
         let record = &document.layers.records[index];
         let name = self.name_of(record, &format!("Layer {}", index + 1));
         if record.rect.is_empty() {
+            if let Some(handled) = self.import_adjustment(reader, record, &name)? {
+                return Ok(handled);
+            }
             self.report_pixelless(record, &name);
             return Ok(None);
         }
@@ -663,7 +708,7 @@ impl<'a> Importer<'a> {
             );
             return Ok(None);
         }
-        // A layer is decoded to planes, widened to floats, cut by its clip and mask, and
+        // A layer is decoded to planes, widened to floats, cut by its mask and
         // composed, in memory that is not the buffer it ends as: about 24 bytes a pixel more.
         let pixels = width * height;
         let peak = pixels.saturating_mul(self.bytes_per_pixel() + 24);
@@ -704,49 +749,11 @@ impl<'a> Importer<'a> {
             planes.insert(channel.id, plane);
         }
         let samples = (width * height) as usize;
-        let mut alpha: Vec<f32> = match planes.get(&-1) {
+        let alpha: Vec<f32> = match planes.get(&-1) {
             Some(plane) => sample_plane(plane, depth, samples, true),
             None => vec![1.0; samples],
         };
-        // Coverage a clipped layer is cut by: this layer's alpha, then its mask.
         let own_mask = self.build_mask_bitmap(reader, record, record.rect)?;
-
-        if let Some(base) = clip_to {
-            self.report.push(
-                ReportKind::Approximated,
-                Some(&name),
-                "Clipped to the layer below: the clipping was baked into this layer's transparency, so moving the base no longer moves it.",
-            );
-            let (left, top) = (record.rect.left, record.rect.top);
-            let base_width = base.rect.width() as i64;
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    let canvas_x = i64::from(left) + x as i64;
-                    let canvas_y = i64::from(top) + y as i64;
-                    let bx = canvas_x - i64::from(base.rect.left);
-                    let by = canvas_y - i64::from(base.rect.top);
-                    let covered = if bx >= 0
-                        && by >= 0
-                        && bx < base_width
-                        && by < base.rect.height() as i64
-                    {
-                        base.coverage[(by * base_width + bx) as usize]
-                    } else {
-                        0.0
-                    };
-                    alpha[y * width as usize + x] *= covered;
-                }
-            }
-        }
-
-        let coverage_for_clips: Vec<f32> = match &own_mask {
-            Some(mask) if mask.enabled => alpha
-                .iter()
-                .zip(mask.bitmap.coverage())
-                .map(|(alpha, mask)| alpha * f32::from(*mask) / 255.0)
-                .collect(),
-            _ => alpha.clone(),
-        };
 
         let channel = |id: i16| planes.get(&id);
         let gray = document.header.mode == ColorMode::Grayscale;
@@ -798,10 +805,68 @@ impl<'a> Importer<'a> {
         }
         self.describe_keys(record);
         self.report.layers_imported += 1;
-        Ok(Some(ImportedLayer {
-            layer,
-            coverage: coverage_for_clips,
-        }))
+        Ok(Some(layer))
+    }
+
+    /// An adjustment layer this importer can hold as an adjustment layer of its own.
+    ///
+    /// `Ok(None)`: not one of those, and the caller reports it as it would any layer with no
+    /// pixels. `Ok(Some(None))`: one of those whose settings could not be read, reported here
+    /// with the reason and left out. `Ok(Some(Some(layer)))`: imported.
+    fn import_adjustment<R: std::io::Read + std::io::Seek>(
+        &mut self,
+        reader: &mut Reader<R>,
+        record: &LayerRecord,
+        name: &str,
+    ) -> Result<Option<Option<Layer>>, AppError> {
+        let Some((key, data)) = record.adjustment.as_ref() else {
+            return Ok(None);
+        };
+        let grayscale = self.document.header.mode == ColorMode::Grayscale;
+        let converted = match super::adjustment::convert(key, data, grayscale) {
+            Ok(converted) => converted,
+            Err(reason) => {
+                self.report.push(
+                    ReportKind::NotImported,
+                    Some(name),
+                    format!(
+                        "Adjustment layer: {reason}; the layers beneath it are shown without it."
+                    ),
+                );
+                return Ok(Some(None));
+            }
+        };
+        let id = self.fresh_layer_id();
+        let now = self.clock.now();
+        let mut layer = new_layer(
+            &id,
+            name,
+            LayerContent::Adjustment {
+                operation: Box::new(converted.operation),
+            },
+            &now,
+        );
+        layer.opacity = Self::opacity_of(record);
+        layer.visible = record.visible();
+        let (blend, _) = self.blend_of(record, false);
+        layer.blend_mode = blend;
+        // An adjustment layer's mask lives in canvas space, like a group's.
+        let header = &self.document.header;
+        let canvas = Rect {
+            top: 0,
+            left: 0,
+            bottom: header.height as i32,
+            right: header.width as i32,
+        };
+        if let Some(mask) = self.build_mask(reader, record, canvas)? {
+            layer.mask = Some(mask);
+        }
+        if let Some(note) = converted.note {
+            self.report.push(ReportKind::Approximated, Some(name), note);
+        }
+        self.describe_keys(record);
+        self.report.layers_imported += 1;
+        Ok(Some(Some(layer)))
     }
 
     fn report_pixelless(&mut self, record: &LayerRecord, name: &str) {
