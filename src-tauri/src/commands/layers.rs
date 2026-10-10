@@ -1258,6 +1258,116 @@ pub async fn import_psd_document(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PsdExportResult {
+    /// Where the file was written. Not always where it was asked for: a document too large for a
+    /// PSD is written as a PSB, with that extension.
+    pub output_path: String,
+    pub report: crate::psd::ExportReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the layered document as a Photoshop file (PSD, or PSB when the size asks for it).
+///
+/// The editable document is never changed. The result carries a report of everything that was
+/// written approximately or left out; nothing is dropped silently.
+#[tauri::command]
+pub async fn export_psd_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    bit_depth: Option<u16>,
+    state: State<'_, AppState>,
+) -> Result<PsdExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    // A file made without a plug-in the document needs would be a different picture.
+    let plugins = crate::plugins::store::global();
+    crate::plugins::document::ensure_available(&plugins, &document)?;
+    crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
+    let _permit = state.export_gate.lock().await;
+
+    let mut destination = PathBuf::from(output_path);
+    let extension = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if !matches!(extension.as_deref(), Some("psd" | "psb")) {
+        return Err(AppError::InvalidOutputPath);
+    }
+    let force_large_format = extension.as_deref() == Some("psb");
+    let (resolved, _) = resolve_pixels(&state, &document, false)?;
+    let started = Instant::now();
+    let (written, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        // An export never replaces a file the document still reads from.
+        for layer in document.iter_all() {
+            if let Some(path) = layer.raw.as_ref().and_then(|raw| raw.linked_path()) {
+                if std::fs::canonicalize(path).ok() == std::fs::canonicalize(&destination).ok()
+                    && destination.exists()
+                {
+                    return Err(AppError::InvalidOutputPath);
+                }
+            }
+        }
+        for source in document.smart_sources.values() {
+            if let Some(link) = &source.link {
+                if std::fs::canonicalize(&link.path).ok()
+                    == std::fs::canonicalize(&destination).ok()
+                    && destination.exists()
+                {
+                    return Err(AppError::InvalidOutputPath);
+                }
+            }
+        }
+        let options = crate::psd::ExportOptions {
+            bit_depth,
+            operations,
+            force_large_format,
+        };
+        let mut report = crate::psd::export_psd(&document, &resolved, &destination, &options)?;
+        // A file that needed the large format is a PSB whatever it was called, unless that
+        // name is taken: another file is not replaced to make the name right.
+        if report.format == "PSB" && !force_large_format {
+            let renamed = destination.with_extension("psb");
+            if renamed.exists() {
+                report.entries.push(crate::psd::ReportEntry {
+                    kind: crate::psd::ReportKind::Note,
+                    layer: None,
+                    detail: format!(
+                        "The file is a PSB, but {} already exists, so it keeps the .psd name.",
+                        renamed
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("that file")
+                    ),
+                });
+            } else {
+                std::fs::rename(&destination, &renamed).map_err(|_| AppError::ExportFailure)?;
+                report.entries.push(crate::psd::ReportEntry {
+                    kind: crate::psd::ReportKind::Note,
+                    layer: None,
+                    detail: "The document is too large for a PSD, so it was written as a PSB and the name ends in .psb."
+                        .to_string(),
+                });
+                destination = renamed;
+            }
+        }
+        Ok::<_, AppError>((destination, report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("Photoshop export worker stopped".into()))??;
+
+    Ok(PsdExportResult {
+        output_path: written.to_string_lossy().into_owned(),
+        report,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecoveryListResult {
     pub snapshots: Vec<crate::layers::RecoveryRecord>,
 }
@@ -1373,6 +1483,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
     builder.invoke_handler(tauri::generate_handler![
         render_layer_composite,
         export_layer_composite,
+        export_psd_document,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,

@@ -23,6 +23,7 @@ pub mod adjustment;
 pub mod blend;
 pub mod document;
 pub mod error;
+pub mod export;
 pub mod import;
 pub mod pixels;
 pub mod reader;
@@ -33,6 +34,7 @@ pub use document::{
     MaskData, RealMask, Rect, Resources, Version,
 };
 pub use error::PsdError;
+pub use export::{export_psd, ExportOptions, ExportReport};
 pub use import::{import_psd, ImportLimits, ImportReport, Imported, ReportEntry, ReportKind};
 pub use pixels::{decode_channel, decode_merged_image, ChannelSpec, Compression, MergedSpec};
 pub use reader::Reader;

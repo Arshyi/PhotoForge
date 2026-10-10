@@ -69,7 +69,8 @@ typed project container and never dereference links or modify the source project
 
 ## Deliberate limits
 
-There is no PSD import/export, procedural or neural layer, live external-file
-replacement, embedded font, GPU smart-source compositor, or arbitrary out-of-core
-source cache. These boundaries are explicit so a project stays deterministic,
+A Photoshop file holds a smart object only as the pixels it draws (see
+[psd-import.md](psd-import.md) and [psd-export.md](psd-export.md)). There is no
+procedural or neural layer, live external-file replacement, embedded font, GPU
+smart-source compositor, or arbitrary out-of-core source cache. These boundaries are explicit so a project stays deterministic,
 local, and reviewable.

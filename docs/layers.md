@@ -391,8 +391,11 @@ not implemented; validation/application support is not generation support.
 - **Many translucent or blended layers have recorded latency.** See
   [phase-8-results.md](phase-8-results.md) for historical measurements; the
   current 0.13.0 source has not yet been benchmarked as a packaged release.
-- **Photoshop documents can be opened, not saved.** PhotoForge opens PSD and PSB files with a
-  report of what did not come across ([psd-import.md](psd-import.md)); it cannot write them.
+- **Photoshop documents are opened and written, with a report each way.** PhotoForge opens PSD and
+  PSB files with a report of what did not come across ([psd-import.md](psd-import.md)) and writes
+  them with a report of what did not go into the file ([psd-export.md](psd-export.md)). The
+  written files have been read back by this program and by an independent parser, and have not
+  been opened in Photoshop.
 - Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is

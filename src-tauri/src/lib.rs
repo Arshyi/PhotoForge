@@ -141,14 +141,15 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
         save_layer_project,
         load_layer_project,
         create_blank_layer_document,
-        import_psd_document
+        import_psd_document,
+        export_psd_document
     ])
 }
 
 use commands::{
-    convert_layers_to_smart_object, create_blank_layer_document, import_psd_document,
-    import_smart_object, inspect_smart_links, relink_smart_source, resource_status,
-    set_memory_budget, update_smart_source,
+    convert_layers_to_smart_object, create_blank_layer_document, export_psd_document,
+    import_psd_document, import_smart_object, inspect_smart_links, relink_smart_source,
+    resource_status, set_memory_budget, update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -185,6 +186,7 @@ pub fn run() {
             run_plugin_command,
             create_blank_layer_document,
             import_psd_document,
+            export_psd_document,
             render_preview,
             analyze_image,
             get_component_snapshot,

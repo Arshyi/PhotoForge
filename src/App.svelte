@@ -216,7 +216,15 @@
     validateDocument
   } from './lib/layers/tree';
   import * as panel from './lib/layers/panelOps';
-  import { importPsdDocument, importSentence, isPhotoshopPath, type PsdImportReport } from './lib/layers/psd';
+  import {
+    exportPsdDocument,
+    exportSentence,
+    importPsdDocument,
+    importSentence,
+    isPhotoshopPath,
+    type PsdExportReport,
+    type PsdImportReport
+  } from './lib/layers/psd';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import { shareUnchanged } from './lib/layers/sharing';
   import {
@@ -399,7 +407,11 @@
    * waits until they have finished.
    */
   /** The report of the Photoshop document just opened, while it is being read. */
-  let psdReport: { report: PsdImportReport; fileName: string } | null = null;
+  let psdReport: {
+    report: PsdImportReport | PsdExportReport;
+    fileName: string;
+    mode: 'import' | 'export';
+  } | null = null;
   let engineInFlight = 0;
   let engineChain: Promise<unknown> = Promise.resolve();
   /**
@@ -2861,7 +2873,7 @@
       // No project path: Save asks where to put the PhotoForge project, not over the PSD.
       installProject(result.project, null);
       const fileName = result.project.metadata.filename;
-      psdReport = { report: result.report, fileName };
+      psdReport = { report: result.report, fileName, mode: 'import' };
       notify(importSentence(fileName, result.report));
     } catch (error) {
       notify(errorMessage(error), 'error');
@@ -4035,7 +4047,8 @@
         filters: [
           { name: 'PNG image', extensions: ['png'] },
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
-          { name: 'WebP image', extensions: ['webp'] }
+          { name: 'WebP image', extensions: ['webp'] },
+          { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] }
         ]
       });
       if (!outputPath) return;
@@ -4047,6 +4060,17 @@
       }
       const exportOperations = cloneOperations(operations);
       exporting = true;
+      if (isPhotoshopPath(outputPath)) {
+        // A Photoshop file holds the layers, not a flattened picture, so the profile and colour
+        // choices above do not apply to it.
+        if (!layerDocument) throw new Error('Photoshop export needs a layered document.');
+        const written = await exportPsdDocument(outputPath, layerDocument, exportOperations, null);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify(exportSentence(fileName, written.report));
+        return;
+      }
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
       // Exporting renders the visible composite. The editable document is never
       // flattened just because a flattened image was written.
@@ -4749,6 +4773,7 @@
 {#if psdReport}
   <PsdImportReportDialog
     report={psdReport.report}
+    mode={psdReport.mode}
     fileName={psdReport.fileName}
     onclose={() => (psdReport = null)}
   />

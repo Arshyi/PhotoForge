@@ -1346,3 +1346,858 @@ mod importer {
         assert_eq!(imported.project.document.layers.len(), 2);
     }
 }
+
+// ---- the exporter ---------------------------------------------------------------------------------
+
+mod exporter {
+    use super::super::export::{export_psd, key_for, key_reads_back, ExportOptions};
+    use super::super::import::{import_psd, ImportLimits, Imported, ReportKind};
+    use super::super::read_document;
+    use crate::color::{FloatImage, FloatRgba};
+    use crate::domain::{CurvePoint, CurveSet, EditOperation};
+    use crate::layers::{
+        render_document_typed, BlendMode, Layer, LayerContent, LayerDocument, LayerMask,
+        LayerPixelStore, RenderOptions,
+    };
+    use crate::mask::{MaskBitmap, MaskSnapshot};
+    use crate::operations::structure::new_layer;
+    use crate::pixel::DocumentPrecision;
+    use image::{Rgba, RgbaImage};
+    use std::path::PathBuf;
+
+    const BIG: ImportLimits = ImportLimits {
+        store_bytes: 1 << 30,
+        entry_bytes: 1 << 29,
+        job_bytes: 1 << 31,
+    };
+
+    struct World {
+        document: LayerDocument,
+        store: LayerPixelStore,
+    }
+
+    impl World {
+        fn eight_bit(width: u32, height: u32) -> Self {
+            let mut store = LayerPixelStore::default();
+            store.reset(width, height).unwrap();
+            Self {
+                document: LayerDocument::new(width, height),
+                store,
+            }
+        }
+
+        fn float(width: u32, height: u32) -> Self {
+            let mut world = Self::eight_bit(width, height);
+            world.document.precision = DocumentPrecision::LinearSrgbF32;
+            world
+        }
+
+        /// A pixel layer of one colour, `rect` being (x, y, width, height).
+        fn solid(&mut self, name: &str, rect: (i32, i32, u32, u32), rgba: [u8; 4]) -> Layer {
+            let image = RgbaImage::from_fn(rect.2, rect.3, |x, y| {
+                // A gradient across it, so that a misplaced pixel shows.
+                Rgba([
+                    rgba[0].wrapping_add((x * 7) as u8),
+                    rgba[1].wrapping_add((y * 11) as u8),
+                    rgba[2],
+                    rgba[3],
+                ])
+            });
+            let id = if self.document.precision == DocumentPrecision::LinearSrgbF32 {
+                self.store
+                    .register_float(FloatImage::from_rgba8(&image).unwrap())
+                    .unwrap()
+            } else {
+                self.store.register(image).unwrap()
+            };
+            let mut layer = new_layer(
+                &format!("L{}", next_id()),
+                name,
+                LayerContent::Pixel {
+                    pixel_id: id,
+                    width: rect.2,
+                    height: rect.3,
+                },
+                "t",
+            );
+            layer.transform.translate_x = rect.0 as f32;
+            layer.transform.translate_y = rect.1 as f32;
+            layer
+        }
+
+        fn export(
+            &self,
+            name: &str,
+            options: &ExportOptions,
+        ) -> (
+            super::super::export::ExportReport,
+            PathBuf,
+            tempfile::TempDir,
+        ) {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(name);
+            let resolved = self
+                .store
+                .resolve(&self.document.referenced_pixel_ids(), false)
+                .unwrap();
+            let report = export_psd(&self.document, &resolved, &path, options).unwrap();
+            (report, path, directory)
+        }
+
+        fn render(&self) -> RgbaImage {
+            let resolved = self
+                .store
+                .resolve(&self.document.referenced_pixel_ids(), false)
+                .unwrap();
+            render_document_typed(&self.document, &resolved, RenderOptions::default())
+                .unwrap()
+                .encoded8()
+                .as_ref()
+                .clone()
+        }
+    }
+
+    fn rendered(imported: &Imported) -> RgbaImage {
+        let document = &imported.project.document;
+        let mut store = LayerPixelStore::default();
+        store
+            .reset(document.canvas_width, document.canvas_height)
+            .unwrap();
+        for (id, image) in &imported.project.pixels {
+            store.register_with_id(id, image.clone()).unwrap();
+        }
+        for (id, image) in &imported.project.linear_pixels {
+            store
+                .register_typed_with_id(id, image.clone().into())
+                .unwrap();
+        }
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .unwrap();
+        render_document_typed(document, &resolved, RenderOptions::default())
+            .unwrap()
+            .encoded8()
+            .as_ref()
+            .clone()
+    }
+
+    fn max_difference(a: &RgbaImage, b: &RgbaImage) -> u8 {
+        assert_eq!(a.dimensions(), b.dimensions());
+        a.pixels()
+            .zip(b.pixels())
+            .flat_map(|(p, q)| (0..4).map(move |c| p[c].abs_diff(q[c])))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn mask(width: u32, height: u32) -> LayerMask {
+        let coverage: Vec<u8> = (0..width * height).map(|i| (i * 17 % 256) as u8).collect();
+        LayerMask {
+            snapshot: MaskSnapshot::encode(
+                &MaskBitmap::from_coverage(width, height, coverage).unwrap(),
+            ),
+            enabled: true,
+            inverted: false,
+        }
+    }
+
+    fn next_id() -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn group(name: &str, children: Vec<Layer>, isolated: bool) -> Layer {
+        new_layer(
+            &format!("G{}", next_id()),
+            name,
+            LayerContent::Group { children, isolated },
+            "t",
+        )
+    }
+
+    fn adjustment(name: &str, operation: EditOperation) -> Layer {
+        new_layer(
+            &format!("A{}", next_id()),
+            name,
+            LayerContent::Adjustment {
+                operation: Box::new(operation),
+            },
+            "t",
+        )
+    }
+
+    fn names(layers: &[Layer]) -> Vec<String> {
+        layers.iter().map(|layer| layer.name.clone()).collect()
+    }
+
+    #[test]
+    fn every_blend_mode_has_a_key_that_reads_back_as_itself() {
+        let mut keys = std::collections::HashSet::new();
+        for mode in BlendMode::ALL {
+            assert!(key_reads_back(mode), "{mode:?}");
+            assert!(keys.insert(key_for(mode)), "{mode:?} shares a key");
+        }
+    }
+
+    #[test]
+    fn a_layered_document_is_written_and_reads_back_the_same() {
+        let mut world = World::eight_bit(8, 6);
+        let ground = world.solid("Ground", (0, 0, 8, 6), [40, 60, 80, 255]);
+        let mut top = world.solid("Ünï ☃ top", (2, 1, 4, 3), [200, 100, 50, 200]);
+        top.opacity = 0.5;
+        top.blend_mode = BlendMode::Multiply;
+        top.mask = Some(mask(4, 3));
+        let mut hidden = world.solid("Hidden", (1, 1, 2, 2), [255, 0, 0, 255]);
+        hidden.visible = false;
+        hidden.locked = true;
+        let mut inner = world.solid("Inner", (0, 0, 3, 3), [10, 200, 30, 255]);
+        inner.blend_mode = BlendMode::Screen;
+        let mut clipped = world.solid("Clipped", (0, 0, 3, 3), [255, 255, 0, 255]);
+        clipped.clipped = true;
+        clipped.opacity = 0.75;
+        let mut folder = group("Folder", vec![inner, clipped], true);
+        folder.opacity = 0.8;
+        folder.collapsed = true;
+        let through = group("Through", vec![], false);
+        world.document.layers = vec![ground, top, hidden, folder, through];
+        let (report, path, _dir) = world.export("a.psd", &ExportOptions::default());
+
+        assert_eq!(report.format, "PSD");
+        assert_eq!(report.bit_depth, 8);
+        assert_eq!(report.layers_written, 5);
+        assert_eq!(report.groups_written, 2);
+        assert!(report.entries.is_empty(), "{:?}", report.entries);
+
+        let imported = import_psd(&path, BIG).unwrap();
+        let back = &imported.project.document;
+        assert_eq!(back.precision, DocumentPrecision::LegacySrgb8);
+        assert_eq!(
+            names(&back.layers),
+            ["Ground", "Ünï ☃ top", "Hidden", "Folder", "Through"]
+        );
+        let top = &back.layers[1];
+        assert!((top.opacity - 0.5).abs() < 1.0 / 255.0);
+        assert_eq!(top.blend_mode, BlendMode::Multiply);
+        assert!(top.mask.is_some());
+        assert_eq!(
+            (top.transform.translate_x, top.transform.translate_y),
+            (2.0, 1.0)
+        );
+        assert!(!back.layers[2].visible);
+        let folder = &back.layers[3];
+        assert!(folder.collapsed);
+        assert!((folder.opacity - 0.8).abs() < 1.0 / 255.0);
+        let LayerContent::Group { children, isolated } = &folder.content else {
+            panic!("expected a group")
+        };
+        assert!(*isolated);
+        assert_eq!(names(children), ["Inner", "Clipped"]);
+        assert!(children[1].clipped);
+        assert!(!children[0].clipped);
+        assert_eq!(children[0].blend_mode, BlendMode::Screen);
+        assert!(matches!(
+            back.layers[4].content,
+            LayerContent::Group {
+                isolated: false,
+                ..
+            }
+        ));
+        // The same picture, to a level: a file holds opacity in 255ths, and 0.5 is not one.
+        assert!(max_difference(&world.render(), &rendered(&imported)) <= 1);
+    }
+
+    #[test]
+    fn the_file_is_laid_out_as_photoshops_are() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [1, 2, 3, 255]);
+        let child = world.solid("Child", (1, 1, 2, 2), [9, 9, 9, 255]);
+        world.document.layers = vec![ground, group("Folder", vec![child], true)];
+        let (_report, path, _dir) = world.export("l.psd", &ExportOptions::default());
+        let document = read_document(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            document.header.version,
+            super::super::document::Version::Psd
+        );
+        assert_eq!((document.header.width, document.header.height), (4, 4));
+        assert_eq!(document.header.depth, 8);
+        // Ground, the bounding divider, Child, the folder: four records, in that order.
+        let records = &document.layers.records;
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].display_name(), "Ground");
+        assert_eq!(records[1].display_name(), "</Layer group>");
+        assert_eq!(records[2].display_name(), "Child");
+        assert_eq!(records[3].display_name(), "Folder");
+        // Every record has the channels Photoshop writes: transparency first, then colour.
+        let ids: Vec<i16> = records[0].channels.iter().map(|c| c.id).collect();
+        assert_eq!(ids, [-1, 0, 1, 2]);
+        assert!(document.image_data.is_some());
+        assert!(document.resources.icc_profile.is_some());
+    }
+
+    /// One layer record as the bytes say it is, found without `read_document`.
+    struct RawRecord {
+        blend: [u8; 4],
+        blocks: Vec<([u8; 4], Vec<u8>)>,
+    }
+
+    impl RawRecord {
+        fn block(&self, key: &[u8; 4]) -> Option<&Vec<u8>> {
+            self.blocks.iter().find(|b| &b.0 == key).map(|b| &b.1)
+        }
+    }
+
+    /// Walks the layer section of a PSD the way Photoshop does. Every record's extra data must be
+    /// used up exactly by its tagged blocks, every block must start with a signature and have a
+    /// length that is a multiple of four, and the channel data must fill what the records leave.
+    fn raw_records(bytes: &[u8]) -> Vec<RawRecord> {
+        let u16_at = |at: usize| u16::from_be_bytes([bytes[at], bytes[at + 1]]) as usize;
+        let u32_at = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[..4], b"8BPS");
+        assert_eq!(u16_at(4), 1, "this walker reads PSD, not PSB");
+        let mut at = 26;
+        at += 4 + u32_at(at); // colour mode data
+        at += 4 + u32_at(at); // image resources
+        at += 4; // length of the layer and mask information
+        let info_length = u32_at(at);
+        at += 4;
+        let info_end = at + info_length;
+        let count = i16::from_be_bytes([bytes[at], bytes[at + 1]]).unsigned_abs() as usize;
+        at += 2;
+        let mut records = Vec::new();
+        let mut channel_bytes = 0;
+        for _ in 0..count {
+            at += 16; // the rectangle
+            let channels = u16_at(at);
+            at += 2;
+            for _ in 0..channels {
+                channel_bytes += u32_at(at + 2);
+                at += 6;
+            }
+            assert_eq!(&bytes[at..at + 4], b"8BIM");
+            let blend: [u8; 4] = bytes[at + 4..at + 8].try_into().unwrap();
+            at += 12; // signature, blend key, opacity, clipping, flags, filler
+            let extra_end = at + 4 + u32_at(at);
+            at += 4;
+            at += 4 + u32_at(at); // mask data
+            at += 4 + u32_at(at); // blending ranges
+            at += (1 + usize::from(bytes[at])).div_ceil(4) * 4; // the name, padded to four
+            let mut blocks = Vec::new();
+            while at < extra_end {
+                assert!(
+                    matches!(&bytes[at..at + 4], b"8BIM" | b"8B64"),
+                    "no signature at {at}"
+                );
+                let key: [u8; 4] = bytes[at + 4..at + 8].try_into().unwrap();
+                let length = u32_at(at + 8);
+                assert_eq!(
+                    length % 4,
+                    0,
+                    "{} holds {length} bytes",
+                    String::from_utf8_lossy(&key)
+                );
+                blocks.push((key, bytes[at + 12..at + 12 + length].to_vec()));
+                at += 12 + length;
+            }
+            assert_eq!(at, extra_end, "the blocks do not end where the record does");
+            records.push(RawRecord { blend, blocks });
+        }
+        let padding = info_end - at - channel_bytes;
+        assert!(
+            padding < 4,
+            "{padding} bytes unaccounted for after the channels"
+        );
+        records
+    }
+
+    #[test]
+    fn every_tagged_block_is_padded_and_every_record_ends_where_it_says() {
+        let mut world = World::eight_bit(6, 6);
+        // Names of every length modulo four, so that every padding is exercised.
+        let ground = world.solid("A", (0, 0, 6, 6), [30, 90, 150, 255]);
+        let two = world.solid("Ab", (0, 0, 2, 2), [30, 90, 150, 255]);
+        let mut three = world.solid("Abc", (1, 1, 2, 2), [30, 90, 150, 255]);
+        three.visible = false;
+        three.locked = true;
+        let inner = world.solid("Ünï ☃", (0, 0, 3, 3), [10, 200, 30, 255]);
+        let mut folder = group("Folder", vec![inner], true);
+        folder.blend_mode = BlendMode::Multiply;
+        let through = group("Through", vec![], false);
+        let mut curves = adjustment(
+            "Curves",
+            EditOperation::Curves {
+                curves: CurveSet {
+                    rgb: vec![
+                        CurvePoint {
+                            input: 0.0,
+                            output: 0.0,
+                        },
+                        CurvePoint {
+                            input: 0.5,
+                            output: 0.7,
+                        },
+                        CurvePoint {
+                            input: 1.0,
+                            output: 1.0,
+                        },
+                    ],
+                    ..CurveSet::default()
+                },
+            },
+        );
+        curves.mask = Some(mask(6, 6));
+        let levels = adjustment(
+            "Levels",
+            EditOperation::Levels {
+                input_black: 10,
+                input_white: 240,
+                gamma: 1.2,
+                output_black: 5,
+                output_white: 250,
+            },
+        );
+        world.document.layers = vec![ground, two, three, folder, through, curves, levels];
+        let (_report, path, _dir) = world.export("raw.psd", &ExportOptions::default());
+        let records = raw_records(&std::fs::read(&path).unwrap());
+
+        // A, Ab, Abc, divider, Ünï ☃, Folder, divider, Through, Curves, Levels.
+        assert_eq!(records.len(), 10);
+        for (index, record) in records.iter().enumerate() {
+            assert!(
+                record.block(b"luni").is_some(),
+                "record {index} has no name"
+            );
+            assert!(record.block(b"lyid").is_some(), "record {index} has no id");
+        }
+        let sections: Vec<usize> = (0..records.len())
+            .filter(|i| records[*i].block(b"lsct").is_some())
+            .collect();
+        assert_eq!(sections, [3, 5, 6, 7]);
+        assert_eq!(records[3].block(b"lsct").unwrap(), &3_u32.to_be_bytes());
+        // A group that blends as a unit says so in both places.
+        assert_eq!(records[5].blend, key_for(BlendMode::Multiply));
+        let folder_section = records[5].block(b"lsct").unwrap();
+        assert_eq!(folder_section.len(), 16);
+        assert_eq!(&folder_section[8..12], &key_for(BlendMode::Multiply));
+        // A pass-through group is 'norm' in the record and 'pass' in the section.
+        assert_eq!(records[7].blend, *b"norm");
+        assert_eq!(&records[7].block(b"lsct").unwrap()[8..12], b"pass");
+        // Locking is kept, and the adjustments carry their own blocks.
+        assert!(records[2].block(b"lspf").is_some());
+        assert!(records[0].block(b"lspf").is_none());
+        assert!(records[8].block(b"curv").is_some());
+        assert!(records[9].block(b"levl").is_some());
+    }
+
+    #[test]
+    fn inverted_and_disabled_masks_come_back_as_they_paint() {
+        let mut world = World::eight_bit(6, 6);
+        let ground = world.solid("Ground", (0, 0, 6, 6), [5, 5, 5, 255]);
+        let mut inverted = world.solid("Inverted", (0, 0, 4, 4), [200, 40, 40, 255]);
+        let mut shown = mask(4, 4);
+        shown.inverted = true;
+        inverted.mask = Some(shown);
+        let mut disabled = world.solid("Disabled", (2, 2, 4, 4), [40, 40, 200, 255]);
+        let mut off = mask(4, 4);
+        off.enabled = false;
+        disabled.mask = Some(off);
+        world.document.layers = vec![ground, inverted, disabled];
+        let (_report, path, _dir) = world.export("m.psd", &ExportOptions::default());
+        let imported = import_psd(&path, BIG).unwrap();
+        // What the mask does, not how it is stored: the picture is the same.
+        assert!(max_difference(&world.render(), &rendered(&imported)) <= 1);
+        // The inversion is in the data and not left to the reader, so that it paints the same in
+        // a reader that ignores the flag; the disabled mask is still a mask, and still disabled.
+        let layers = &imported.project.document.layers;
+        let kept = layers[1].mask.as_ref().unwrap();
+        assert!(kept.enabled && !kept.inverted);
+        assert!(!layers[2].mask.as_ref().unwrap().enabled);
+    }
+
+    #[test]
+    fn a_layer_partly_off_the_canvas_keeps_its_rectangle() {
+        let mut world = World::eight_bit(6, 6);
+        let ground = world.solid("Ground", (0, 0, 6, 6), [5, 5, 5, 255]);
+        let off = world.solid("Off", (-2, -3, 5, 5), [100, 150, 200, 255]);
+        world.document.layers = vec![ground, off];
+        let (_report, path, _dir) = world.export("o.psd", &ExportOptions::default());
+        let imported = import_psd(&path, BIG).unwrap();
+        let layer = &imported.project.document.layers[1];
+        assert_eq!(
+            (layer.transform.translate_x, layer.transform.translate_y),
+            (-2.0, -3.0)
+        );
+        assert_eq!(layer.pixel_dimensions(), Some((5, 5)));
+        assert_eq!(max_difference(&world.render(), &rendered(&imported)), 0);
+    }
+
+    #[test]
+    fn a_transformed_layer_is_baked_and_reported() {
+        let mut world = World::eight_bit(12, 12);
+        let ground = world.solid("Ground", (0, 0, 12, 12), [20, 20, 20, 255]);
+        let mut turned = world.solid("Turned", (2, 2, 5, 4), [200, 80, 40, 255]);
+        turned.transform.scale_x = 1.5;
+        turned.transform.rotation_degrees = 20.0;
+        turned.mask = Some(mask(5, 4));
+        turned.opacity = 0.7;
+        world.document.layers = vec![ground, turned];
+        let (report, path, _dir) = world.export("t.psd", &ExportOptions::default());
+        let approximated: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| e.kind == ReportKind::Approximated)
+            .collect();
+        assert_eq!(approximated.len(), 1);
+        assert_eq!(approximated[0].layer.as_deref(), Some("Turned"));
+        let imported = import_psd(&path, BIG).unwrap();
+        let baked = &imported.project.document.layers[1];
+        assert!(baked.transform.integer_translation().is_some());
+        assert!((baked.opacity - 0.7).abs() < 1.0 / 255.0);
+        // What the transform and the mask did is in the pixels. Drawn again it is the same
+        // picture, to a level: the mask was sampled twice.
+        let difference = max_difference(&world.render(), &rendered(&imported));
+        assert!(difference <= 2, "{difference}");
+    }
+
+    #[test]
+    fn adjustments_are_written_as_curves_levels_and_invert() {
+        let mut world = World::eight_bit(6, 6);
+        let ground = world.solid("Ground", (0, 0, 6, 6), [30, 90, 150, 255]);
+        let curves = adjustment(
+            "Curves",
+            EditOperation::Curves {
+                curves: CurveSet {
+                    rgb: vec![
+                        CurvePoint {
+                            input: 0.0,
+                            output: 0.0,
+                        },
+                        CurvePoint {
+                            input: 0.5,
+                            output: 0.7,
+                        },
+                        CurvePoint {
+                            input: 1.0,
+                            output: 1.0,
+                        },
+                    ],
+                    ..CurveSet::default()
+                },
+            },
+        );
+        let levels = adjustment(
+            "Levels",
+            EditOperation::Levels {
+                input_black: 10,
+                input_white: 240,
+                gamma: 1.2,
+                output_black: 5,
+                output_white: 250,
+            },
+        );
+        let invert = adjustment(
+            "Invert",
+            EditOperation::Curves {
+                curves: CurveSet {
+                    rgb: vec![
+                        CurvePoint {
+                            input: 0.0,
+                            output: 1.0,
+                        },
+                        CurvePoint {
+                            input: 1.0,
+                            output: 0.0,
+                        },
+                    ],
+                    ..CurveSet::default()
+                },
+            },
+        );
+        world.document.layers = vec![ground, curves, levels, invert];
+        let (report, path, _dir) = world.export("adj.psd", &ExportOptions::default());
+        assert_eq!(report.layers_written, 4);
+        // Only the three-point curve is not exact.
+        let approximated: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| e.kind == ReportKind::Approximated)
+            .map(|e| e.layer.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(approximated, ["Curves"]);
+        let imported = import_psd(&path, BIG).unwrap();
+        let back = &imported.project.document;
+        assert!(back.layers[1..]
+            .iter()
+            .all(|l| matches!(l.content, LayerContent::Adjustment { .. })));
+        // Levels with master settings only come back as PhotoForge's Levels, the same numbers.
+        let LayerContent::Adjustment { operation } = &back.layers[2].content else {
+            panic!()
+        };
+        assert_eq!(
+            **operation,
+            EditOperation::Levels {
+                input_black: 10,
+                input_white: 240,
+                gamma: 1.2,
+                output_black: 5,
+                output_white: 250,
+            }
+        );
+        // The picture comes back to within the smooth curve's difference.
+        let difference = max_difference(&world.render(), &rendered(&imported));
+        assert!(difference <= 3, "{difference}");
+    }
+
+    #[test]
+    fn a_per_channel_tone_adjustment_is_written_as_curves() {
+        let mut world = World::eight_bit(6, 6);
+        let ground = world.solid("Ground", (0, 0, 6, 6), [30, 90, 150, 255]);
+        let brightness = adjustment("Lift", EditOperation::Brightness { amount: 0.2 });
+        world.document.layers = vec![ground, brightness];
+        let (report, path, _dir) = world.export("b.psd", &ExportOptions::default());
+        assert_eq!(report.count(ReportKind::NotExported), 0);
+        assert_eq!(report.count(ReportKind::Approximated), 1);
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(matches!(
+            imported.project.document.layers[1].content,
+            LayerContent::Adjustment { .. }
+        ));
+        let difference = max_difference(&world.render(), &rendered(&imported));
+        assert!(difference <= 3, "{difference}");
+    }
+
+    #[test]
+    fn an_adjustment_that_mixes_channels_is_left_out_and_named() {
+        let mut world = World::eight_bit(6, 6);
+        let ground = world.solid("Ground", (0, 0, 6, 6), [30, 90, 150, 255]);
+        let blur = adjustment("Soften", EditOperation::GaussianBlur { radius: 2.0 });
+        world.document.layers = vec![ground, blur];
+        let (report, path, _dir) = world.export("n.psd", &ExportOptions::default());
+        let left_out: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| e.kind == ReportKind::NotExported)
+            .collect();
+        assert_eq!(left_out.len(), 1);
+        assert_eq!(left_out[0].layer.as_deref(), Some("Soften"));
+        assert!(
+            left_out[0].detail.contains("gaussian blur"),
+            "{}",
+            left_out[0].detail
+        );
+        assert_eq!(report.layers_written, 1);
+        let imported = import_psd(&path, BIG).unwrap();
+        assert_eq!(imported.project.document.layers.len(), 1);
+    }
+
+    #[test]
+    fn edits_over_the_whole_document_are_reported() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [30, 90, 150, 255]);
+        world.document.layers = vec![ground];
+        let options = ExportOptions {
+            operations: vec![EditOperation::Brightness { amount: 0.3 }],
+            ..ExportOptions::default()
+        };
+        let (report, path, _dir) = world.export("d.psd", &options);
+        let notes: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| e.kind == ReportKind::NotExported)
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].layer.is_none());
+        assert!(notes[0].detail.contains("brightness"));
+        // The layers are as they were; the flattened picture has the edit.
+        let imported = import_psd(&path, BIG).unwrap();
+        assert_eq!(max_difference(&world.render(), &rendered(&imported)), 0);
+        let document = read_document(std::fs::File::open(&path).unwrap()).unwrap();
+        assert!(document.image_data.is_some());
+    }
+
+    #[test]
+    fn a_high_precision_document_is_written_as_16_bit_and_comes_back_close() {
+        let mut world = World::float(8, 8);
+        let ground = world.solid("Ground", (0, 0, 8, 8), [40, 60, 80, 255]);
+        let mut top = world.solid("Top", (2, 2, 4, 4), [200, 120, 60, 180]);
+        top.blend_mode = BlendMode::Overlay;
+        world.document.layers = vec![ground, top];
+        let (report, path, _dir) = world.export("h.psd", &ExportOptions::default());
+        assert_eq!(report.bit_depth, 16);
+        assert!(report.entries.is_empty(), "{:?}", report.entries);
+        let document = read_document(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(document.header.depth, 16);
+        let imported = import_psd(&path, BIG).unwrap();
+        assert_eq!(
+            imported.project.document.precision,
+            DocumentPrecision::LinearSrgbF32
+        );
+        assert!(max_difference(&world.render(), &rendered(&imported)) <= 1);
+    }
+
+    #[test]
+    fn highlights_above_white_are_clipped_at_16_bits_and_kept_at_32() {
+        let mut store = LayerPixelStore::default();
+        store.reset(2, 2).unwrap();
+        let hot = FloatImage::blank(2, 2, FloatRgba::new(3.0, 0.5, 0.25, 1.0)).unwrap();
+        let id = store.register_float(hot).unwrap();
+        let mut document = LayerDocument::new(2, 2);
+        document.precision = DocumentPrecision::LinearSrgbF32;
+        document.layers.push(new_layer(
+            "hot",
+            "Hot",
+            LayerContent::Pixel {
+                pixel_id: id,
+                width: 2,
+                height: 2,
+            },
+            "t",
+        ));
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let sixteen = directory.path().join("16.psd");
+        // By default a document that holds highlights is written at 32 bits, and says so.
+        let by_default = directory.path().join("auto.psd");
+        let report =
+            export_psd(&document, &resolved, &by_default, &ExportOptions::default()).unwrap();
+        assert_eq!(report.bit_depth, 32);
+        assert!(report
+            .entries
+            .iter()
+            .any(|e| e.kind == ReportKind::Note && e.detail.contains("32-bit")));
+        // Asked for 16, it clips them and says that.
+        let options = ExportOptions {
+            bit_depth: Some(16),
+            ..ExportOptions::default()
+        };
+        let report = export_psd(&document, &resolved, &sixteen, &options).unwrap();
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|e| e.kind == ReportKind::Approximated
+                    && e.detail.contains("brighter than white")),
+            "{:?}",
+            report.entries
+        );
+        let thirty_two = directory.path().join("32.psd");
+        let options = ExportOptions {
+            bit_depth: Some(32),
+            ..ExportOptions::default()
+        };
+        let report = export_psd(&document, &resolved, &thirty_two, &options).unwrap();
+        assert!(report.entries.is_empty(), "{:?}", report.entries);
+        assert_eq!(report.bit_depth, 32);
+        let imported = import_psd(&thirty_two, BIG).unwrap();
+        let back = rendered_float(&imported);
+        assert!(
+            (back.pixels()[0].red - 3.0).abs() < 1e-5,
+            "{}",
+            back.pixels()[0].red
+        );
+        assert!((back.pixels()[0].green - 0.5).abs() < 1e-5);
+    }
+
+    fn rendered_float(imported: &Imported) -> FloatImage {
+        let document = &imported.project.document;
+        let mut store = LayerPixelStore::default();
+        store
+            .reset(document.canvas_width, document.canvas_height)
+            .unwrap();
+        for (id, image) in &imported.project.pixels {
+            store.register_with_id(id, image.clone()).unwrap();
+        }
+        for (id, image) in &imported.project.linear_pixels {
+            store
+                .register_typed_with_id(id, image.clone().into())
+                .unwrap();
+        }
+        let resolved = store
+            .resolve(&document.referenced_pixel_ids(), false)
+            .unwrap();
+        render_document_typed(document, &resolved, RenderOptions::default())
+            .unwrap()
+            .linear()
+            .unwrap()
+            .as_ref()
+            .clone()
+    }
+
+    #[test]
+    fn a_large_format_file_reads_back_the_same() {
+        let mut world = World::eight_bit(8, 6);
+        let ground = world.solid("Ground", (0, 0, 8, 6), [40, 60, 80, 255]);
+        let mut top = world.solid("Top", (2, 1, 4, 3), [200, 100, 50, 200]);
+        top.mask = Some(mask(4, 3));
+        world.document.layers = vec![ground, top];
+        let options = ExportOptions {
+            force_large_format: true,
+            ..ExportOptions::default()
+        };
+        let (report, path, _dir) = world.export("b.psb", &options);
+        assert_eq!(report.format, "PSB");
+        let document = read_document(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            document.header.version,
+            super::super::document::Version::Psb
+        );
+        let imported = import_psd(&path, BIG).unwrap();
+        assert_eq!(max_difference(&world.render(), &rendered(&imported)), 0);
+        // Sixteen bits as well, which keeps its layers in a block with an eight-byte length.
+        let mut float = World::float(8, 6);
+        let ground = float.solid("Ground", (0, 0, 8, 6), [40, 60, 80, 255]);
+        float.document.layers = vec![ground];
+        let (report, path, _dir) = float.export("b16.psb", &options);
+        assert_eq!((report.format.as_str(), report.bit_depth), ("PSB", 16));
+        let imported = import_psd(&path, BIG).unwrap();
+        assert!(max_difference(&float.render(), &rendered(&imported)) <= 1);
+    }
+
+    #[test]
+    fn a_layer_that_paints_nothing_is_still_there() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [30, 90, 150, 255]);
+        let mut clear = world.solid("Clear", (0, 0, 4, 4), [0, 0, 0, 0]);
+        clear.transform.scale_x = 2.0;
+        world.document.layers = vec![ground, clear];
+        let (_report, path, _dir) = world.export("c.psd", &ExportOptions::default());
+        let imported = import_psd(&path, BIG).unwrap();
+        // An empty layer has no pixels in the file; it comes back as nothing to import, and the
+        // picture is unchanged.
+        assert_eq!(max_difference(&world.render(), &rendered(&imported)), 0);
+    }
+
+    #[test]
+    fn a_failed_export_leaves_what_was_there() {
+        let mut world = World::eight_bit(4, 4);
+        let ground = world.solid("Ground", (0, 0, 4, 4), [30, 90, 150, 255]);
+        world.document.layers = vec![ground];
+        let resolved = world
+            .store
+            .resolve(&world.document.referenced_pixel_ids(), false)
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing-directory").join("x.psd");
+        assert!(export_psd(&world.document, &resolved, &path, &ExportOptions::default()).is_err());
+        assert!(!path.exists());
+        // A depth that is not a Photoshop depth is refused before anything is written.
+        let odd = directory.path().join("odd.psd");
+        let options = ExportOptions {
+            bit_depth: Some(12),
+            ..ExportOptions::default()
+        };
+        assert!(export_psd(&world.document, &resolved, &odd, &options).is_err());
+        assert!(!odd.exists());
+        // And nothing is left beside a good one.
+        let good = directory.path().join("good.psd");
+        export_psd(&world.document, &resolved, &good, &ExportOptions::default()).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, ["good.psd"]);
+    }
+}

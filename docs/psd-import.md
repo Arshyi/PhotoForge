@@ -1,8 +1,8 @@
 # Opening Photoshop documents (PSD and PSB)
 
-PhotoForge opens `.psd` and `.psb` files as layered documents. It does not write them. The
-file is never changed; the result is a new, unsaved document that you save as a PhotoForge
-project. Every time a file is opened a **report** lists what was approximated and what was left
+PhotoForge opens `.psd` and `.psb` files as layered documents (writing them is described in
+[psd-export.md](psd-export.md)). The file is never changed; the result is a new, unsaved document
+that you save as a PhotoForge project. Every time a file is opened a **report** lists what was approximated and what was left
 out, because nothing is dropped silently.
 
 Open one with **Open** (it is listed in the file dialog) or by dropping it on the window;
@@ -121,6 +121,6 @@ folder and run `cargo test --test psd_real_files --test psd_import_real -- --noc
 
 ## What is not done
 
-PSD **export**; shape layers as editable shapes; text as editable text; the adjustment layers
-listed above as left out; layer styles; CMYK and Lab; Dissolve; PSB over 131,072 pixels. Each is
-a recorded gap, not a claim.
+Shape layers as editable shapes; text as editable text; the adjustment layers listed above as
+left out; layer styles; CMYK and Lab; Dissolve; PSB over 131,072 pixels. Each is a recorded gap,
+not a claim. (Export is done, and has its own list: [psd-export.md](psd-export.md).)

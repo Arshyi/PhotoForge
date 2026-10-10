@@ -62,8 +62,10 @@ use std::path::Path;
 pub enum ReportKind {
     /// Imported, but not exactly as Photoshop shows it.
     Approximated,
-    /// Left out.
+    /// Left out of a document being opened.
     NotImported,
+    /// Left out of a file being written.
+    NotExported,
     /// Worth knowing, and neither of those.
     Note,
 }

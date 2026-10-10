@@ -440,7 +440,7 @@ fn cross_fade(
 /// Scales a layer transform into render space. Only the translation depends on
 /// the render scale; scale, rotation, and flips are relative to the layer's own
 /// dimensions and therefore already scale-free.
-pub(super) fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
+pub(crate) fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
     LayerTransform {
         translate_x: (f64::from(transform.translate_x) * scale) as f32,
         translate_y: (f64::from(transform.translate_y) * scale) as f32,
@@ -916,7 +916,7 @@ fn sample_rgba(
 /// The mask is stored at the layer's full-resolution dimensions, so a preview
 /// render samples it normalised against the layer's space rather than
 /// resampling the whole coverage bitmap first.
-pub(super) fn mask_coverage(
+pub(crate) fn mask_coverage(
     mask: Option<&MaskBitmap>,
     inverted: bool,
     local_x: f32,

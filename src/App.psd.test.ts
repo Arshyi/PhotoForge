@@ -10,7 +10,7 @@ import App from './App.svelte';
 import registry from '../src-tauri/tests/fixtures/operation_registry.json';
 import { createDocument, createPixelLayer } from './lib/layers/tree';
 import type { OperationSpec } from './lib/operations/types';
-import type { PsdImportResult } from './lib/layers/psd';
+import type { PsdExportResult, PsdImportResult } from './lib/layers/psd';
 import { statusFixture } from './lib/plugins/testing';
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -29,6 +29,8 @@ const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) 
 
 let importResult: () => PsdImportResult;
 let failImport: string | null;
+let exportResult: () => PsdExportResult;
+let failExport: string | null;
 
 function result(entries: PsdImportResult['report']['entries']): PsdImportResult {
   const sky = createPixelLayer('Sky', 'px1', 16, 12);
@@ -65,7 +67,16 @@ function result(entries: PsdImportResult['report']['entries']): PsdImportResult 
 beforeEach(() => {
   localStorage.clear();
   failImport = null;
+  failExport = null;
   importResult = () => result([]);
+  exportResult = () => ({
+    outputPath: String.raw`C:\work\out.psd`,
+    processingTimeMs: 12,
+    report: {
+      format: 'PSD', width: 16, height: 12, bitDepth: 8, colorMode: 'RGB',
+      layersWritten: 2, groupsWritten: 0, bytes: 2048, entries: []
+    }
+  });
   vi.mocked(open).mockReset();
   vi.mocked(save).mockReset();
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
@@ -85,6 +96,11 @@ beforeEach(() => {
       case 'import_psd_document':
         if (failImport) throw new Error(failImport);
         return importResult();
+      case 'export_layer_composite':
+        return { outputPath: args.outputPath, width: 16, height: 12, processingTimeMs: 5 };
+      case 'export_psd_document':
+        if (failExport) throw new Error(failExport);
+        return exportResult();
       case 'render_layer_composite':
       case 'render_preview':
         return { requestId: args.requestId, isCurrent: true, previewDataUrl: previewUrl, processingTime: 1, processingTimeMs: 1, operationCount: 0, missingPlugins: [] };
@@ -201,5 +217,101 @@ describe('opening a Photoshop document', () => {
     expect(await screen.findByText(/CMYK colour mode/)).toBeTruthy();
     expect(screen.queryByRole('dialog', { name: /poster\.psd/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Select Sky' })).toBeNull();
+  });
+});
+
+describe('writing a Photoshop document', () => {
+  async function openAndClose() {
+    render(App);
+    await chooseFile(PSD);
+    const dialog = await screen.findByRole('dialog', { name: /poster\.psd/ });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /poster\.psd/ })).toBeNull());
+  }
+
+  async function exportTo(path: string | null) {
+    vi.mocked(save).mockResolvedValueOnce(path);
+    await fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+  }
+
+  it('offers Photoshop files in the Export dialog', async () => {
+    await openAndClose();
+    await exportTo(null);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    const options = vi.mocked(save).mock.calls[0][0] as { filters: { name: string; extensions: string[] }[] };
+    const photoshop = options.filters.find((filter) => filter.extensions.includes('psd'));
+    expect(photoshop?.extensions).toEqual(['psd', 'psb']);
+    expect(calls('export_psd_document')).toHaveLength(0);
+  });
+
+  it('writes the layers to a Photoshop name, and shows what the file holds', async () => {
+    await openAndClose();
+    await exportTo(String.raw`C:\work\out.psd`);
+    const dialog = await screen.findByRole('dialog', { name: /out\.psd/ });
+    expect(calls('export_psd_document')).toHaveLength(1);
+    const [, args] = calls('export_psd_document')[0] as [string, Record<string, any>];
+    expect(args.outputPath).toBe(String.raw`C:\work\out.psd`);
+    expect(args.document.layers).toHaveLength(2);
+    expect(args.operations).toEqual([]);
+    expect(args.bitDepth).toBeNull();
+    // Not the flattened-image path.
+    expect(calls('export_layer_composite')).toHaveLength(0);
+    expect(within(dialog).getByText('Photoshop export')).toBeTruthy();
+    expect(within(dialog).getByTestId('psd-summary').textContent).toMatch(/2\s+layers\s+written/);
+    expect(within(dialog).getByTestId('psd-clean').textContent).toMatch(/Nothing was approximated or left out/);
+    expect(within(dialog).getByText(/Your document in PhotoForge is not changed/)).toBeTruthy();
+  });
+
+  it('lists what was left out of the file and what was written approximately', async () => {
+    exportResult = () => ({
+      outputPath: String.raw`C:\work\out.psd`,
+      processingTimeMs: 12,
+      report: {
+        format: 'PSD', width: 16, height: 12, bitDepth: 16, colorMode: 'RGB',
+        layersWritten: 1, groupsWritten: 1, bytes: 4096,
+        entries: [
+          { kind: 'not_exported', layer: 'Soften', detail: 'A gaussian blur adjustment layer has no Photoshop equivalent.' },
+          { kind: 'approximated', layer: 'Title', detail: 'Text layer written as the pixels it draws.' }
+        ]
+      }
+    });
+    await openAndClose();
+    await exportTo(String.raw`C:\work\out.psd`);
+    const dialog = await screen.findByRole('dialog', { name: /out\.psd/ });
+    const left = within(dialog).getByRole('region', { name: 'Left out of the file' });
+    expect(within(left).getByText('Soften')).toBeTruthy();
+    expect(within(dialog).getByRole('region', { name: 'Imported, but not exactly as in Photoshop' })).toBeTruthy();
+    expect(within(dialog).getByTestId('psd-summary').textContent).toMatch(/1\s+layer\s+and\s+1\s+group\s+written/);
+    expect(await screen.findByText(/1 approximated and 1 left out/)).toBeTruthy();
+  });
+
+  it('names the file the engine wrote, which may not be the one asked for', async () => {
+    exportResult = () => ({
+      outputPath: String.raw`C:\work\huge.psb`,
+      processingTimeMs: 12,
+      report: {
+        format: 'PSB', width: 16, height: 12, bitDepth: 8, colorMode: 'RGB',
+        layersWritten: 2, groupsWritten: 0, bytes: 2048, entries: []
+      }
+    });
+    await openAndClose();
+    await exportTo(String.raw`C:\work\huge.psd`);
+    expect(await screen.findByRole('dialog', { name: /huge\.psb/ })).toBeTruthy();
+  });
+
+  it('shows the reason when the file cannot be written, and leaves the document alone', async () => {
+    failExport = 'The output path is not a Photoshop file name.';
+    await openAndClose();
+    await exportTo(String.raw`C:\work\out.psd`);
+    expect(await screen.findByText(/not a Photoshop file name/)).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: /out\.psd/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Select Sky' })).toBeTruthy();
+  });
+
+  it('still writes flattened images through the image path', async () => {
+    await openAndClose();
+    await exportTo(String.raw`C:\worklat.png`);
+    await waitFor(() => expect(calls('export_layer_composite')).toHaveLength(1));
+    expect(calls('export_psd_document')).toHaveLength(0);
   });
 });
