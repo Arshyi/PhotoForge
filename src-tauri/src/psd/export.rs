@@ -55,6 +55,11 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+/// How far outside 0..1 (linear light) a sample may be and still count as inside it. The rounding
+/// of a profile conversion puts white at 1.0001, which is not highlights: this is under a fifth
+/// of an 8-bit level in the encoded value.
+const RANGE_TOLERANCE: f32 = 1.0 / 512.0;
+
 /// Longest side of a PSD; beyond it the file is a PSB.
 const PSD_MAX_SIDE: u32 = 30_000;
 /// A PSD's lengths are 4 bytes. Well short of 4 GiB, so what is estimated and what is written
@@ -346,7 +351,7 @@ impl Pixels {
                     match depth {
                         8 | 16 => {
                             let encoded = if index < 3 {
-                                if value > 1.0 + 1e-4 {
+                                if !(-RANGE_TOLERANCE..=1.0 + RANGE_TOLERANCE).contains(&value) {
                                     loss.highlights_clipped = true;
                                 }
                                 srgb_encode(value.clamp(0.0, 1.0))
@@ -1271,16 +1276,20 @@ fn merged_image(planes: &[Vec<u8>], width: u32, height: u32, depth: u16, big: bo
     out
 }
 
-/// Whether any pixel layer holds colour above 1.0 in linear light.
-fn holds_highlights(document: &LayerDocument, source: &dyn PixelSource) -> Result<bool, AppError> {
+/// Whether any pixel layer holds colour a 16-bit sRGB file cannot: above white, or below black
+/// (which is what a colour more saturated than sRGB becomes in linear sRGB).
+fn holds_out_of_range_colour(
+    document: &LayerDocument,
+    source: &dyn PixelSource,
+) -> Result<bool, AppError> {
     for layer in document.iter_all() {
         if let LayerContent::Pixel { pixel_id, .. } = &layer.content {
             let image = source.resolve_linear(pixel_id)?;
             let bright = image.pixels().iter().any(|p| {
                 p.alpha > 0.0
-                    && [p.red, p.green, p.blue]
-                        .iter()
-                        .any(|v| v.is_finite() && *v > 1.0 + 1e-4)
+                    && [p.red, p.green, p.blue].iter().any(|v| {
+                        v.is_finite() && !(-RANGE_TOLERANCE..=1.0 + RANGE_TOLERANCE).contains(v)
+                    })
             });
             if bright {
                 return Ok(true);
@@ -1310,8 +1319,8 @@ pub fn export_psd(
         None => {
             if !float {
                 8
-            } else if holds_highlights(document, source)? {
-                // Colour brighter than white does not fit 16 bits; 32-bit float keeps it.
+            } else if holds_out_of_range_colour(document, source)? {
+                // Colour outside 0..1 does not fit 16 bits; 32-bit float keeps it.
                 32
             } else {
                 16
@@ -1364,7 +1373,7 @@ pub fn export_psd(
         writer.report.push(
             ReportKind::Note,
             None,
-            "Written as 32-bit because the document holds colour brighter than white, which a 16-bit file cannot keep.",
+            "Written as 32-bit because the document holds colour a 16-bit file cannot keep: brighter than white, or more saturated than sRGB.",
         );
     }
     for layer in &document.layers {
@@ -1430,7 +1439,7 @@ pub fn export_psd(
         writer.report.push(
             ReportKind::Approximated,
             None,
-            format!("Highlights brighter than white were clipped: a {depth}-bit file holds colour from black to white. Export as 32-bit to keep them."),
+            format!("Colour brighter than white, or more saturated than sRGB, was clipped: a {depth}-bit file holds colour from black to white. Export as 32-bit to keep it."),
         );
     }
 

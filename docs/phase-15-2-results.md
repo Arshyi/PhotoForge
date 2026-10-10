@@ -4,9 +4,10 @@
 into the file as layers, with a report of what was written exactly, what approximately, and what
 was left out. The format and its rules are in [psd-export.md](psd-export.md).
 
-Status: **implemented and verified as listed; not committed, not released.** The version is still
-0.14.0. It is on branch `phase-15-2-psd-export`, on top of `c11cdb0` (15.1b–d), and nothing here
-has been pushed. **The files have never been opened in Photoshop**; see "What was not verified".
+Status: **implemented and verified as listed; committed on branch `phase-15-2-psd-export` (the
+commit `86d9af7` and a follow-up that changed the depth rule, below), not pushed, not released.**
+The version is still 0.14.0. It is on top of `c11cdb0` (15.1b–d). **The files have never been
+opened in Photoshop**; see "What was not verified".
 
 ## Completed
 
@@ -25,8 +26,12 @@ has been pushed. **The files have never been opened in Photoshop**; see "What wa
     hue/saturation, white balance, plug-in filters); edits over the whole document (in the
     flattened image when they keep its size, in neither when they do not).
 * **The depth is chosen from the document**: 8-bit for 8-bit sRGB, 16-bit for high precision,
-  32-bit when a high-precision document holds colour brighter than white (a note says so). A depth
-  can be named through the command; highlights are then clipped and the report says so.
+  32-bit when a high-precision document holds colour a 16-bit sRGB file cannot keep, brighter than
+  white or more saturated than sRGB, by more than a rounding error (a note says so). A depth can
+  be named through the command; such colour is then clipped and the report says so. A source
+  with a wide-gamut profile (Adobe RGB, P3) therefore usually becomes a 32-bit file, which is
+  lossless but several times the size; a depth choice in the dialog is the way out and is not
+  built.
 * **`export_psd_document` command** (`commands/layers.rs`): validates the document, operations and
   plug-ins, requires a `.psd` or `.psb` name, refuses to replace a file the document reads from,
   writes beside the destination and renames, and turns a `.psd` name into `.psb` when the document
@@ -48,10 +53,28 @@ imported, exported, imported again and rendered:
 | **The picture identical** | **274** |
 | The picture within a level on average (largest single difference 26 levels, `curves_rgb.psd`, a sharp feature of one curve) | 16 |
 | Further than that | 0 |
-| Written | 55 MiB; slowest file 1.64 s (`gray1.psb`) |
+| Written | 48 MiB; slowest file 1.67 s (`gray1.psb`) |
 
 What the exports said, by number of files: 54 had Curves written as Photoshop Curves
-(approximated), 15 were written as 32-bit because they hold colour brighter than white.
+(approximated), 5 were written as 32-bit because they hold colour outside what 16 bits can keep
+(all five are 8-bit files with a wide-gamut profile).
+
+**By a mature reader.** `psd-tools` 1.24 (installed in a scratch virtual environment for this) was
+asked to open each export and compare it with the Photoshop-written original it came from:
+
+| Check | Result |
+| --- | --- |
+| Exports it opens | 290 of 290 |
+| Layers in the original's order, each with the original's rectangle | 290 of 290 files |
+| Pixels of the 478 matched pixel layers | 450 identical, 11 within two levels, 17 differ |
+| Visibility, blend mode, clipping | the same, except five pass-through groups that the importer made isolated (it said so: a clipped layer is based on them) |
+| Opacity | the same, except 15 layers where the importer had multiplied fill opacity into opacity (documented) |
+| The 17 that differ, and 13 more that changed depth or colour space, compared in one encoding | 30 layers, all within 0.4 level (32-bit linear to 16-bit sRGB: 0.16 or better; Adobe RGB to linear sRGB: 0.38) |
+
+The first comparison of the colour-space cases showed 34 levels of difference in one file. It
+was the comparison, not the file: `psd-tools` converts through the document's profile when it
+reads pixels, and the script converted the result a second time. Compared once, the file agrees
+to 0.35 level.
 
 **Independent structural check.** `psd_check.py` (outside the repository, written separately from
 the reader and writer) parses each exported file: signatures, section lengths, every record's
@@ -73,6 +96,7 @@ Photoshop wrote*, not *Photoshop opens it*.
 | Round trip, first version | A Brightness lift exported as three curve points rounded off the kink (31 levels); the reduction now fits Photoshop's spline |
 | Writing this document | A `.psd` name that became `.psb` for size said nothing in the report; now a note, with two tests (renamed; name taken) |
 | `clippy` on the new file | Four lints (derivable `Default`, `is_multiple_of`, an indexed loop, a complex type); fixed |
+| The `psd-tools` survey of which exports became 32-bit | Nine of the 15 were 32-bit *sources* whose white came back from a profile conversion as 1.0001 to 1.0003, which the depth rule (a tolerance of 0.0001) took for highlights; the same kind of file landed on either depth by luck. The tolerance is now 1/512 and covers colour below black as well, and the note and the clipping message say "or more saturated than sRGB", which is what the other five were. One test pins it |
 | Reading the diff | A literal NUL byte in `PsdImportReport.svelte` from 15.1, which made git treat the file as binary; replaced by the escape `\u0000` |
 
 ## Verification
@@ -83,17 +107,18 @@ Same machine and settings as 15.1 (dev profile, dependency debug info reduced pe
 | --- | --- |
 | `cargo fmt --check` | clean |
 | `cargo clippy --all-targets --all-features -- -D warnings`, and the same with no GPU / no inference / no plugins | clean (all four) |
-| `cargo test --all-targets --all-features --no-fail-fast` | **1,585 passed**, 0 failed, 45 test binaries (15.1d ended at 1,561) |
-| No GPU / no inference / no plugins | **1,578 / 1,577 / 1,546 passed**, 0 failed |
+| `cargo test --all-targets --all-features --no-fail-fast` | **1,586 passed**, 0 failed, 45 test binaries (15.1d ended at 1,561) |
+| No GPU / no inference / no plugins | **1,579 / 1,578 / 1,547 passed**, 0 failed |
 | `npx tsc --noEmit`, `npm run check` | clean; 510 files, 0 errors, 0 warnings |
 | `npx vitest run --maxWorkers=4` | 85 files, **1,291 passed**, 0 failed (15.1d ended at 1,285); one *unhandled error*, from a `CommandPalette` test that makes a command throw on purpose, a file this work does not touch |
 | `npm run build` | built (the chunk-size warning is the existing one) |
 
-New tests: 16 in the writer (every blend mode has a key that reads back as itself; a layered
+New tests: 17 in the writer (every blend mode has a key that reads back as itself; a layered
 document reads back the same; the file is laid out as Photoshop's are; **every tagged block is
 padded and every record ends where it says**; off-canvas rectangles; baked transforms; Curves,
 Levels and Invert; per-channel tone as Curves; channel-mixing adjustments left out and named;
-whole-document edits reported; 16-bit; highlights kept at 32-bit and clipped at 16; PSB;
+whole-document edits reported; 16-bit; highlights kept at 32-bit and clipped at 16; **the depth
+follows colour that is outside white and black by more than rounding**; PSB;
 **inverted and disabled masks come back as they paint**; a layer that paints nothing is still
 there; a failed export leaves what was there), 7 through the command boundary (the name, the
 arguments, the report, the refusals, the large format by request and by size, a name that is
@@ -118,9 +143,9 @@ Each check was shown able to fail by breaking what it protects:
 ## What was not verified
 
 * **Opening a written file in Photoshop**, Affinity, GIMP or any program other than this one's own
-  reader and a separately written parser. Compatibility is likely and unconfirmed. This is the
-  first thing to do with a real Photoshop; the report dialog is the right place to mention it
-  until then.
+  reader, a separately written parser and `psd-tools`. Compatibility is likely and unconfirmed.
+  This is the first thing to do with a real Photoshop; the report dialog is the right place to
+  mention it until then.
 * **The window.** The dialog, the report and the notice are covered by component tests against a
   mocked command boundary and the command by tests of the real command, but the packaged app
   has not been driven through an export.

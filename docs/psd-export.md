@@ -9,9 +9,12 @@ Choose **Export**, then *Photoshop document (layers kept)* in the file dialog (o
 dither) do not apply: a Photoshop file holds the layers. The document on screen is not changed.
 
 The depth is chosen for you: 8-bit for an 8-bit document, 16-bit for a high-precision one, and
-32-bit when a high-precision document holds colour brighter than white (the report says so). A
-`.psb` name asks for the large format; a `.psd` that is too big for the format is written as
-`.psb` instead and the report says so.
+32-bit when a high-precision document holds colour a 16-bit sRGB file cannot keep: brighter than
+white, or more saturated than sRGB (what a photo from an Adobe RGB or Display P3 file usually
+does). The report says so; a file of that kind is several times the size, because 32-bit
+channels are stored raw. A rounding error at white (1.0003) does not count. A `.psb` name asks
+for the large format; a `.psd` that is too big for the format is written as `.psb` instead and
+the report says so.
 
 ## What is written exactly
 
@@ -43,9 +46,9 @@ Each appears in the report as **approximated**.
 * **Per-channel tone adjustments** (Brightness, Contrast, Gamma, Black/White point and the like,
   where each colour channel is changed on its own) are sampled into Photoshop Curves in the same
   way.
-* **Highlights brighter than white** are clipped when the file is made 8- or 16-bit on request
-  (the command takes a depth; the Export dialog does not ask for one). Left to itself the exporter
-  writes such a document as 32-bit and nothing is lost.
+* **Colour brighter than white, or more saturated than sRGB,** is clipped when the file is made
+  8- or 16-bit on request (the command takes a depth; the Export dialog does not ask for one).
+  Left to itself the exporter writes such a document as 32-bit and nothing is lost.
 
 ## What is left out
 
@@ -82,20 +85,30 @@ there. PhotoForge will not write over a file that a layer in the document is lin
   tests of each rule, through the command boundary, and through the importer.
 * **Real files.** The 290 psd-tools files the importer opens (MIT, not committed) were each
   imported, exported and imported again: all 290 came back with the same layers; **274 as the
-  identical picture** and 16 within a level on average, none further; 55 MiB written, the slowest
-  file 1.6 s. The 16 are files with adjustment layers or opacities that are sampled or rounded
+  identical picture** and 16 within a level on average, none further; 48 MiB written, the slowest
+  file 1.7 s. The 16 are files with adjustment layers or opacities that are sampled or rounded
   a second time; the largest single difference is 26 levels, in `curves_rgb.psd` at a sharp
   feature of one curve (mean 0.30).
 * **Independently of this code.** A parser written outside PhotoForge reads the same file for
-  the layer records, the tagged blocks, their padding and the channel data; it found that block
-  lengths must include their padding (the first version did not, and PhotoForge's own reader did
-  not mind), which is now fixed and has a test that walks the bytes without the reader's
-  leniency.
+  the layer records, the tagged blocks, their padding and the channel data (all 290 pass); it
+  found that block lengths must include their padding (the first version did not, and
+  PhotoForge's own reader did not mind), which is now fixed and has a test that walks the bytes
+  without the reader's leniency.
+* **By a mature reader.** `psd-tools` 1.24 (the project the sample files come from) opened all
+  290 exports. Its layer lists match the originals' in order, with the same rectangle for every
+  matched layer; the pixels of 450 of 478 matched pixel layers are identical and 11 more are
+  within two levels. The other 17 are layers whose depth or colour space changed on import (a
+  32-bit file's linear light is written as 16-bit sRGB; an Adobe RGB file is written as linear
+  sRGB at 32 bits). Compared in one encoding they agree to 0.4 level or better (30 layers). The
+  differences it shows in settings are the importer's documented ones: five pass-through groups
+  that were imported as isolated because a clipped layer is based on them, and fill opacity
+  multiplied into opacity.
 
-**Not checked: opening the file in Photoshop** (or any program that is not this one's own reader
-or the independent parser). The layout follows the specification and the files Photoshop wrote
-in the same suite, and a program with a stricter reader could still disagree. Until someone opens
-a file in Photoshop, Affinity or GIMP, treat compatibility as likely and unconfirmed.
+**Not checked: opening the file in Photoshop** (or any program other than this one's own
+reader, the separately written parser, and `psd-tools`). The layout follows the specification and
+the files Photoshop wrote in the same suite, and a program with a stricter reader could still
+disagree. Until someone opens a file in Photoshop, Affinity or GIMP, treat compatibility as
+likely and unconfirmed.
 
 To repeat the real-file check on your own files, point `PHOTOFORGE_PSD_SAMPLES` at a file or folder
 and run `cargo test --test psd_export_real -- --nocapture` from `src-tauri`. Without the variable

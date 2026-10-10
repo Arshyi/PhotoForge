@@ -2100,6 +2100,46 @@ mod exporter {
         assert!((back.pixels()[0].green - 0.5).abs() < 1e-5);
     }
 
+    #[test]
+    fn the_depth_follows_whether_colour_is_outside_white_and_black_by_more_than_rounding() {
+        let depth_for = |pixel: FloatRgba| {
+            let mut store = LayerPixelStore::default();
+            store.reset(2, 2).unwrap();
+            let id = store
+                .register_float(FloatImage::blank(2, 2, pixel).unwrap())
+                .unwrap();
+            let mut document = LayerDocument::new(2, 2);
+            document.precision = DocumentPrecision::LinearSrgbF32;
+            document.layers.push(new_layer(
+                "px",
+                "Px",
+                LayerContent::Pixel {
+                    pixel_id: id,
+                    width: 2,
+                    height: 2,
+                },
+                "t",
+            ));
+            let resolved = store
+                .resolve(&document.referenced_pixel_ids(), false)
+                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("d.psd");
+            export_psd(&document, &resolved, &path, &ExportOptions::default()).unwrap()
+        };
+        // White after a profile conversion's rounding is still white: 16 bits, and no report.
+        let report = depth_for(FloatRgba::new(1.0003, 0.5, -0.0002, 1.0));
+        assert_eq!(report.bit_depth, 16);
+        assert!(report.entries.is_empty(), "{:?}", report.entries);
+        // Brighter than white by a visible amount, or below black (a colour more saturated than
+        // sRGB, in linear sRGB), needs 32 bits to be kept.
+        assert_eq!(depth_for(FloatRgba::new(1.05, 0.5, 0.5, 1.0)).bit_depth, 32);
+        assert_eq!(
+            depth_for(FloatRgba::new(0.5, 0.5, -0.05, 1.0)).bit_depth,
+            32
+        );
+    }
+
     fn rendered_float(imported: &Imported) -> FloatImage {
         let document = &imported.project.document;
         let mut store = LayerPixelStore::default();
