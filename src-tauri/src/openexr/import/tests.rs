@@ -1,8 +1,12 @@
 use super::*;
-use crate::openexr::testing::{multipart, patch_compression, TestFile};
+use crate::openexr::testing::{
+    add_header_attributes, attribute, header_len, multipart, patch_compression, patch_tile_size,
+    peak_heap, replace_single_block, TestFile,
+};
 use crate::psd::ReportKind;
-use exr::math::Vec2;
-use exr::meta::attribute::Compression as Codec;
+use crate::resources::policy::MIN_BUDGET_BYTES;
+use exr::math::{RoundingMode, Vec2};
+use exr::meta::attribute::{Compression as Codec, LevelMode, TileDescription};
 
 fn limits() -> ImportLimits {
     ImportLimits {
@@ -457,6 +461,167 @@ fn a_header_that_claims_more_than_the_budget_is_refused_without_a_pixel_read() {
 }
 
 #[test]
+fn a_tiny_file_cannot_name_a_block_the_budget_cannot_hold() {
+    // The header of a 4 x 4 picture says its tiles are 2^29 pixels square. The reader would set
+    // aside the 2 GiB a block may claim before it read a byte of the block, from a file of a few
+    // hundred bytes. (The block in the file is real and small; the claim is in the header.)
+    let mut bytes = small_rgb().tiled(4).bytes();
+    assert!(import_bytes(&bytes).is_ok());
+    patch_tile_size(&mut bytes, 1 << 29, 1 << 29);
+    let message = error_text(import_bytes(&bytes));
+    assert!(message.contains("blocks of up to 2047 MiB"), "{message}");
+    assert!(message.contains("1024 MiB"), "{message}");
+
+    // A tile larger than the picture is something writers do, and costs what the picture does.
+    assert!(import_bytes(&small_rgb().tiled(64).bytes()).is_ok());
+}
+
+#[test]
+fn channels_nobody_reads_count_toward_what_a_block_needs() {
+    // 64 x 16 pixels, ZIP16 (16 lines to a block, so one block is the picture): red, green and
+    // blue and 61 others, all single precision, 64 x 4 = 256 bytes a pixel. The picture is
+    // 64 x 16 x 16 = 16 KiB. A block is 256 x 1,024 = 256 KiB, read into a buffer of its own and
+    // then decoded: four more of them, a row of 64 pixels and the codecs' tables.
+    let mut file = TestFile::new(64, 16)
+        .f32_channel("R", |_, _| 0.1)
+        .f32_channel("G", |_, _| 0.2)
+        .f32_channel("B", |_, _| 0.3);
+    for index in 0..61 {
+        file = file.f32_channel(&format!("aov{index:02}"), |_, _| 0.5);
+    }
+    let (picture, block) = (64 * 16 * 16, 256 * 64 * 16);
+    let needed = picture + block + 4 * block + 64 * 16 + DECODER_FIXED_BYTES;
+    let limits_with = |job_bytes| ImportLimits {
+        store_bytes: 1 << 30,
+        entry_bytes: 1 << 30,
+        job_bytes,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = file.write_to(directory.path(), "t.exr");
+    // Exactly enough opens, with the other channels named; one byte less is refused.
+    let imported = import_exr(&path, limits_with(needed)).unwrap();
+    assert!(has(
+        &imported.report,
+        ReportKind::NotImported,
+        "61 other channels"
+    ));
+    let message = error_text(import_exr(&path, limits_with(needed - 1)));
+    assert!(message.contains("decoding the file's blocks"), "{message}");
+    // One block alone may not be more than one buffer may be.
+    let narrow = ImportLimits {
+        entry_bytes: block - 1,
+        ..limits_with(1 << 30)
+    };
+    let message = error_text(import_exr(&path, narrow));
+    assert!(message.contains("blocks of up to"), "{message}");
+}
+
+#[test]
+fn a_block_the_reader_may_be_sent_to_by_another_part_is_costed_too() {
+    // The part a block belongs to is read from the block itself, so a part nobody imports can
+    // still be the one whose block is read.
+    let parts = multipart(&[small_rgb().named("beauty"), small_rgb().named("other")]);
+    let mut meta = MetaData::read_from_buffered(&parts[..], false).unwrap();
+    assert!(admit(&meta, &limits()).is_ok());
+    meta.headers[1].blocks = BlockDescription::Tiles(TileDescription {
+        tile_size: Vec2(1 << 29, 1 << 29),
+        level_mode: LevelMode::Singular,
+        rounding_mode: RoundingMode::Down,
+    });
+    assert!(admit(&meta, &limits()).is_err());
+    // A deep part is never decoded, so its blocks are not costed.
+    meta.headers[1].deep = true;
+    assert!(admit(&meta, &limits()).is_ok());
+}
+
+#[test]
+fn the_block_arithmetic_is_the_readers_and_cannot_overflow() {
+    // The largest block the reader will take is its own `max_block_byte_size`.
+    for file in [
+        TestFile::new(10, 7).compression(Codec::PIZ),
+        TestFile::new(10, 7).tiled(4),
+        TestFile::new(3, 40).compression(Codec::ZIP1),
+    ] {
+        let meta = meta_of(
+            &file
+                .f32_channel("R", |_, _| 0.1)
+                .f32_channel("G", |_, _| 0.1)
+                .f16_channel("B", |_, _| 0.1),
+        );
+        let header = &meta.headers[0];
+        assert_eq!(
+            block_memory(header).buffer,
+            header.max_block_byte_size() as u64
+        );
+    }
+    // Every field at its most: saturates, and is refused, instead of wrapping to a small number.
+    let mut meta = meta_of(&small_rgb().tiled(4));
+    meta.headers[0].channels.bytes_per_pixel = usize::MAX;
+    meta.headers[0].blocks = BlockDescription::Tiles(TileDescription {
+        tile_size: Vec2(u32::MAX as usize, u32::MAX as usize),
+        level_mode: LevelMode::Singular,
+        rounding_mode: RoundingMode::Down,
+    });
+    assert_eq!(block_memory(&meta.headers[0]).peak, u64::MAX);
+    assert!(admit(&meta, &limits()).is_err());
+}
+
+/// A small file whose first header is `length` bytes long, padded by one unused text attribute.
+fn with_header_of(length: usize) -> Vec<u8> {
+    let base = small_rgb().bytes();
+    // name\0 type\0 size(i32) value
+    let fill = length - header_len(&base) - b"pad\0string\0".len() - 4;
+    let bytes = add_header_attributes(&base, &attribute(b"pad", b"string", &vec![b'x'; fill]));
+    assert_eq!(header_len(&bytes), length);
+    bytes
+}
+
+#[test]
+fn a_header_longer_than_the_cap_is_refused_before_it_is_parsed() {
+    let cap = MAX_HEADER_BYTES as usize;
+    // A header of exactly the cap is read whole: a long manifest is a legitimate thing to carry.
+    let imported = import_bytes(&with_header_of(cap)).expect("a header of the cap opens");
+    assert_eq!(imported.report.layers_imported, 1);
+    // One byte more and it is refused, naming the header, not as a file that is cut short.
+    let message = error_text(import_bytes(&with_header_of(cap + 1)));
+    assert!(message.contains("header is longer than"), "{message}");
+    assert!(!message.contains("can be read"), "{message}");
+}
+
+#[test]
+fn a_header_of_many_tiny_attributes_costs_the_cap_and_not_the_file() {
+    // 20,000 attributes of ten bytes (a three-byte name, a one-byte type, a size of nought) are a
+    // 200 KB file that the reader holds as 16 MB: a table entry of about 340 bytes each, and the
+    // table doubling.
+    let mut attributes = Vec::new();
+    for index in 0..20_000_usize {
+        let name = [
+            1 + (index / 62_500) as u8,
+            1 + (index / 250 % 250) as u8,
+            1 + (index % 250) as u8,
+        ];
+        attributes.extend(attribute(&name, b"q", &[]));
+    }
+    let bytes = add_header_attributes(&small_rgb().bytes(), &attributes);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("t.exr");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let cap = 64 << 10;
+    let (uncapped, whole) = peak_heap(|| read_header(&path, u64::MAX));
+    assert!(uncapped.is_ok());
+    drop(uncapped);
+    assert!(whole > 128 * cap, "{whole}");
+    let (capped, held) = peak_heap(|| read_header(&path, cap));
+    let message = capped.expect_err("cut at the cap").to_string();
+    assert!(message.contains("header is longer than"), "{message}");
+    assert!(held < 128 * cap, "{held}");
+    // What the real cap allows is 127 times itself at the most, measured (66 MB in the first read
+    // and 132 MB across an import): half of the smallest budget a machine can be set to is left.
+    const { assert!(MAX_HEADER_BYTES * 128 <= MIN_BUDGET_BYTES / 2) };
+}
+
+#[test]
 fn pictures_that_would_not_fit_beside_the_first_are_left_out_and_named() {
     let file = TestFile::new(8, 6)
         .f32_channel("R", |_, _| 0.1)
@@ -484,6 +649,127 @@ fn pictures_that_would_not_fit_beside_the_first_are_left_out_and_named() {
         "would not fit in memory"
     ));
     assert!(has(&imported.report, ReportKind::NotImported, "two"));
+}
+
+#[test]
+fn a_block_is_decoded_beside_the_pictures_already_read() {
+    // Three pictures of 8 x 6 (768 bytes each) in nine single-precision channels: 36 bytes a
+    // pixel, and with ZIP16 a block of 16 x 8 pixels is declared and 8 x 6 are there. A block
+    // is read as 36 x 128 = 4,608 bytes and decoded as 36 x 48 = 1,728, held four times over,
+    // with a row of 8 pixels and the codecs' tables.
+    let mut file = TestFile::new(8, 6)
+        .f32_channel("R", |_, _| 0.1)
+        .f32_channel("G", |_, _| 0.1)
+        .f32_channel("B", |_, _| 0.1);
+    for prefix in ["one", "two"] {
+        for channel in ["R", "G", "B"] {
+            file = file.f32_channel(&format!("{prefix}.{channel}"), |_, _| 0.2);
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = file.write_to(directory.path(), "t.exr");
+    let block = 4_608 + 4 * 1_728 + 8 * 16 + DECODER_FIXED_BYTES;
+    // Room for two pictures and a block: the third is left out, though the store holds it.
+    let two = ImportLimits {
+        store_bytes: 1 << 30,
+        entry_bytes: 1 << 30,
+        job_bytes: 2 * 768 + block,
+    };
+    let imported = import_exr(&path, two).unwrap();
+    assert_eq!(imported.project.document.layers.len(), 2);
+    assert!(has(
+        &imported.report,
+        ReportKind::NotImported,
+        "would not fit in memory"
+    ));
+    assert!(has(&imported.report, ReportKind::NotImported, "two"));
+    // Not even one picture and a block: refused whole.
+    let none = ImportLimits {
+        job_bytes: 768 + block - 1,
+        ..two
+    };
+    assert!(import_exr(&path, none).is_err());
+}
+
+/// A picture of one tile of run-length data, four single-precision channels: 16 bytes a pixel,
+/// so the picture and its block are each 65 x 65 x 16 = 67,600 bytes. (65 rather than 64 because
+/// a decoded block of 64 times that is then just over a power of two, which is when the buffer
+/// that grows by doubling holds the most beside it.)
+const TILE: usize = 65;
+const BLOCK: u64 = (TILE * TILE * 16) as u64;
+
+fn run_length_tile() -> TestFile {
+    TestFile::new(TILE, TILE)
+        .compression(Codec::RLE)
+        .tiled(TILE)
+        .f32_channel("R", |_, _| 0.1)
+        .f32_channel("G", |_, _| 0.2)
+        .f32_channel("B", |_, _| 0.3)
+        .f32_channel("A", |_, _| 1.0)
+}
+
+fn limits_of_job(job_bytes: u64) -> ImportLimits {
+    ImportLimits {
+        store_bytes: 1 << 30,
+        entry_bytes: 1 << 30,
+        job_bytes,
+    }
+}
+
+#[test]
+fn a_run_length_block_is_costed_at_what_its_runs_can_expand_to() {
+    // The block is read into 67,600 bytes and its runs may make 64 times that (a run of 128 bytes
+    // is stored as two), in a buffer grown to twice, with the reordering copy: three times 64
+    // blocks, beside the pixels of an earlier block, a row of 65 pixels and the codecs' tables.
+    let row = TILE as u64 * 16;
+    let needed = BLOCK + BLOCK + 3 * 64 * BLOCK + BLOCK + row + DECODER_FIXED_BYTES;
+    let directory = tempfile::tempdir().unwrap();
+    let path = run_length_tile().write_to(directory.path(), "t.exr");
+    assert!(import_exr(&path, limits_of_job(needed)).is_ok());
+    let message = error_text(import_exr(&path, limits_of_job(needed - 1)));
+    assert!(message.contains("decoding the file's blocks"), "{message}");
+
+    // The same block in a codec that is given the size it may produce is not multiplied.
+    let zip = run_length_tile().compression(Codec::ZIP16);
+    let path = zip.write_to(directory.path(), "z.exr");
+    let needed = BLOCK + BLOCK + 4 * BLOCK + row + DECODER_FIXED_BYTES;
+    assert!(import_exr(&path, limits_of_job(needed)).is_ok());
+    assert!(import_exr(&path, limits_of_job(needed - 1)).is_err());
+}
+
+#[test]
+fn runs_that_step_over_the_size_of_a_block_are_held_within_what_was_admitted() {
+    // A tile of stored bytes that are a one-byte run and then runs of 128. The reader stops when
+    // the output is exactly the size it expects, and these never land on it (they total
+    // 1 + 128 k, and a block is an even number of bytes), so it decodes to the end of the stored
+    // bytes: 64 times as many, before it finds that they are the wrong size. The file is 67 KB.
+    let file = run_length_tile();
+    let stored = BLOCK - 2; // not the block's size, or it would be taken as raw pixels
+    let mut runs = vec![0x00, 0x00];
+    for _ in 1..stored / 2 {
+        runs.extend_from_slice(&[0x7F, 0x00]);
+    }
+    let hostile = replace_single_block(&file.bytes(), &runs);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("t.exr");
+    std::fs::write(&path, &hostile).unwrap();
+
+    let admitted = BLOCK + block_memory(&meta_of(&file).headers[0]).peak;
+    let (result, held) = peak_heap(|| import_exr(&path, limits()));
+    let message = error_text(result);
+    assert!(message.contains("decoded"), "{message}");
+    // That the runs were expanded, and into more than the two copies (the output and the
+    // reordering buffer) a doubling buffer would hold if it were exact: this is the case that
+    // needs the three.
+    assert!(held > 2 * 64 * stored, "{held} bytes held");
+    assert!(held <= admitted, "held {held}, admitted {admitted}");
+
+    // At a budget below what the file can make the reader hold, it is refused before any of it
+    // is read.
+    let (result, held) = peak_heap(|| import_exr(&path, limits_of_job(admitted - 1)));
+    let message = error_text(result);
+    assert!(message.contains("decoding the file's blocks"), "{message}");
+    assert!(held < stored, "the block was read: {held} bytes held");
 }
 
 #[test]

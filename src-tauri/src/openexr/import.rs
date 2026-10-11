@@ -26,16 +26,38 @@ use crate::pixel::DocumentPrecision;
 use crate::psd::{ImportLimits, ReportEntry, ReportKind};
 use exr::meta::attribute::{Compression, SampleType, Text};
 use exr::meta::header::Header;
-use exr::meta::MetaData;
+use exr::meta::{BlockDescription, MetaData};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 /// The largest file read. A legitimate multi-layer render can be large; a file past this is
 /// refused before anything else is looked at.
 pub const MAX_EXR_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// The most bytes of header read: every attribute of every part, before the first offset table.
+/// The reader keeps all it parses and the file's length says nothing of how many attributes it
+/// holds: each one, down to the ten bytes of a three-byte name, a one-byte type and a size of
+/// nought, becomes a table entry of about 340 bytes (an `AttributeValue` and its key), so a header
+/// of some tens of megabytes made it hold gigabytes before anything was admitted. A header of this
+/// many bytes of such attributes holds at most 66 MB in the first read and 132 MB across an
+/// import (the headers are read again to decode, and their attributes copied), measured with a
+/// counting allocator on the pinned `exr`: under half of the smallest budget a machine can be set
+/// to (`MIN_BUDGET_BYTES`, 512 MiB). Real headers are far smaller: a thousand channels with long
+/// names are 37 KB, and a hundred parts under 43 KB.
+const MAX_HEADER_BYTES: u64 = 1 << 20;
 /// The most colour sets (a main picture and its passes) imported as layers from one file.
 const MAX_SETS: usize = 16;
+/// What the codecs hold whatever the block. PIZ has the most, about 1.2 MiB of code and lookup
+/// tables (its encoding table alone is 65,537 entries of 8 bytes); the others, and the reader,
+/// hold tens of KiB. Measured with a counting allocator.
+const DECODER_FIXED_BYTES: u64 = 2 << 20;
+/// How many times its stored size a run-length block can grow when it is decoded: a run of 128
+/// bytes is stored as two. The reader stops decoding when the output is exactly the size it
+/// expects, but a run that steps over that size does not stop it, so a hostile block is decoded to
+/// the end of its stored bytes and only then found to be the wrong size. (The other codecs are
+/// given the size they may produce and stop at it.)
+const RLE_EXPANSION: u128 = 64;
 /// Where an infinite sample is put: the largest finite half-precision value, so a pixel that was
 /// "infinitely bright" is bright, not a hole.
 const HALF_MAX: f32 = 65_504.0;
@@ -79,6 +101,28 @@ pub struct ImportedExr {
 
 fn refuse(message: impl Into<String>) -> AppError {
     AppError::foreign_file(message.into())
+}
+
+/// Reads the headers of the file at `path`, and no more than `max_bytes` of it: the reader keeps
+/// every attribute it parses and the file's length says nothing of how many there are, so the
+/// bytes it may read are what bound what it may hold.
+fn read_header(path: &Path, max_bytes: u64) -> Result<MetaData, AppError> {
+    let unreadable = |error: &dyn std::fmt::Display| {
+        refuse(format!(
+            "the file is not an OpenEXR image that can be read: {error}"
+        ))
+    };
+    let file = std::fs::File::open(path).map_err(|error| unreadable(&error))?;
+    let mut limited = BufReader::new(file).take(max_bytes);
+    MetaData::read_from_buffered(&mut limited, false).map_err(|error| {
+        if limited.limit() == 0 {
+            refuse(format!(
+                "the file's header is longer than the {max_bytes} bytes of it that PhotoForge reads"
+            ))
+        } else {
+            unreadable(&error)
+        }
+    })
 }
 
 /// How the channels of a set are named: OpenEXR's `R G B A`, or the long names some compositors
@@ -293,6 +337,76 @@ fn display_name(set: &ColourSet, header_name: Option<&str>) -> String {
     })
 }
 
+/// What the reader holds in memory to decode one block of a part, from the part's header alone,
+/// with the reader's own arithmetic. A block is not the picture: a tile size, the channels and the
+/// lines a codec packs per block (a few bytes of header) name a block of any size, however small
+/// the picture is.
+///
+/// The figures are those of the `exr` version this program pins (see the dependency in
+/// `Cargo.toml`); they were measured with a counting allocator, and a new version is to be
+/// measured again.
+struct BlockMemory {
+    /// The largest single block buffer.
+    buffer: u64,
+    /// Everything held at once while the block is read and decoded.
+    peak: u64,
+}
+
+fn block_memory(header: &Header) -> BlockMemory {
+    let wide = |value: usize| value as u128;
+    // The bytes of *all* the part's channels, read as colour or not: the reader decodes them all.
+    let bytes_per_pixel = wide(header.channels.bytes_per_pixel);
+    let (width, height) = (wide(header.layer_size.x()), wide(header.layer_size.y()));
+    // The pixels a block is declared to hold. A tile is not cut to the picture here, because the
+    // reader's limit for a block (`Header::max_block_byte_size`) is not.
+    let declared = match header.blocks {
+        BlockDescription::Tiles(tiles) => {
+            wide(tiles.tile_size.x()).saturating_mul(wide(tiles.tile_size.y()))
+        }
+        BlockDescription::ScanLines => {
+            wide(header.compression.scan_lines_per_block()).saturating_mul(width)
+        }
+    };
+    // The block is read first, into a buffer of the size its own field claims before a byte of it
+    // is read: up to that limit, and a block's size field is an `i32`.
+    let compressed = bytes_per_pixel
+        .saturating_mul(declared)
+        .min(i32::MAX as u128);
+    // Then, unless the codec is one the reader lacks (which stops before this), it is decoded into
+    // its pixels, cut to the picture. The codecs hold several copies of them while they do: PIZ
+    // and B44 two (the wavelet or table form and the output); ZIP three (the inflated bytes, in a
+    // buffer that has grown to twice the block, and the reordering copy); PXR24 four (the inflated
+    // bytes in the same grown buffer, and the output grown the same way). Beside them a row of
+    // pixels as the reader sets them (four single-precision samples) and the codecs' fixed tables.
+    let (decoded, decoding) = if compression_unsupported(header.compression).is_some() {
+        (0, 0)
+    } else {
+        let decoded = bytes_per_pixel.saturating_mul(declared.min(width.saturating_mul(height)));
+        let row = width.saturating_mul(16);
+        // Run-length decoding is the one whose output is not held to the block: a run that steps
+        // over the size the block is meant to be does not stop it. It holds up to `RLE_EXPANSION`
+        // times the stored bytes, in a buffer grown to twice that, and the reordering copy (three
+        // times), however small the block is meant to be, beside the reordering buffer an earlier
+        // block left (one block of pixels).
+        let held = if matches!(header.compression, Compression::RLE) {
+            compressed
+                .saturating_mul(3 * RLE_EXPANSION)
+                .saturating_add(decoded)
+        } else {
+            decoded.saturating_mul(4)
+        };
+        let decoding = held
+            .saturating_add(row)
+            .saturating_add(u128::from(DECODER_FIXED_BYTES));
+        (decoded, decoding)
+    };
+    let narrow = |value: u128| u64::try_from(value).unwrap_or(u64::MAX);
+    BlockMemory {
+        buffer: narrow(compressed.max(decoded)),
+        peak: narrow(compressed.saturating_add(decoding)),
+    }
+}
+
 /// Decides, from the header alone, what will be read and whether it can be.
 fn admit(meta: &MetaData, limits: &ImportLimits) -> Result<Admission, AppError> {
     let mut notes: Vec<(ReportKind, String)> = Vec::new();
@@ -442,7 +556,8 @@ fn admit(meta: &MetaData, limits: &ImportLimits) -> Result<Admission, AppError> 
         });
     }
     // One layer buffer is the picture's pixels at 16 bytes each; the raw samples are converted in
-    // place, so that is also the peak for one set.
+    // place, so that is the picture's whole share of the peak for one set. The blocks it is decoded
+    // through are costed below.
     let layer_bytes = pixels * 16;
     if layer_bytes > limits.entry_bytes {
         return Err(AppError::ResourceBudget {
@@ -457,9 +572,40 @@ fn admit(meta: &MetaData, limits: &ImportLimits) -> Result<Admission, AppError> 
             limits.store_bytes.min(limits.job_bytes) / (1 << 20)
         )));
     }
-    // Further sets that would not fit beside the first are left out, named.
+    // Decoding holds more than the picture: one block at a time, whose size the header names, not
+    // the picture. The reader takes the part a block belongs to from the block itself, so the
+    // block of any part can be the one decoded, and every part is costed, not only the picture's.
+    // (A deep part is never decoded: its blocks are read in small steps, as far as the file has
+    // bytes, and refused.)
+    let blocks = || {
+        meta.headers
+            .iter()
+            .filter(|part| !part.deep)
+            .map(block_memory)
+    };
+    let block_buffer = blocks().map(|block| block.buffer).max().unwrap_or(0);
+    let block_peak = blocks().map(|block| block.peak).max().unwrap_or(0);
+    if block_buffer > limits.entry_bytes {
+        return Err(refuse(format!(
+            "the file stores its pixels in blocks of up to {} MiB, more than the {} MiB PhotoForge will hold in one buffer",
+            block_buffer / (1 << 20),
+            limits.entry_bytes / (1 << 20)
+        )));
+    }
+    if layer_bytes.saturating_add(block_peak) > limits.job_bytes {
+        return Err(refuse(format!(
+            "the picture is {width} × {height} pixels and decoding the file's blocks beside it needs about {} MiB, more than the {} MiB PhotoForge will hold",
+            layer_bytes.saturating_add(block_peak) / (1 << 20),
+            limits.job_bytes / (1 << 20)
+        )));
+    }
+    // Further sets that would not fit beside the first are left out, named. A block is decoded
+    // beside the sets already read and the one being read.
     let mut fitting = sets.len();
-    while fitting > 1 && layer_bytes * fitting as u64 > limits.store_bytes {
+    while fitting > 1
+        && (layer_bytes * fitting as u64 > limits.store_bytes
+            || (layer_bytes * fitting as u64).saturating_add(block_peak) > limits.job_bytes)
+    {
         fitting -= 1;
     }
     if fitting < sets.len() {
@@ -713,13 +859,7 @@ pub fn import_exr(path: &Path, limits: ImportLimits) -> Result<ImportedExr, AppE
     }
     // The header first. This reads attributes and channel lists only; no pixel is decoded until
     // what the header claims has been checked against the budget.
-    let meta = guarded("read", || {
-        MetaData::read_from_file(path, false).map_err(|error| {
-            refuse(format!(
-                "the file is not an OpenEXR image that can be read: {error}"
-            ))
-        })
-    })?;
+    let meta = guarded("read", || read_header(path, MAX_HEADER_BYTES))?;
     let admission = admit(&meta, &limits)?;
     let header = &meta.headers[admission.header_index];
 

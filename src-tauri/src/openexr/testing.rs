@@ -218,3 +218,126 @@ pub fn patch_compression(bytes: &mut [u8], code: u8) {
     assert_eq!(bytes[at + key.len()], 1);
     bytes[value] = code;
 }
+
+/// Overwrites the tile size of a tiled file's first header (its `tiles` attribute).
+pub fn patch_tile_size(bytes: &mut [u8], width: u32, height: u32) {
+    let key = b"tiles\0tiledesc\0";
+    let at = bytes
+        .windows(key.len())
+        .position(|window| window == key)
+        .expect("the file has a tiles attribute");
+    // name\0 type\0 size(i32 = 9) x(u32) y(u32) mode(u8)
+    let value = at + key.len() + 4;
+    assert_eq!(bytes[at + key.len()], 9);
+    bytes[value..value + 4].copy_from_slice(&width.to_le_bytes());
+    bytes[value + 4..value + 8].copy_from_slice(&height.to_le_bytes());
+}
+
+/// The length of the first header of a file: its attributes and the byte that ends them.
+pub fn header_len(bytes: &[u8]) -> usize {
+    let mut at = 8; // the magic number and the version
+    while bytes[at] != 0 {
+        // name\0 type\0 size(i32) value
+        for _ in 0..2 {
+            at += bytes[at..].iter().position(|&byte| byte == 0).unwrap() + 1;
+        }
+        let size = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        at += 4 + size as usize;
+    }
+    at + 1
+}
+
+/// One attribute as a file stores it.
+pub fn attribute(name: &[u8], kind: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = [name, &[0], kind, &[0]].concat();
+    out.extend_from_slice(&(value.len() as i32).to_le_bytes());
+    out.extend_from_slice(value);
+    out
+}
+
+/// Adds attributes, as `attribute` makes them, to the header of a file with one part, and moves
+/// the positions of its blocks by as much, so that it is still a file the reader can read. (The
+/// first position in the offset table is taken to be the lowest, as the writer makes it.)
+pub fn add_header_attributes(bytes: &[u8], attributes: &[u8]) -> Vec<u8> {
+    let end = header_len(bytes);
+    let first = u64::from_le_bytes(bytes[end..end + 8].try_into().unwrap()) as usize;
+    let mut out = bytes[..end - 1].to_vec();
+    out.extend_from_slice(attributes);
+    out.extend_from_slice(&bytes[end - 1..]);
+    let table = end - 1 + attributes.len() + 1;
+    for entry in (0..(first - end) / 8).map(|entry| table + 8 * entry) {
+        let moved =
+            u64::from_le_bytes(out[entry..entry + 8].try_into().unwrap()) + attributes.len() as u64;
+        out[entry..entry + 8].copy_from_slice(&moved.to_le_bytes());
+    }
+    out
+}
+
+/// Replaces the stored bytes of the one block of a file whose picture is a single tile, keeping
+/// the header: a block the writer would never make, as a hostile file has.
+pub fn replace_single_block(bytes: &[u8], stored: &[u8]) -> Vec<u8> {
+    // The offset table is one u64, the block's own position, and the block follows it.
+    let mut starts = (8..bytes.len()).filter(|&at| bytes[at - 8..at] == (at as u64).to_le_bytes());
+    let start = starts.next().expect("the file has an offset table");
+    assert!(starts.next().is_none(), "the block position is ambiguous");
+    // x, y and level of the tile (four i32) are kept; the i32 size and the bytes are replaced.
+    assert!(bytes.len() > start + 20, "the file has a block");
+    let mut out = bytes[..start + 16].to_vec();
+    out.extend_from_slice(&(stored.len() as i32).to_le_bytes());
+    out.extend_from_slice(stored);
+    out
+}
+
+mod heap {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        // Plain counters without a destructor, so that touching them in the allocator is safe at
+        // any point in a thread's life, and per thread, so that tests running beside this one
+        // are not counted.
+        static HELD: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+
+    fn grow(bytes: usize) {
+        let held = HELD.get() + bytes as isize;
+        HELD.set(held);
+        if held > PEAK.get() {
+            PEAK.set(held);
+        }
+    }
+
+    struct Counting;
+
+    // SAFETY: every call is forwarded to the system allocator unchanged; only sizes are counted.
+    // (`realloc` is the default one, an allocation, a copy and a free, which counts the old and
+    // the new block together as an allocator that cannot resize in place holds them.)
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = System.alloc(layout);
+            if !pointer.is_null() {
+                grow(layout.size());
+            }
+            pointer
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            System.dealloc(pointer, layout);
+            HELD.set(HELD.get() - layout.size() as isize);
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// Runs `work` and returns its result with the most heap this thread held at once above where
+    /// it began.
+    pub fn peak_heap<T>(work: impl FnOnce() -> T) -> (T, u64) {
+        let base = HELD.get();
+        PEAK.set(base);
+        let result = work();
+        (result, (PEAK.get() - base).max(0) as u64)
+    }
+}
+
+pub use heap::peak_heap;

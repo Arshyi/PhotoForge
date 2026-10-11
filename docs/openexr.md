@@ -59,10 +59,24 @@ PhotoForge project.
 
 A file is admitted from its **header** before any pixel is decoded: the data and display windows
 are checked against the largest canvas and the working-pixel limit, and one layer's pixels (16
-bytes each) against the entry, store and job budgets of the resource manager. A picture that would
-not fit beside the first is left out and named; a first picture that does not fit is refused. A
-file over 4 GiB is refused before it is opened. An allocation is never made from a size the file
-claims without that check.
+bytes each) against the entry, store and job budgets of the resource manager. So is the memory the
+reader needs to decode **one block**, which the header names, not the picture: a tile size, the
+lines a codec packs, and the bytes of *every* channel, read as colour or not. The block as the file
+may claim it must fit one buffer (the entry budget), and it read and decoded (up to four copies of
+it in the worst codec, a row of pixels and the codecs' tables) beside the pictures must fit the job
+budget. Run-length data is the exception to the four copies: the reader does not stop it at the
+size the block is meant to be, so it is costed at what its runs can expand to, 192 times its
+stored size (64 times, held three times over). That refuses a run-length block of more than about
+20 MiB at the default 4 GiB budget (a tile about 1,150 pixels square in four single-precision
+channels); a scan-line block is one line, and a tile 256 pixels square in the same channels is
+1 MiB. This is worked out for every part of the file that is not deep data, because the part a
+block belongs to is read from the block itself. A picture that would not fit beside the first is
+left out and named; a first picture that does not fit is refused. A file over 4 GiB is refused
+before it is opened. A file whose **header** (every attribute of every part) is longer than 1 MiB
+is refused as well: the reader keeps all it parses, and a header of tiny attributes is held as
+about a hundred times its length, so what it may read is capped, not left to the size of the file
+(a thousand channels are 37 KB). An allocation is never made from a size the file claims without
+that check.
 
 ## Writing an EXR
 
@@ -110,15 +124,19 @@ primaries, the admission, the report) is PhotoForge's own code in `src-tauri/src
 
 ## How it was checked
 
-* **Unit tests** (62): each conversion above on its own (premultiplied colour, values above one and
+* **Unit tests** (71): each conversion above on its own (premultiplied colour, values above one and
   below zero, light without alpha, alpha outside 0 to 1, not-a-number and infinity, a tiny alpha
   that must not become infinity, the primaries matrix applied to straight colour); the channel
   sets (long names, a prefix, a pass that must not borrow the main picture's alpha, integer
   channels, no colour at all, luminance/chroma); the windows; a multi-part file; every codec the
   reader has; tiled files; DWAA, DWAB and HTJ2K refused by name from a patched header; deep data;
-  headers that claim more than the budget; sets that would not fit; the 16-set bound; a file that
-  is not an EXR; a sparse file claiming more than 4 GiB; **every truncation and a changed byte of a
-  file at every position, none of which panics**.
+  headers that claim more than the budget, and blocks they name that it cannot hold (a tile 2²⁹
+  pixels square in a 4 × 4 file, 61 channels nobody reads, another part's block, run-length data
+  whose runs step over the size of its block, with the heap it holds measured); a header at the
+  1 MiB cap and one byte over it, and one of tiny attributes, with the heap it holds measured;
+  sets that would not fit; the 16-set bound; a file that is not an EXR; a sparse file claiming
+  more than 4 GiB; **every truncation and a changed byte of a file at every position, none of
+  which panics**.
 * **The primaries matrix against published numbers.** ACEScg (AP1), ACES 2065-1 (AP0, whose blue
   has a *negative* y) and Rec. 2020 each reproduce the matrix the ACES documentation and BT.2087
   list, and the rows of every matrix sum to one (white stays white).
