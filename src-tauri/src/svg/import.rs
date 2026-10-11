@@ -24,13 +24,21 @@ use crate::vector::{
     FillRule, LineCap, LineJoin, PathCommand, ShapeGeometry, StrokeStyle, VectorPath,
     MAX_PATH_COMMANDS,
 };
-use roxmltree::{Document, Node, ParsingOptions};
+use roxmltree::{Document, Node, NodeId, ParsingOptions};
 use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The largest SVG file read.
 pub const MAX_SVG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_NODES: u32 = 200_000;
+/// The deepest nesting of elements read, the root `<svg>` included. The parser and the walk both
+/// recurse once per level, and the node limit alone would let a file ask for 200,000 levels. Groups
+/// past `MAX_GROUP_DEPTH` are flattened, not refused, so a real drawing may nest well beyond it;
+/// 16 times that is far past any drawing, and it takes under half of a worker thread's 2 MiB stack
+/// in an unoptimised build (about 3.6 KiB a level, measured), where the test for it runs.
+const MAX_ELEMENT_DEPTH: usize = 256;
 /// The largest edge of the canvas an SVG may ask for, in pixels.
 const MAX_EDGE: f64 = 16_384.0;
 
@@ -1036,7 +1044,13 @@ fn parse_length(text: &str, reference: f64) -> Option<f32> {
 // ---------------------------------------------------------------------------------------------
 
 struct Importer<'a, 'input> {
-    document: &'a Document<'input>,
+    /// Every element that has an `id`, the first one in document order when several share it,
+    /// found in one pass so that a `url(#id)` is a lookup and not a scan of the whole file.
+    ids: HashMap<&'a str, Node<'a, 'input>>,
+    /// What a gradient element stands for as a paint, worked out the first time it is asked for.
+    gradients: RefCell<HashMap<NodeId, Option<Srgba>>>,
+    /// The colour of the first `<stop>` child of an element, worked out the first time.
+    stops: RefCell<HashMap<NodeId, Option<Srgba>>>,
     report: SvgImportReport,
     layers: usize,
     counter: usize,
@@ -1059,49 +1073,62 @@ impl Importer<'_, '_> {
     }
 
     fn gradient_colour(&self, id: &str) -> Option<Srgba> {
-        let target = self
-            .document
-            .descendants()
-            .find(|n| n.is_element() && n.attribute("id") == Some(id))?;
+        let target = *self.ids.get(id)?;
         if !matches!(
             target.tag_name().name(),
             "linearGradient" | "radialGradient"
         ) {
             return None;
         }
+        if let Some(known) = self.gradients.borrow().get(&target.id()) {
+            return *known;
+        }
         // A gradient may inherit its stops through an `href`; one hop is followed, inside the file.
-        let holder = if target.children().any(|c| c.has_tag_name("stop")) {
-            target
-        } else {
+        // Only one, so a chain of them or a loop of them ends at the second gradient.
+        let colour = self.first_stop(target).or_else(|| {
             let href = target
                 .attribute("href")
                 .or_else(|| target.attribute(("http://www.w3.org/1999/xlink", "href")))?;
-            let inner = href.strip_prefix('#')?;
-            self.document
-                .descendants()
-                .find(|n| n.is_element() && n.attribute("id") == Some(inner))?
-        };
-        let stop = holder.children().find(|c| c.has_tag_name("stop"))?;
-        let mut colour = stop
-            .attribute("stop-color")
-            .and_then(parse_colour)
-            .or_else(|| {
-                stop.attribute("style").and_then(|style| {
-                    style
-                        .split(';')
-                        .filter_map(|d| d.split_once(':'))
-                        .find(|(n, _)| n.trim() == "stop-color")
-                        .and_then(|(_, v)| parse_colour(v))
-                })
-            })
-            .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-        if let Some(opacity) = stop
-            .attribute("stop-opacity")
-            .and_then(|v| v.parse::<f32>().ok())
-        {
-            colour[3] *= opacity.clamp(0.0, 1.0);
+            let inner = *self.ids.get(href.strip_prefix('#')?)?;
+            self.first_stop(inner)
+        });
+        self.gradients.borrow_mut().insert(target.id(), colour);
+        colour
+    }
+
+    /// The colour of the first `<stop>` of `holder`, if it has one. Many gradients may inherit from
+    /// one holder, and many paints may name one gradient, so each holder is read once.
+    fn first_stop(&self, holder: Node<'_, '_>) -> Option<Srgba> {
+        if let Some(known) = self.stops.borrow().get(&holder.id()) {
+            return *known;
         }
-        Some(colour)
+        let colour = holder
+            .children()
+            .find(|c| c.has_tag_name("stop"))
+            .map(|stop| {
+                let mut colour = stop
+                    .attribute("stop-color")
+                    .and_then(parse_colour)
+                    .or_else(|| {
+                        stop.attribute("style").and_then(|style| {
+                            style
+                                .split(';')
+                                .filter_map(|d| d.split_once(':'))
+                                .find(|(n, _)| n.trim() == "stop-color")
+                                .and_then(|(_, v)| parse_colour(v))
+                        })
+                    })
+                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                if let Some(opacity) = stop
+                    .attribute("stop-opacity")
+                    .and_then(|v| v.parse::<f32>().ok())
+                {
+                    colour[3] *= opacity.clamp(0.0, 1.0);
+                }
+                colour
+            });
+        self.stops.borrow_mut().insert(holder.id(), colour);
+        colour
     }
 
     fn walk(
@@ -1112,6 +1139,16 @@ impl Importer<'_, '_> {
         depth: usize,
         out: &mut Vec<Layer>,
     ) {
+        // `check_nesting` has already refused a file nested this deep; this keeps the recursion
+        // below bounded on its own account, whatever the parser let through.
+        if depth >= MAX_ELEMENT_DEPTH {
+            self.note(
+                ReportKind::NotImported,
+                None,
+                format!("Elements nested more than {MAX_ELEMENT_DEPTH} deep were not imported."),
+            );
+            return;
+        }
         for child in node.children().filter(Node::is_element) {
             if self.layers >= MAX_LAYERS {
                 self.note(
@@ -1573,9 +1610,81 @@ fn clamp_name(name: &str) -> String {
     }
 }
 
+/// Refuses text whose elements nest more than `MAX_ELEMENT_DEPTH` deep, without parsing it.
+///
+/// The parser recurses once per open element and has no depth limit of its own (only the node
+/// limit), so a few thousand `<g>` abort the whole process with a stack overflow before any of this
+/// importer's code runs. This reads the markup the way the parser does, skipping comments, CDATA,
+/// processing instructions and quoted attribute values, and counts open elements. Text the parser
+/// would refuse anyway is not this function's business: it stops where the parser would.
+fn check_nesting(text: &str) -> Result<(), AppError> {
+    let bytes = text.as_bytes();
+    // The first place at or after `from` where `needle` starts.
+    let find = |from: usize, needle: &[u8]| -> Option<usize> {
+        let tail = bytes.get(from..)?;
+        tail.windows(needle.len())
+            .position(|window| window == needle)
+            .map(|at| from + at)
+    };
+    let mut depth = 0_usize;
+    let mut at = 0;
+    while let Some(offset) = bytes[at..].iter().position(|byte| *byte == b'<') {
+        at += offset;
+        let rest = &bytes[at..];
+        let next = if rest.starts_with(b"<!--") {
+            find(at + 4, b"-->").map(|end| end + 3)
+        } else if rest.starts_with(b"<![CDATA[") {
+            find(at + 9, b"]]>").map(|end| end + 3)
+        } else if rest.starts_with(b"<?") {
+            find(at + 2, b"?>").map(|end| end + 2)
+        } else if rest.starts_with(b"<!") {
+            // A DTD or a stray declaration: the parser refuses it.
+            return Ok(());
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            find(at + 2, b">").map(|end| end + 1)
+        } else {
+            // A start tag runs to the first `>` outside a quoted value; `/>` closes it at once.
+            depth += 1;
+            if depth > MAX_ELEMENT_DEPTH {
+                return Err(AppError::foreign_file(format!(
+                    "the SVG nests elements more than {MAX_ELEMENT_DEPTH} deep"
+                )));
+            }
+            let mut quote = None;
+            let mut end = None;
+            for (index, byte) in bytes.iter().enumerate().skip(at + 1) {
+                match (quote, *byte) {
+                    (Some(open), byte) if byte == open => quote = None,
+                    (Some(_), _) => {}
+                    (None, b'"' | b'\'') => quote = Some(*byte),
+                    (None, b'>') => {
+                        end = Some(index);
+                        break;
+                    }
+                    (None, _) => {}
+                }
+            }
+            end.map(|end| {
+                if bytes[end - 1] == b'/' {
+                    depth -= 1;
+                }
+                end + 1
+            })
+        };
+        match next {
+            Some(next) => at = next,
+            // Unterminated: the parser refuses it.
+            None => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
 /// Reads `text` as SVG.
 pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    check_nesting(text)?;
     let options = ParsingOptions {
         allow_dtd: false,
         nodes_limit: MAX_NODES,
@@ -1631,8 +1740,16 @@ pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
         });
     }
 
+    let mut ids = HashMap::new();
+    for element in document.descendants().filter(Node::is_element) {
+        if let Some(id) = element.attribute("id") {
+            ids.entry(id).or_insert(element);
+        }
+    }
     let mut importer = Importer {
-        document: &document,
+        ids,
+        gradients: RefCell::default(),
+        stops: RefCell::default(),
         report: SvgImportReport {
             format: "SVG".to_string(),
             width: canvas_width,
@@ -2353,5 +2470,259 @@ mod tests {
         assert!(import_svg(&binary).is_err());
         assert!(import_svg(dir.path()).is_err());
         assert!(import_svg(&dir.path().join("missing.svg")).is_err());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Hostile nesting and many references
+    // -----------------------------------------------------------------------------------------
+
+    /// Runs `work` on a thread with the given stack and gives up on it after `seconds`, so that a
+    /// regression is a failed test and not a test run that never ends.
+    fn on_a_thread<T: Send + 'static>(
+        stack: usize,
+        seconds: u64,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                let _ = sender.send(work());
+            })
+            .unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(seconds))
+            .unwrap_or_else(|error| panic!("the import did not finish: {error:?}"))
+    }
+
+    /// A 20 x 20 SVG whose body is `inner`.
+    fn svg_with(inner: &str) -> String {
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">{inner}</svg>"#)
+    }
+
+    /// `levels` nested `open` elements around a rectangle; `close` ends one.
+    fn nested(open: &str, close: &str, levels: usize) -> String {
+        svg_with(&format!(
+            r#"{}<rect width="4" height="4"/>{}"#,
+            open.repeat(levels),
+            close.repeat(levels)
+        ))
+    }
+
+    const WORKER_STACK: usize = 2 * 1024 * 1024;
+
+    #[test]
+    fn nesting_that_would_overflow_the_parsers_stack_is_refused_unread() {
+        // A few thousand levels is a few kilobytes of text. The parser recurses once per open
+        // element and the node limit is the only thing that stops it, so on a worker's 2 MiB stack
+        // this aborted the process. The stack here is large enough for the old code to finish, so
+        // that the old code fails the assertion instead of taking the test run down with it.
+        for (open, close) in [
+            ("<g>", "</g>"),
+            ("<a>", "</a>"),
+            ("<defs>", "</defs>"),
+            ("<x>", "</x>"),
+        ] {
+            let svg = nested(open, close, 5000);
+            let result = on_a_thread(64 * 1024 * 1024, 10, move || {
+                import_svg_text(&svg).map(|_| ())
+            });
+            let error = result.expect_err(open).to_string();
+            assert!(
+                error.contains("nests elements more than"),
+                "{open}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_at_the_depth_limit_imports_on_a_workers_stack_and_one_level_more_is_refused() {
+        // `<svg>` and the rectangle count as levels too.
+        let at_the_limit = nested("<g>", "</g>", MAX_ELEMENT_DEPTH - 2);
+        let imported = on_a_thread(WORKER_STACK, 10, move || {
+            import_svg_text(&at_the_limit).unwrap()
+        });
+        assert_eq!(imported.report.layers_imported, 1);
+        imported.project.document.validate().unwrap();
+        let one_more = nested("<g>", "</g>", MAX_ELEMENT_DEPTH - 1);
+        assert!(import_svg_text(&one_more).is_err());
+        // A start tag that closes itself is still a level while it is read.
+        let leaf = svg_with(&format!(
+            "{}<g/>{}",
+            "<g>".repeat(MAX_ELEMENT_DEPTH - 2),
+            "</g>".repeat(MAX_ELEMENT_DEPTH - 2)
+        ));
+        assert!(import_svg_text(&leaf).is_ok());
+        let leaf = svg_with(&format!(
+            "{}<g/>{}",
+            "<g>".repeat(MAX_ELEMENT_DEPTH - 1),
+            "</g>".repeat(MAX_ELEMENT_DEPTH - 1)
+        ));
+        assert!(import_svg_text(&leaf).is_err());
+    }
+
+    #[test]
+    fn nesting_is_counted_the_way_the_parser_reads_markup() {
+        let deep = "<g>".repeat(MAX_ELEMENT_DEPTH + 10);
+        // Markup inside a comment, CDATA, a processing instruction or text is not an element, and
+        // siblings and a quoted `>` or `/>` do not stack.
+        let quiet = svg_with(&format!(
+            "<!-- {deep} --><title><![CDATA[{deep}]]></title><?note {deep}?>{}<g a=\"/>\" b='>'/><g></g >",
+            "<g/>".repeat(10_000)
+        ));
+        assert!(import_svg_text(&quiet).is_ok());
+        // But a quoted `/>` does not close a tag that is still open.
+        let quoted = nested(r#"<g title="/>">"#, "</g>", MAX_ELEMENT_DEPTH);
+        assert!(import_svg_text(&quoted).is_err());
+        let quoted = nested(r#"<g title='>'>"#, "</g>", MAX_ELEMENT_DEPTH);
+        assert!(import_svg_text(&quoted).is_err());
+        // Depth comes back down after a close, so a long file of shallow groups is fine.
+        let flat = svg_with(&"<g><g><g></g></g></g>".repeat(5_000));
+        assert!(import_svg_text(&flat).is_ok());
+        // Text the parser refuses is still refused, whatever the scan made of it.
+        for broken in [
+            "<svg",
+            "<svg width=\"5",
+            "<svg><!-- ",
+            "<svg><![CDATA[",
+            "<svg><?x ",
+            "<!DOCTYPE svg><svg/>",
+            "</g></g></g>",
+        ] {
+            assert!(import_svg_text(broken).is_err(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn the_walk_stops_on_its_own_at_the_depth_limit() {
+        // Deeper than the limit but shallow enough for the parser, which `import_svg_text` would
+        // have refused first; the walk must still not follow it down.
+        let svg = nested("<g>", "</g>", MAX_ELEMENT_DEPTH + 30);
+        let document = Document::parse_with_options(
+            &svg,
+            ParsingOptions {
+                allow_dtd: false,
+                nodes_limit: MAX_NODES,
+            },
+        )
+        .unwrap();
+        let mut importer = Importer {
+            ids: HashMap::new(),
+            gradients: RefCell::default(),
+            stops: RefCell::default(),
+            report: SvgImportReport::default(),
+            layers: 0,
+            counter: 0,
+            canvas: (20.0, 20.0),
+        };
+        let mut layers = Vec::new();
+        importer.walk(
+            document.root_element(),
+            &Style::default(),
+            &Affine::IDENTITY,
+            0,
+            &mut layers,
+        );
+        assert!(has(
+            &importer.report,
+            ReportKind::NotImported,
+            "nested more than"
+        ));
+        assert_eq!(importer.layers, 0);
+    }
+
+    #[test]
+    fn ten_thousand_paint_references_do_not_each_scan_the_file() {
+        // Each reference to an id that is not there used to read every node of the file, so
+        // references times nodes was well over a billion steps for a file of under a megabyte.
+        let svg = svg_with(&format!(
+            r##"<defs><linearGradient id="a"><stop offset="0" stop-color="#f80"/></linearGradient></defs>{}{}"##,
+            "<!---->".repeat(150_000),
+            r##"<g fill="url(#a)" stroke="url(#missing)"/>"##.repeat(10_000)
+        ));
+        let imported = on_a_thread(WORKER_STACK, 5, move || import_svg_text(&svg).unwrap());
+        let count = |text: &str| {
+            imported
+                .report
+                .entries
+                .iter()
+                .filter(|entry| entry.detail.contains(text))
+                .count()
+        };
+        assert_eq!(count("first colour"), 10_000);
+        assert_eq!(count("not in the file"), 10_000);
+    }
+
+    #[test]
+    fn many_gradients_that_share_a_heavy_holder_read_it_once() {
+        // The holder has thousands of children before its first stop, and every gradient takes its
+        // stops from it by `href`: finding the stop again for each paint would be a scan apiece.
+        let svg = svg_with(&format!(
+            r##"<defs><linearGradient id="a">{}<stop stop-color="#f80"/></linearGradient>{}</defs>{}"##,
+            "<x/>".repeat(20_000),
+            (0..20_000)
+                .map(|i| format!(r##"<linearGradient id="g{i}" href="#a"/>"##))
+                .collect::<String>(),
+            (0..20_000)
+                .map(|i| format!(r##"<g fill="url(#g{i})"/>"##))
+                .collect::<String>(),
+        ));
+        let imported = on_a_thread(WORKER_STACK, 5, move || import_svg_text(&svg).unwrap());
+        let found = imported
+            .report
+            .entries
+            .iter()
+            .filter(|entry| entry.detail.contains("first colour"))
+            .count();
+        assert_eq!(found, 20_000);
+    }
+
+    #[test]
+    fn a_paint_names_the_first_element_with_its_id_and_follows_one_href_only() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100">
+            <defs>
+              <linearGradient id="base"><stop offset="0" stop-color="#ff0000" stop-opacity="0.5"/></linearGradient>
+              <linearGradient id="one" href="#base"/>
+              <radialGradient id="legacy" xlink:href="#base"/>
+              <linearGradient id="two" href="#one"/>
+              <linearGradient id="loop-a" href="#loop-b"/>
+              <linearGradient id="loop-b" href="#loop-a"/>
+              <linearGradient id="itself" href="#itself"/>
+              <linearGradient id="dup"><stop stop-color="#00ff00"/></linearGradient>
+              <linearGradient id="dup"><stop stop-color="#0000ff"/></linearGradient>
+              <linearGradient id="empty"/>
+            </defs>
+            <rect id="r-base" width="1" height="1" fill="url(#base)"/>
+            <rect id="r-one" width="1" height="1" fill="url(#one)"/>
+            <rect id="r-legacy" width="1" height="1" fill="url('#legacy')"/>
+            <rect id="r-two" width="1" height="1" fill="url(#two)"/>
+            <rect id="r-loop" width="1" height="1" fill="url(#loop-a)"/>
+            <rect id="r-itself" width="1" height="1" fill="url(#itself)"/>
+            <rect id="r-dup" width="1" height="1" fill="url(#dup)"/>
+            <rect id="r-empty" width="1" height="1" fill="url(#empty)"/>
+            <rect id="r-shape" width="1" height="1" fill="url(#r-base)"/>
+            <rect id="r-missing" width="1" height="1" fill="url(#nothing)"/>
+            <rect id="r-again" width="1" height="1" fill="url(#one)"/>
+        </svg>"##;
+        let imported = import(svg);
+        let fills: Vec<Option<ShapeColor>> =
+            shapes(&imported).iter().map(|shape| shape.fill).collect();
+        let red_at_half = Some(ShapeColor::new(1.0, 0.0, 0.0, 0.5));
+        assert_eq!(
+            fills,
+            vec![
+                red_at_half,                               // base
+                red_at_half,                               // one: one hop to base
+                red_at_half,                               // legacy: the xlink spelling
+                None,                                      // two: a second hop is not followed
+                None,                                      // a loop ends after one hop
+                None,                                      // so does a gradient that names itself
+                Some(ShapeColor::new(0.0, 1.0, 0.0, 1.0)), // dup: the first element with the id
+                None,                                      // no stops
+                None,                                      // the id of a rectangle
+                None,                                      // no such id
+                red_at_half,                               // asked a second time, answered the same
+            ]
+        );
     }
 }
