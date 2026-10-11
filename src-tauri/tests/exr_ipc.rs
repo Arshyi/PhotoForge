@@ -225,7 +225,7 @@ fn an_existing_file_is_replaced_whole_and_an_invalid_document_leaves_it() {
     let input = directory.path().join("render.exr");
     write_render(&input);
     let harness = Harness::new();
-    let mut document = harness.open(&input, 1).unwrap()["project"]["document"].clone();
+    let document = harness.open(&input, 1).unwrap()["project"]["document"].clone();
     let output = directory.path().join("out.exr");
     std::fs::write(&output, b"what was here").unwrap();
     let mut bad = document.clone();
@@ -236,10 +236,93 @@ fn an_existing_file_is_replaced_whole_and_an_invalid_document_leaves_it() {
     assert!(std::fs::read(&output)
         .unwrap()
         .starts_with(&[0x76, 0x2f, 0x31, 0x01]));
-    // The file that was opened is not replaced by an export of the same name unless the document
-    // no longer reads from it, which a document of pixels does not: it is a copy in memory.
-    document["canvasWidth"] = json!(12);
-    harness.export(&input, &document, None).unwrap();
+}
+
+#[test]
+fn the_file_the_document_was_opened_from_is_never_replaced_by_its_export() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("render.exr");
+    write_render(&input);
+    let original = std::fs::read(&input).unwrap();
+    let harness = Harness::new();
+    let document = harness.open(&input, 1).unwrap()["project"]["document"].clone();
+
+    // The same name, and the other ways of spelling the same file.
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    #[allow(unused_mut)]
+    let mut aliases = vec![
+        input.clone(),
+        directory.path().join("sub").join("..").join("render.exr"),
+    ];
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("link.exr");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        let folder = directory.path().join("folder-link");
+        std::os::unix::fs::symlink(directory.path(), &folder).unwrap();
+        let hard = directory.path().join("hard.exr");
+        std::fs::hard_link(&input, &hard).unwrap();
+        aliases.extend([link, folder.join("render.exr"), hard]);
+    }
+    let entries = std::fs::read_dir(directory.path()).unwrap().count();
+    for alias in &aliases {
+        let error = harness.export(alias, &document, None).unwrap_err();
+        assert_eq!(
+            error["code"],
+            "invalid_output_path",
+            "{}: {error}",
+            alias.display()
+        );
+        // It says what to do, and names no path.
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.contains("different"), "{error}");
+        assert!(!message.contains("render.exr"), "{error}");
+        assert_eq!(
+            std::fs::read(&input).unwrap(),
+            original,
+            "{}",
+            alias.display()
+        );
+    }
+    // Nothing was written beside it either, not even a temporary file.
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        entries
+    );
+
+    // Another name in the same folder is fine, whether it is new or an older file of its own.
+    harness
+        .export(&directory.path().join("again.exr"), &document, None)
+        .expect("a new name is allowed");
+    let taken = directory.path().join("taken.exr");
+    std::fs::write(&taken, b"an older export").unwrap();
+    harness
+        .export(&taken, &document, None)
+        .expect("another existing file is replaced");
+    assert!(std::fs::read(&taken)
+        .unwrap()
+        .starts_with(&[0x76, 0x2f, 0x31, 0x01]));
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+}
+
+#[test]
+fn a_document_with_no_source_file_can_be_exported() {
+    // A new document and a pasted picture have no file behind them: their source path is empty.
+    let directory = tempfile::tempdir().unwrap();
+    let harness = Harness::new();
+    let blank = harness
+        .call(
+            "create_blank_layer_document",
+            json!({ "width": 8, "height": 6, "requestId": 1 }),
+        )
+        .expect("a new document");
+    let output = directory.path().join("blank.exr");
+    harness
+        .export(&output, &blank["document"], None)
+        .expect("a document with no source file exports");
+    assert!(std::fs::read(&output)
+        .unwrap()
+        .starts_with(&[0x76, 0x2f, 0x31, 0x01]));
 }
 
 #[test]

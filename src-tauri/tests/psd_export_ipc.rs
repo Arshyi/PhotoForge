@@ -313,3 +313,114 @@ fn the_psb_name_is_not_taken_from_another_file() {
         "{entries:?}"
     );
 }
+
+#[test]
+fn the_file_the_document_was_opened_from_is_never_replaced_by_its_export() {
+    let harness = Harness::new();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("poster.psd");
+    let export = |path: &std::path::Path, document: &Value| {
+        harness.call(
+            "export_psd_document",
+            json!({
+                "outputPath": path.to_string_lossy(),
+                "document": document,
+                "operations": [],
+                "bitDepth": null,
+            }),
+        )
+    };
+    // A real file to open: one this exporter wrote, before any document was open.
+    let made = harness.document(&[
+        ("Sky", (16, 12), [10, 20, 200, 255]),
+        ("Sun", (6, 4), [250, 240, 30, 200]),
+    ]);
+    export(&input, &made).expect("the first export succeeds");
+    let original = std::fs::read(&input).unwrap();
+    let opened = harness
+        .call(
+            "import_psd_document",
+            json!({ "path": input.to_string_lossy(), "requestId": 1 }),
+        )
+        .expect("the import succeeds");
+    let document = opened["project"]["document"].clone();
+
+    // The same name, and the other ways of spelling the same file.
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    #[allow(unused_mut)]
+    let mut aliases = vec![
+        input.clone(),
+        directory.path().join("sub").join("..").join("poster.psd"),
+    ];
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("link.psd");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        let folder = directory.path().join("folder-link");
+        std::os::unix::fs::symlink(directory.path(), &folder).unwrap();
+        let hard = directory.path().join("hard.psd");
+        std::fs::hard_link(&input, &hard).unwrap();
+        aliases.extend([link, folder.join("poster.psd"), hard]);
+    }
+    let entries = std::fs::read_dir(directory.path()).unwrap().count();
+    for alias in &aliases {
+        let error = export(alias, &document).unwrap_err();
+        assert_eq!(
+            error["code"],
+            "invalid_output_path",
+            "{}: {error}",
+            alias.display()
+        );
+        // It says what to do, and names no path.
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.contains("different"), "{error}");
+        assert!(!message.contains("poster.psd"), "{error}");
+        assert_eq!(
+            std::fs::read(&input).unwrap(),
+            original,
+            "{}",
+            alias.display()
+        );
+    }
+    // Nothing was written beside it either, not even a temporary file.
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        entries
+    );
+
+    // Another name in the same folder is fine, whether it is new or an older file of its own.
+    export(&directory.path().join("again.psd"), &document).expect("a new name is allowed");
+    let taken = directory.path().join("taken.psd");
+    std::fs::write(&taken, b"an older export").unwrap();
+    export(&taken, &document).expect("another existing file is replaced");
+    assert!(std::fs::read(&taken).unwrap().starts_with(b"8BPS"));
+    assert_eq!(std::fs::read(&input).unwrap(), original);
+}
+
+#[test]
+fn a_document_with_no_source_file_can_be_exported() {
+    // A new document and a pasted picture have no file behind them: their source path is empty.
+    let harness = Harness::new();
+    let directory = tempfile::tempdir().unwrap();
+    let blank = harness
+        .call(
+            "create_blank_layer_document",
+            json!({ "width": 8, "height": 6, "requestId": 1 }),
+        )
+        .expect("a new document");
+    for name in ["blank.psd", "blank.psb"] {
+        let output = directory.path().join(name);
+        harness
+            .call(
+                "export_psd_document",
+                json!({
+                    "outputPath": output.to_string_lossy(),
+                    "document": blank["document"],
+                    "operations": [],
+                    "bitDepth": null,
+                }),
+            )
+            .expect("a document with no source file exports");
+        assert!(std::fs::read(&output).unwrap().starts_with(b"8BPS"));
+    }
+}

@@ -76,7 +76,8 @@ data would pass 2 GiB. The pixel memory needed is checked against the same budge
 file, before anything is written, and a file that would not fit is refused with the numbers.
 
 The file is written beside its destination and then renamed, so a failed export leaves what was
-there. PhotoForge will not write over a file that a layer in the document is linked to.
+there. PhotoForge will not write over a file that a layer in the document is linked to, or over the
+file the document was opened from, however its path is spelled; it asks for a different file name.
 
 ## How it was checked
 

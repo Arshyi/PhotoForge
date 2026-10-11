@@ -1333,6 +1333,36 @@ fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) 
     raw || smart
 }
 
+/// The file the open document was read from, or an empty path when there is none: no document is
+/// open, or it is one that never came from a file (a clipboard picture or a new blank document,
+/// whose source path is empty).
+fn session_source_path(state: &AppState) -> Result<PathBuf, AppError> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+    Ok(session
+        .as_ref()
+        .map(|session| session.source.path.clone())
+        .unwrap_or_default())
+}
+
+/// Refuses an export of the layered document that would replace a file the document still reads
+/// from (a linked RAW file or smart source) or the file it was opened from. The raster exports
+/// refuse the latter in `validate_output_path`; Photoshop, SVG and OpenEXR files are written by
+/// other code, so this is where they are held to the same rule. Called before anything is
+/// written.
+fn ensure_export_replaces_no_input(
+    document: &LayerDocument,
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), AppError> {
+    if document_reads_from(document, destination) {
+        return Err(AppError::InvalidOutputPath);
+    }
+    crate::infrastructure::image_io::refuse_to_replace_source(source, destination)
+}
+
 /// Opens the picture on the system clipboard as a new, unsaved document of one pixel layer.
 ///
 /// Like opening a file, the replacement is staged before the session changes and a superseded
@@ -1475,11 +1505,10 @@ pub async fn export_svg_document(
         return Err(AppError::InvalidOutputPath);
     }
     let _permit = state.export_gate.lock().await;
+    let source = session_source_path(&state)?;
     let started = Instant::now();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        if document_reads_from(&document, &destination) {
-            return Err(AppError::InvalidOutputPath);
-        }
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
         let exported = crate::svg::export_svg(&document, &crate::svg::SvgOptions { operations })?;
         crate::psd::export::write_beside_then_rename(&destination, exported.text.as_bytes())?;
         Ok::<_, AppError>((destination, exported.report))
@@ -1599,14 +1628,13 @@ pub async fn export_exr_document(
         &plan.prepared,
         crate::metadata::container::Placed::default(),
     );
+    let source = session_source_path(&state)?;
     let (resolved, _) = resolve_pixels(&state, &document, false)?;
     let started = Instant::now();
     let (written, report) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        // An export never replaces a file the document still reads from.
-        if document_reads_from(&document, &destination) {
-            return Err(AppError::InvalidOutputPath);
-        }
+        // An export never replaces a file the document still reads from or was opened from.
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
         let exported = crate::openexr::export_exr(
             &document,
             &resolved,
@@ -1682,14 +1710,13 @@ pub async fn export_psd_document(
         return Err(AppError::InvalidOutputPath);
     }
     let force_large_format = extension.as_deref() == Some("psb");
+    let source = session_source_path(&state)?;
     let (resolved, _) = resolve_pixels(&state, &document, false)?;
     let started = Instant::now();
     let (written, report) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        // An export never replaces a file the document still reads from.
-        if document_reads_from(&document, &destination) {
-            return Err(AppError::InvalidOutputPath);
-        }
+        // An export never replaces a file the document still reads from or was opened from.
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
         let options = crate::psd::ExportOptions {
             bit_depth,
             operations,

@@ -27,10 +27,14 @@ impl Harness {
     }
 
     fn call(&self, body: Value) -> Result<Value, Value> {
+        self.run("export_svg_document", body)
+    }
+
+    fn run(&self, command: &str, body: Value) -> Result<Value, Value> {
         let response = tauri::test::get_ipc_response(
             &self.webview,
             InvokeRequest {
-                cmd: "export_svg_document".into(),
+                cmd: command.into(),
                 callback: tauri::ipc::CallbackFn(0),
                 error: tauri::ipc::CallbackFn(1),
                 url: "http://tauri.localhost".parse().unwrap(),
@@ -172,6 +176,106 @@ fn an_existing_file_is_replaced_whole_and_an_invalid_document_leaves_it() {
         }))
         .unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("<svg"));
+}
+
+const ART: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+  <rect id="Sky" x="0" y="0" width="120" height="50" fill="#2a6fdb"/>
+  <circle id="Sun" cx="90" cy="20" r="12" fill="#ffd400" stroke="#c07a00" stroke-width="2"/>
+</svg>"##;
+
+#[test]
+fn the_file_the_document_was_opened_from_is_never_replaced_by_its_export() {
+    let harness = Harness::new();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("art.svg");
+    std::fs::write(&input, ART).unwrap();
+    let opened = harness
+        .run(
+            "import_svg_document",
+            json!({ "path": input.to_string_lossy(), "requestId": 1 }),
+        )
+        .expect("the import succeeds");
+    let document = opened["project"]["document"].clone();
+    let export = |path: &std::path::Path| {
+        harness.call(json!({
+            "outputPath": path.to_string_lossy(),
+            "document": document,
+            "operations": [],
+        }))
+    };
+
+    // The same name, and the other ways of spelling the same file.
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    #[allow(unused_mut)]
+    let mut aliases = vec![
+        input.clone(),
+        directory.path().join("sub").join("..").join("art.svg"),
+    ];
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("link.svg");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        let folder = directory.path().join("folder-link");
+        std::os::unix::fs::symlink(directory.path(), &folder).unwrap();
+        let hard = directory.path().join("hard.svg");
+        std::fs::hard_link(&input, &hard).unwrap();
+        aliases.extend([link, folder.join("art.svg"), hard]);
+    }
+    let entries = std::fs::read_dir(directory.path()).unwrap().count();
+    for alias in &aliases {
+        let error = export(alias).unwrap_err();
+        assert_eq!(
+            error["code"],
+            "invalid_output_path",
+            "{}: {error}",
+            alias.display()
+        );
+        // It says what to do, and names no path.
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.contains("different"), "{error}");
+        assert!(!message.contains("art.svg"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&input).unwrap(),
+            ART,
+            "{}",
+            alias.display()
+        );
+    }
+    // Nothing was written beside it either, not even a temporary file.
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        entries
+    );
+
+    // Another name in the same folder is fine, whether it is new or an older file of its own.
+    export(&directory.path().join("again.svg")).expect("a new name is allowed");
+    let taken = directory.path().join("taken.svg");
+    std::fs::write(&taken, b"an older export").unwrap();
+    export(&taken).expect("another existing file is replaced");
+    assert!(std::fs::read_to_string(&taken).unwrap().contains("<svg"));
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), ART);
+}
+
+#[test]
+fn a_document_with_no_source_file_can_be_exported() {
+    // A new document and a pasted picture have no file behind them: their source path is empty.
+    let harness = Harness::new();
+    let directory = tempfile::tempdir().unwrap();
+    let blank = harness
+        .run(
+            "create_blank_layer_document",
+            json!({ "width": 8, "height": 6, "requestId": 1 }),
+        )
+        .expect("a new document");
+    let output = directory.path().join("blank.svg");
+    harness
+        .call(json!({
+            "outputPath": output.to_string_lossy(),
+            "document": blank["document"],
+            "operations": [],
+        }))
+        .expect("a document with no source file exports");
+    assert!(std::fs::read_to_string(&output).unwrap().contains("<svg"));
 }
 
 #[test]

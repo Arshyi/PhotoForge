@@ -428,24 +428,83 @@ pub(super) fn validate_output_path(
     }
 
     let original = fs::canonicalize(original_path).map_err(map_io_error)?;
-    let output = if output_path.exists() {
+    let output = resolve_output_path(output_path)?;
+
+    if paths_equal(&original, &output) {
+        return Err(AppError::InvalidOutputPath);
+    }
+    Ok(output)
+}
+
+/// Where a write to `output_path` would land, with symbolic links, `..` segments and short names
+/// resolved: the file itself when it exists, otherwise its folder (which must exist) joined to
+/// its name.
+fn resolve_output_path(output_path: &Path) -> Result<PathBuf, AppError> {
+    if output_path.exists() {
         if !output_path.is_file() {
             return Err(AppError::InvalidOutputPath);
         }
-        fs::canonicalize(output_path).map_err(map_io_error)?
+        fs::canonicalize(output_path).map_err(map_io_error)
     } else {
         let parent = output_path.parent().ok_or(AppError::InvalidOutputPath)?;
         let canonical_parent = fs::canonicalize(parent).map_err(map_io_error)?;
         if !canonical_parent.is_dir() {
             return Err(AppError::InvalidOutputPath);
         }
-        canonical_parent.join(output_path.file_name().ok_or(AppError::InvalidOutputPath)?)
-    };
+        Ok(canonical_parent.join(output_path.file_name().ok_or(AppError::InvalidOutputPath)?))
+    }
+}
 
-    if paths_equal(&original, &output) {
+/// Refuses an export that would replace the file the open document was read from.
+///
+/// This is the rule [`validate_output_path`] applies to the raster formats, for the exports that
+/// do not go through it (Photoshop, SVG and OpenEXR). The destination is compared with `source`
+/// after both are resolved, so a relative spelling, a symbolic link, `..` segments, a short name
+/// or another case (where the file system ignores case) of the source is still the source, and
+/// on Unix so is a hard link to it. The refusal is the raster one: it asks for a different file
+/// name and names no path.
+///
+/// An empty `source` is a document that was not read from a file (a picture pasted from the
+/// clipboard, a new blank document): there is nothing to protect, and that is not an error. A
+/// destination that does not exist yet is not the source, and nothing is when the source itself
+/// can no longer be reached (an unplugged drive): the export then replaces nothing the document
+/// came from.
+pub(crate) fn refuse_to_replace_source(source: &Path, destination: &Path) -> Result<(), AppError> {
+    if source.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let Ok(source) = fs::canonicalize(source) else {
+        return Ok(());
+    };
+    if !destination.exists() {
+        return Ok(());
+    }
+    // What cannot be resolved is not a file this export would replace; the export meets the same
+    // fault when it writes, and reports it in its own words.
+    let Ok(destination) = resolve_output_path(destination) else {
+        return Ok(());
+    };
+    if paths_equal(&source, &destination) || is_same_file(&source, &destination) {
         return Err(AppError::InvalidOutputPath);
     }
-    Ok(output)
+    Ok(())
+}
+
+/// Whether two existing paths are one file under two names (a hard link), which no spelling of
+/// the path shows. Only Unix reports a file's identity through the standard library; elsewhere
+/// the resolved paths that [`paths_equal`] compares are all there is.
+#[cfg(unix)]
+fn is_same_file(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_file(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -548,6 +607,171 @@ mod tests {
             validate_output_path(&original, &original),
             Err(AppError::InvalidOutputPath)
         ));
+    }
+
+    /// A folder holding `scene.exr` (any bytes will do: the guard compares files, not contents).
+    fn folder_with_source() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("scene.exr");
+        fs::write(&source, b"the original").unwrap();
+        (directory, source)
+    }
+
+    #[test]
+    fn a_source_is_never_replaced_whatever_its_spelling() {
+        let (directory, source) = folder_with_source();
+        fs::create_dir(directory.path().join("sub")).unwrap();
+        #[allow(unused_mut)] // only the Unix aliases below add to it
+        let mut aliases = vec![
+            source.clone(),
+            directory.path().join("sub").join("..").join("scene.exr"),
+            directory.path().join(".").join("scene.exr"),
+        ];
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("link.exr");
+            std::os::unix::fs::symlink(&source, &link).unwrap();
+            let folder = directory.path().join("folder-link");
+            std::os::unix::fs::symlink(directory.path(), &folder).unwrap();
+            // A path that climbs out of the folder and back in by its own name.
+            let name = directory.path().file_name().unwrap();
+            let climbing = directory.path().join("..").join(name).join("scene.exr");
+            aliases.extend([link, folder.join("scene.exr"), climbing]);
+        }
+        for alias in &aliases {
+            assert!(
+                matches!(
+                    refuse_to_replace_source(&source, alias),
+                    Err(AppError::InvalidOutputPath)
+                ),
+                "{} was not refused",
+                alias.display()
+            );
+        }
+        // And the other way round: the source may be the one spelled indirectly.
+        let indirect = directory.path().join("sub").join("..").join("scene.exr");
+        assert!(matches!(
+            refuse_to_replace_source(&indirect, &source),
+            Err(AppError::InvalidOutputPath)
+        ));
+        assert_eq!(fs::read(&source).unwrap(), b"the original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_spelling_of_the_source_is_still_the_source() {
+        let (_directory, source) = folder_with_source();
+        // The source relative to the folder the tests run in, as `../../tmp/x/scene.exr`.
+        let here = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in here
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            relative.push("..");
+        }
+        relative.push(source.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        assert!(matches!(
+            refuse_to_replace_source(&source, &relative),
+            Err(AppError::InvalidOutputPath)
+        ));
+        assert!(matches!(
+            refuse_to_replace_source(&relative, &source),
+            Err(AppError::InvalidOutputPath)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_the_source_is_the_source() {
+        let (directory, source) = folder_with_source();
+        let hard = directory.path().join("hard.exr");
+        fs::hard_link(&source, &hard).unwrap();
+        assert!(matches!(
+            refuse_to_replace_source(&source, &hard),
+            Err(AppError::InvalidOutputPath)
+        ));
+        assert!(matches!(
+            refuse_to_replace_source(&hard, &source),
+            Err(AppError::InvalidOutputPath)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn another_case_of_the_source_is_the_source() {
+        let (directory, source) = folder_with_source();
+        let shouted = directory.path().join("SCENE.EXR");
+        assert!(matches!(
+            refuse_to_replace_source(&source, &shouted),
+            Err(AppError::InvalidOutputPath)
+        ));
+    }
+
+    #[test]
+    fn another_file_is_not_the_source() {
+        let (directory, source) = folder_with_source();
+        // Beside it, existing or not, and in another folder.
+        let beside = directory.path().join("other.exr");
+        fs::write(&beside, b"somebody else's").unwrap();
+        let nested = directory.path().join("sub");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("scene.exr"), b"same name, other folder").unwrap();
+        for other in [
+            beside,
+            directory.path().join("new.exr"),
+            directory.path().join("scene.exr.psd"),
+            nested.join("scene.exr"),
+            nested.join("new.exr"),
+        ] {
+            assert!(
+                refuse_to_replace_source(&source, &other).is_ok(),
+                "{} was refused",
+                other.display()
+            );
+        }
+        // A destination that cannot be written for another reason is that export's to report.
+        assert!(
+            refuse_to_replace_source(&source, &directory.path().join("no/such/new.exr")).is_ok()
+        );
+        assert!(refuse_to_replace_source(&source, directory.path()).is_ok());
+        assert!(refuse_to_replace_source(&source, Path::new("")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_another_file_is_not_the_source() {
+        let (directory, source) = folder_with_source();
+        let other = directory.path().join("other.exr");
+        fs::write(&other, b"somebody else's").unwrap();
+        let link = directory.path().join("link.exr");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        let dangling = directory.path().join("dangling.exr");
+        std::os::unix::fs::symlink(directory.path().join("gone.exr"), &dangling).unwrap();
+        assert!(refuse_to_replace_source(&source, &link).is_ok());
+        assert!(refuse_to_replace_source(&source, &dangling).is_ok());
+    }
+
+    #[test]
+    fn a_document_with_no_source_file_has_nothing_to_protect() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("scene.exr");
+        fs::write(&existing, b"somebody's file").unwrap();
+        for destination in [existing, directory.path().join("new.exr")] {
+            assert!(refuse_to_replace_source(Path::new(""), &destination).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_source_that_is_gone_cannot_be_replaced() {
+        let (directory, source) = folder_with_source();
+        let elsewhere = directory.path().join("elsewhere.exr");
+        fs::write(&elsewhere, b"another file").unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(refuse_to_replace_source(&source, &elsewhere).is_ok());
+        // The name it had is free to be used again.
+        assert!(refuse_to_replace_source(&source, &source).is_ok());
     }
 
     #[test]
