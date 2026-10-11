@@ -7,10 +7,10 @@
     type PsdImportReport,
     type PsdReportKind
   } from '../layers/psd';
-  import type { SvgExportReport } from '../layers/svg';
+  import type { SvgExportReport, SvgImportReport } from '../layers/svg';
 
-  /** The report of an import, or of an export when `mode` says so. An SVG export is shown too. */
-  export let report: PsdImportReport | PsdExportReport | SvgExportReport;
+  /** The report of an import, or of an export when `mode` says so. An SVG's is shown too. */
+  export let report: PsdImportReport | PsdExportReport | SvgExportReport | SvgImportReport;
   export let mode: 'import' | 'export' = 'import';
   export let fileName = '';
   export let onclose: () => void = () => {};
@@ -32,7 +32,11 @@
         : 'These are not in the Photoshop file, and the layers around them show without them there. Your document here is unchanged.'
     },
     approximated: {
-      title: exporting ? 'Written, but not exactly as in PhotoForge' : 'Imported, but not exactly as in Photoshop',
+      title: exporting
+        ? 'Written, but not exactly as in PhotoForge'
+        : isSvg
+          ? 'Imported, but not exactly as in the SVG'
+          : 'Imported, but not exactly as in Photoshop',
       help: exporting
         ? 'These went into the file, changed in the way each line describes.'
         : 'These came across, changed in the way each line describes.'
@@ -86,7 +90,7 @@
   >
     <div class="modal-heading">
       <div>
-        <span>{isSvg ? 'SVG export' : mode === 'export' ? 'Photoshop export' : 'Photoshop import'}</span>
+        <span>{isSvg ? (exporting ? 'SVG export' : 'SVG import') : exporting ? 'Photoshop export' : 'Photoshop import'}</span>
         <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : 'Photoshop document')}</h1>
       </div>
       <button type="button" aria-label="Close import report" on:click={onclose}>×</button>
@@ -120,7 +124,7 @@
         </section>
       {/each}
       <p class="fine">
-        {#if isSvg}
+        {#if isSvg && exporting}
           Your document in PhotoForge is not changed. Open the file in a browser or a vector editor
           to see it there; where it differs from PhotoForge is listed above.
         {:else if mode === 'export'}

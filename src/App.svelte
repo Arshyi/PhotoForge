@@ -225,7 +225,15 @@
     type PsdExportReport,
     type PsdImportReport
   } from './lib/layers/psd';
-  import { exportSvgDocument, isSvgPath, svgExportSentence, type SvgExportReport } from './lib/layers/svg';
+  import {
+    exportSvgDocument,
+    importSvgDocument,
+    isSvgPath,
+    svgExportSentence,
+    svgImportSentence,
+    type SvgExportReport,
+    type SvgImportReport
+  } from './lib/layers/svg';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import {
     describeSource,
@@ -419,7 +427,7 @@
    */
   /** The report of the Photoshop document just opened, while it is being read. */
   let psdReport: {
-    report: PsdImportReport | PsdExportReport | SvgExportReport;
+    report: PsdImportReport | PsdExportReport | SvgExportReport | SvgImportReport;
     fileName: string;
     mode: 'import' | 'export';
   } | null = null;
@@ -700,6 +708,7 @@
         filters: [
           { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
           { name: 'Photoshop (PSD, PSB)', extensions: ['psd', 'psb'] },
+          { name: 'SVG (opened as shape layers)', extensions: ['svg'] },
           { name: 'Camera RAW (DNG)', extensions: ['dng'] }
         ]
       });
@@ -1129,6 +1138,11 @@
     // survive; it has its own command and never goes through image admission.
     if (isPhotoshopPath(path)) {
       await importPhotoshop(path);
+      return;
+    }
+    // An SVG likewise: shapes, not pixels, with a report of what the subset left out.
+    if (isSvgPath(path)) {
+      await importSvg(path);
       return;
     }
     // Before anything about the open document is touched, so that choosing Cancel
@@ -2887,6 +2901,29 @@
       const fileName = result.project.metadata.filename;
       psdReport = { report: result.report, fileName, mode: 'import' };
       notify(importSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /** Opens an SVG as a document of shape layers, with a report of what was left out. */
+  async function importSvg(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importSvgDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the SVG.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(svgImportSentence(fileName, result.report));
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {

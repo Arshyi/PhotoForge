@@ -42,6 +42,11 @@ wasmtime = { version = "=49.0.2", optional = true, default-features = false, fea
 miniz_oxide = "0.8"
 crc32fast = "1"
 png = "0.18"
+# Reading SVG (docs/svg.md). A DOM parser with no unsafe code that refuses a DTD and stops at a
+# node limit, which is what reading a stranger's file needs; it was already in the lockfile, under
+# the font-configuration parser, and has no dependencies of its own. Everything SVG-specific
+# (paths, transforms, styles) is read by PhotoForge's own code over what this returns.
+roxmltree = "0.20"
 # Text: shaping, bidirectional layout, system font discovery and fallback.
 # Pure Rust, so no font or text DLL is packaged. swash is taken directly as
 # well, for glyph outlines: PhotoForge rasterises them with its own float

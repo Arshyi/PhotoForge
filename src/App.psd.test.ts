@@ -27,6 +27,21 @@ const PSD = String.raw`C:\work\poster.psd`;
 const previewUrl = 'data:image/png;base64,b3JpZ2luYWw=';
 const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) => name === command);
 
+let svgEntries: { kind: string; layer: string | null; detail: string }[] = [];
+
+function svgImportResult() {
+  const base = result([]);
+  return {
+    project: {
+      ...base.project,
+      metadata: { ...base.project.metadata, filename: 'art.svg', format: 'SVG' }
+    },
+    report: {
+      format: 'SVG', width: 16, height: 12, layersImported: 2, groupsImported: 0, entries: svgEntries
+    }
+  };
+}
+
 function svgResult(outputPath: string) {
   return {
     outputPath,
@@ -80,6 +95,7 @@ function result(entries: PsdImportResult['report']['entries']): PsdImportResult 
 
 beforeEach(() => {
   localStorage.clear();
+  svgEntries = [];
   failImport = null;
   failExport = null;
   importResult = () => result([]);
@@ -115,6 +131,9 @@ beforeEach(() => {
       case 'export_psd_document':
         if (failExport) throw new Error(failExport);
         return exportResult();
+      case 'import_svg_document':
+        if (failImport) throw new Error(failImport);
+        return svgImportResult();
       case 'export_svg_document':
         if (failExport) throw new Error(failExport);
         return svgResult(args.outputPath);
@@ -138,6 +157,63 @@ async function chooseFile(path: string) {
   vi.mocked(open).mockResolvedValueOnce(path);
   await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
 }
+
+describe('opening an SVG', () => {
+  const SVG = String.raw`C:\work\art.svg`;
+
+  it('offers SVG in the Open dialog', async () => {
+    render(App);
+    await chooseFile(SVG);
+    await screen.findByRole('dialog', { name: /art\.svg/ });
+    const options = vi.mocked(open).mock.calls[0][0] as { filters: { name: string; extensions: string[] }[] };
+    expect(options.filters.some((filter) => filter.extensions.includes('svg'))).toBe(true);
+  });
+
+  it('sends the file to its own command, not image admission or the Photoshop importer', async () => {
+    render(App);
+    await chooseFile(SVG);
+    await screen.findByRole('dialog', { name: /art\.svg/ });
+    expect(calls('import_svg_document')).toHaveLength(1);
+    expect(calls('import_svg_document')[0][1]).toMatchObject({ path: SVG });
+    expect(calls('import_psd_document')).toHaveLength(0);
+    expect(calls('probe_image_source')).toHaveLength(0);
+    expect(calls('open_image')).toHaveLength(0);
+    expect(await screen.findByRole('button', { name: 'Select Sky' })).toBeTruthy();
+  });
+
+  it('says it is an SVG import, counts shapes, and says nothing was left out when so', async () => {
+    render(App);
+    await chooseFile(SVG);
+    const dialog = await screen.findByRole('dialog', { name: /art\.svg/ });
+    expect(within(dialog).getByText('SVG import')).toBeTruthy();
+    expect(within(dialog).getByTestId('psd-summary').textContent).toMatch(/SVG,\s+16\s+×\s+12\.\s+2\s+shapes\s+imported/);
+    expect(within(dialog).getByTestId('psd-clean')).toBeTruthy();
+    expect(within(dialog).getByText(/The original file is not changed/)).toBeTruthy();
+    expect(await screen.findByText(/art\.svg opened with 2 shapes; nothing was approximated or left out/)).toBeTruthy();
+  });
+
+  it('lists what the subset left out, in the SVG import wording', async () => {
+    svgEntries = [
+      { kind: 'not_imported', layer: 'label', detail: 'Text was not imported: an SVG text needs fonts it does not carry.' },
+      { kind: 'approximated', layer: 'Sun', detail: 'A gradient or pattern fill was replaced by its first colour.' }
+    ];
+    render(App);
+    await chooseFile(SVG);
+    const dialog = await screen.findByRole('dialog', { name: /art\.svg/ });
+    const left = within(dialog).getByRole('region', { name: 'Left out' });
+    expect(within(left).getByText('label')).toBeTruthy();
+    expect(within(dialog).getByRole('region', { name: 'Imported, but not exactly as in the SVG' })).toBeTruthy();
+    expect(await screen.findByText(/1 approximated and 1 left out/)).toBeTruthy();
+  });
+
+  it('shows the reason when the file cannot be read, and opens nothing', async () => {
+    failImport = 'the file is XML but its root is not <svg>';
+    render(App);
+    await chooseFile(SVG);
+    expect(await screen.findByText(/root is not <svg>/)).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: /art\.svg/ })).toBeNull();
+  });
+});
 
 describe('opening a Photoshop document', () => {
   it('offers Photoshop files in the Open dialog', async () => {

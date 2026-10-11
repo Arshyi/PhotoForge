@@ -126,8 +126,8 @@ generated child covered the whole canvas.
 
 ## What is not implemented
 
-* **No SVG import and no PDF import or export.** Shape layers can be written as SVG
-  ([svg.md](svg.md)); nothing reads SVG yet, and PDF is not written or read.
+* **No PDF import or export.** Shape layers are written as SVG and a bounded subset of SVG is read
+  as shape layers ([svg.md](svg.md)); PDF is not written or read.
 * **No boolean operations** between shapes.
 * **No gradient or pattern fills.** Fill and stroke are solid colours.
 * **No per-shape dash patterns.**

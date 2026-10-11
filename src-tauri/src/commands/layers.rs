@@ -1335,6 +1335,50 @@ fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) 
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SvgImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::svg::SvgImportReport,
+}
+
+/// Opens an SVG as a new, unsaved layered document of shape layers.
+///
+/// Like opening a Photoshop file, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. Nothing in the file is fetched or run, and
+/// what the subset does not cover is named in the report.
+#[tauri::command]
+pub async fn import_svg_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<SvgImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported = crate::svg::import_svg(&checked)?;
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is an SVG, not a project.
+        prepared.source.metadata.format = "SVG".to_string();
+        prepared.result.metadata.format = "SVG".to_string();
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("SVG import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(SvgImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SvgExportResult {
     pub output_path: String,
     pub report: crate::svg::SvgReport,
@@ -1618,6 +1662,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         export_layer_composite,
         export_psd_document,
         export_svg_document,
+        import_svg_document,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,
