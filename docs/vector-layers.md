@@ -126,8 +126,8 @@ generated child covered the whole canvas.
 
 ## What is not implemented
 
-* **No SVG or PDF import or export.** Nothing in PhotoForge reads or writes
-  either format, and nothing claims vector-preserving export.
+* **No SVG import and no PDF import or export.** Shape layers can be written as SVG
+  ([svg.md](svg.md)); nothing reads SVG yet, and PDF is not written or read.
 * **No boolean operations** between shapes.
 * **No gradient or pattern fills.** Fill and stroke are solid colours.
 * **No per-shape dash patterns.**

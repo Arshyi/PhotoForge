@@ -29,10 +29,10 @@ pub use inference::{import_inference_model, inference_status, remove_inference_m
 pub use layers::register_layer_commands;
 pub use layers::{
     apply_operations_to_layer, create_blank_layer_document, create_layer_mask, create_layer_pixels,
-    discard_recovery_snapshot, export_layer_composite, export_psd_document, flatten_layer_document,
-    import_layer_image, import_psd_document, layer_mask_from_selection, layer_store_report,
-    list_recovery_snapshots, load_layer_project, merge_layer_pixels, plan_layer_workflow,
-    rasterize_layer_transform, render_layer_composite, render_layer_thumbnail,
+    discard_recovery_snapshot, export_layer_composite, export_psd_document, export_svg_document,
+    flatten_layer_document, import_layer_image, import_psd_document, layer_mask_from_selection,
+    layer_store_report, list_recovery_snapshots, load_layer_project, merge_layer_pixels,
+    plan_layer_workflow, rasterize_layer_transform, render_layer_composite, render_layer_thumbnail,
     restore_recovery_snapshot, retain_layer_pixels, save_layer_project, selection_from_layer_mask,
     validate_layer_document, write_recovery_snapshot,
 };

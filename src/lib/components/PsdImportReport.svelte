@@ -7,9 +7,10 @@
     type PsdImportReport,
     type PsdReportKind
   } from '../layers/psd';
+  import type { SvgExportReport } from '../layers/svg';
 
-  /** The report of an import, or of an export when `mode` says so. */
-  export let report: PsdImportReport | PsdExportReport;
+  /** The report of an import, or of an export when `mode` says so. An SVG export is shown too. */
+  export let report: PsdImportReport | PsdExportReport | SvgExportReport;
   export let mode: 'import' | 'export' = 'import';
   export let fileName = '';
   export let onclose: () => void = () => {};
@@ -17,21 +18,27 @@
   let dialogElement: HTMLDialogElement;
   $: counts = summarise(report);
 
-  const headings: Record<PsdReportKind, { title: string; help: string }> = {
+  $: isSvg = report.format === 'SVG';
+  $: exporting = mode === 'export';
+  $: headings = {
     not_imported: {
       title: 'Left out',
       help: 'These are not in the imported document. The layers around them are shown without them.'
     },
     not_exported: {
       title: 'Left out of the file',
-      help: 'These are not in the Photoshop file, and the layers around them show without them there. Your document here is unchanged.'
+      help: isSvg
+        ? 'These are not in the SVG, which holds shapes. Your document here is unchanged.'
+        : 'These are not in the Photoshop file, and the layers around them show without them there. Your document here is unchanged.'
     },
     approximated: {
-      title: 'Imported, but not exactly as in Photoshop',
-      help: 'These came across, changed in the way each line describes.'
+      title: exporting ? 'Written, but not exactly as in PhotoForge' : 'Imported, but not exactly as in Photoshop',
+      help: exporting
+        ? 'These went into the file, changed in the way each line describes.'
+        : 'These came across, changed in the way each line describes.'
     },
     note: { title: 'Notes', help: '' }
-  };
+  } as Record<PsdReportKind, { title: string; help: string }>;
   const order: PsdReportKind[] = ['not_imported', 'not_exported', 'approximated', 'note'];
   $: layerCount = 'layersWritten' in report ? report.layersWritten : report.layersImported;
   $: groupCount = 'groupsWritten' in report ? report.groupsWritten : report.groupsImported;
@@ -79,16 +86,16 @@
   >
     <div class="modal-heading">
       <div>
-        <span>{mode === 'export' ? 'Photoshop export' : 'Photoshop import'}</span>
-        <h1 id="psd-report-title">{fileName || 'Photoshop document'}</h1>
+        <span>{isSvg ? 'SVG export' : mode === 'export' ? 'Photoshop export' : 'Photoshop import'}</span>
+        <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : 'Photoshop document')}</h1>
       </div>
       <button type="button" aria-label="Close import report" on:click={onclose}>×</button>
     </div>
     <div class="body">
       <p class="summary" data-testid="psd-summary">
-        {report.format}, {report.width} × {report.height}, {report.bitDepth}-bit {report.colorMode}.
+        {report.format}, {report.width} × {report.height}{#if 'bitDepth' in report}, {report.bitDepth}-bit {report.colorMode}{/if}.
         {layerCount}
-        {layerCount === 1 ? 'layer' : 'layers'}{groupCount
+        {isSvg ? (layerCount === 1 ? 'shape' : 'shapes') : layerCount === 1 ? 'layer' : 'layers'}{groupCount
           ? ` and ${groupCount} ${groupCount === 1 ? 'group' : 'groups'}`
           : ''} {mode === 'export' ? 'written' : 'imported'}.
       </p>
@@ -113,7 +120,10 @@
         </section>
       {/each}
       <p class="fine">
-        {#if mode === 'export'}
+        {#if isSvg}
+          Your document in PhotoForge is not changed. Open the file in a browser or a vector editor
+          to see it there; where it differs from PhotoForge is listed above.
+        {:else if mode === 'export'}
           Your document in PhotoForge is not changed. Open the file in Photoshop, or any editor that
           reads PSD, to continue there.
         {:else}

@@ -1309,6 +1309,83 @@ pub async fn import_psd_document(
     })
 }
 
+/// Whether `destination` is a file the document still reads from (a linked RAW file or a linked
+/// smart source), which an export must never replace.
+fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) -> bool {
+    if !destination.exists() {
+        return false;
+    }
+    let target = std::fs::canonicalize(destination).ok();
+    let linked = |path: &std::path::Path| std::fs::canonicalize(path).ok() == target;
+    let raw = document.iter_all().any(|layer| {
+        layer
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.linked_path())
+            .is_some_and(|path| linked(std::path::Path::new(path)))
+    });
+    let smart = document.smart_sources.values().any(|source| {
+        source
+            .link
+            .as_ref()
+            .is_some_and(|link| linked(std::path::Path::new(&link.path)))
+    });
+    raw || smart
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvgExportResult {
+    pub output_path: String,
+    pub report: crate::svg::SvgReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the shape layers of the document as an SVG file.
+///
+/// What an SVG cannot hold (pixels, text, masks, adjustments) is named in the report and not
+/// rasterised into the file. The document is not changed.
+#[tauri::command]
+pub async fn export_svg_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    state: State<'_, AppState>,
+) -> Result<SvgExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    let destination = PathBuf::from(output_path);
+    let is_svg = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+    let parent_exists = destination
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty() && parent.is_dir());
+    if !is_svg || !destination.is_absolute() || !parent_exists || destination.is_dir() {
+        return Err(AppError::InvalidOutputPath);
+    }
+    let _permit = state.export_gate.lock().await;
+    let started = Instant::now();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        if document_reads_from(&document, &destination) {
+            return Err(AppError::InvalidOutputPath);
+        }
+        let exported = crate::svg::export_svg(&document, &crate::svg::SvgOptions { operations })?;
+        crate::psd::export::write_beside_then_rename(&destination, exported.text.as_bytes())?;
+        Ok::<_, AppError>((destination, exported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("SVG export worker stopped".into()))??;
+    Ok(SvgExportResult {
+        output_path: report.0.to_string_lossy().into_owned(),
+        report: report.1,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PsdExportResult {
@@ -1368,24 +1445,8 @@ pub async fn export_psd_document(
     let (written, report) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         // An export never replaces a file the document still reads from.
-        for layer in document.iter_all() {
-            if let Some(path) = layer.raw.as_ref().and_then(|raw| raw.linked_path()) {
-                if std::fs::canonicalize(path).ok() == std::fs::canonicalize(&destination).ok()
-                    && destination.exists()
-                {
-                    return Err(AppError::InvalidOutputPath);
-                }
-            }
-        }
-        for source in document.smart_sources.values() {
-            if let Some(link) = &source.link {
-                if std::fs::canonicalize(&link.path).ok()
-                    == std::fs::canonicalize(&destination).ok()
-                    && destination.exists()
-                {
-                    return Err(AppError::InvalidOutputPath);
-                }
-            }
+        if document_reads_from(&document, &destination) {
+            return Err(AppError::InvalidOutputPath);
         }
         let options = crate::psd::ExportOptions {
             bit_depth,
@@ -1556,6 +1617,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         render_layer_composite,
         export_layer_composite,
         export_psd_document,
+        export_svg_document,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,

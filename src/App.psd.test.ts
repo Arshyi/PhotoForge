@@ -27,6 +27,20 @@ const PSD = String.raw`C:\work\poster.psd`;
 const previewUrl = 'data:image/png;base64,b3JpZ2luYWw=';
 const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) => name === command);
 
+function svgResult(outputPath: string) {
+  return {
+    outputPath,
+    processingTimeMs: 4,
+    report: {
+      format: 'SVG', width: 16, height: 12, layersWritten: 1, groupsWritten: 0, bytes: 512,
+      entries: [
+        { kind: 'not_exported', layer: 'Sky', detail: 'A pixel layer is not in the SVG: it holds pixels, and this file holds shapes.' },
+        { kind: 'approximated', layer: 'Sun', detail: 'The Overlay blend mode has no SVG equivalent.' }
+      ]
+    }
+  };
+}
+
 let importResult: () => PsdImportResult;
 let failImport: string | null;
 let exportResult: () => PsdExportResult;
@@ -101,6 +115,9 @@ beforeEach(() => {
       case 'export_psd_document':
         if (failExport) throw new Error(failExport);
         return exportResult();
+      case 'export_svg_document':
+        if (failExport) throw new Error(failExport);
+        return svgResult(args.outputPath);
       case 'render_layer_composite':
       case 'render_preview':
         return { requestId: args.requestId, isCurrent: true, previewDataUrl: previewUrl, processingTime: 1, processingTimeMs: 1, operationCount: 0, missingPlugins: [] };
@@ -280,7 +297,7 @@ describe('writing a Photoshop document', () => {
     const dialog = await screen.findByRole('dialog', { name: /out\.psd/ });
     const left = within(dialog).getByRole('region', { name: 'Left out of the file' });
     expect(within(left).getByText('Soften')).toBeTruthy();
-    expect(within(dialog).getByRole('region', { name: 'Imported, but not exactly as in Photoshop' })).toBeTruthy();
+    expect(within(dialog).getByRole('region', { name: 'Written, but not exactly as in PhotoForge' })).toBeTruthy();
     expect(within(dialog).getByTestId('psd-summary').textContent).toMatch(/1\s+layer\s+and\s+1\s+group\s+written/);
     expect(await screen.findByText(/1 approximated and 1 left out/)).toBeTruthy();
   });
@@ -313,6 +330,34 @@ describe('writing a Photoshop document', () => {
     await exportTo(String.raw`C:\work\flat.png`);
     await waitFor(() => expect(calls('export_layer_composite')).toHaveLength(1));
     expect(calls('export_psd_document')).toHaveLength(0);
+  });
+
+  it('offers SVG in the Export dialog', async () => {
+    await openAndClose();
+    await exportTo(String.raw`C:\work\flat.png`);
+    const options = vi.mocked(save).mock.calls[0][0] as { filters: { name: string; extensions: string[] }[] };
+    const svg = options.filters.find((filter) => filter.extensions.includes('svg'));
+    expect(svg?.name).toMatch(/SVG/);
+  });
+
+  it('writes the shapes to an SVG name, through its own command and report', async () => {
+    await openAndClose();
+    await exportTo(String.raw`C:\work\art.svg`);
+    const dialog = await screen.findByRole('dialog', { name: /art\.svg/ });
+    expect(calls('export_svg_document')).toHaveLength(1);
+    const [, args] = calls('export_svg_document')[0] as [string, Record<string, any>];
+    expect(args.outputPath).toBe(String.raw`C:\work\art.svg`);
+    expect(args.document.layers).toHaveLength(2);
+    // Neither the picture path nor the Photoshop path, and no profile or metadata choices.
+    expect(calls('export_layer_composite')).toHaveLength(0);
+    expect(calls('export_psd_document')).toHaveLength(0);
+    expect(args.metadataPolicy).toBeUndefined();
+    expect(within(dialog).getByText('SVG export')).toBeTruthy();
+    expect(within(dialog).getByTestId('psd-summary').textContent).toMatch(/SVG,\s+16\s+×\s+12\.\s+1\s+shape\s+written/);
+    const left = within(dialog).getByRole('region', { name: 'Left out of the file' });
+    expect(within(left).getByText('Sky')).toBeTruthy();
+    expect(within(dialog).getByRole('region', { name: 'Written, but not exactly as in PhotoForge' })).toBeTruthy();
+    expect(await screen.findByText(/1 approximated and 1 left out/)).toBeTruthy();
   });
 
   it('sends the metadata policy with both kinds of export, private by default', async () => {

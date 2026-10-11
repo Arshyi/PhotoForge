@@ -225,6 +225,7 @@
     type PsdExportReport,
     type PsdImportReport
   } from './lib/layers/psd';
+  import { exportSvgDocument, isSvgPath, svgExportSentence, type SvgExportReport } from './lib/layers/svg';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import {
     describeSource,
@@ -418,7 +419,7 @@
    */
   /** The report of the Photoshop document just opened, while it is being read. */
   let psdReport: {
-    report: PsdImportReport | PsdExportReport;
+    report: PsdImportReport | PsdExportReport | SvgExportReport;
     fileName: string;
     mode: 'import' | 'export';
   } | null = null;
@@ -4059,7 +4060,8 @@
           { name: 'PNG image', extensions: ['png'] },
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
           { name: 'WebP image', extensions: ['webp'] },
-          { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] }
+          { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] },
+          { name: 'SVG (shape layers)', extensions: ['svg'] }
         ]
       });
       if (!outputPath) return;
@@ -4080,6 +4082,17 @@
         const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
         psdReport = { report: written.report, fileName, mode: 'export' };
         notify([exportSentence(fileName, written.report), metadataSentence(written.metadata)].filter(Boolean).join(' '));
+        return;
+      }
+      if (isSvgPath(outputPath)) {
+        // An SVG holds shapes, not a picture: the profile, colour and metadata choices do not
+        // apply, and what it cannot hold is named in the report.
+        if (!layerDocument) throw new Error('SVG export needs a layered document.');
+        const written = await exportSvgDocument(outputPath, layerDocument, exportOperations);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify(svgExportSentence(fileName, written.report));
         return;
       }
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);

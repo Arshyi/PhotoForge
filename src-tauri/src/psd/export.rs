@@ -1529,7 +1529,7 @@ pub fn export_psd(
 }
 
 /// Writes next to `path` and renames, so a failed or interrupted export leaves what was there.
-fn write_beside_then_rename(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(crate) fn write_beside_then_rename(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
     let temporary = match directory {
         Some(directory) => directory.join(format!(
