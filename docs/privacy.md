@@ -18,6 +18,13 @@ Batch logs include local input/output paths and errors in the chosen folder.
 No native CMS library, external executable or runtime download is added.
 WebView2's independent runtime-network boundary described below still applies.
 
+## Phase 15 clipboard
+
+The clipboard is touched only when the person copies or pastes: PhotoForge does not watch it, read
+it in the background, or keep what it read. A copy replaces the clipboard with one picture; a
+paste reads the picture on it and nothing else (text, file lists and other formats are not read).
+Nothing is sent anywhere. See [clipboard.md](clipboard.md).
+
 ## Phase 9 RAW development
 
 RAW decoding and development are entirely local. Opening a camera file reads it,

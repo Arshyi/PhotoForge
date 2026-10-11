@@ -109,7 +109,7 @@ fn session_document_id(state: &AppState) -> Result<u64, AppError> {
 
 /// Clones the `Arc` handles a render needs, then releases the store lock so no
 /// pixel work ever happens while the session is locked.
-fn resolve_pixels(
+pub(super) fn resolve_pixels(
     state: &AppState,
     document: &LayerDocument,
     preview: bool,
@@ -1333,6 +1333,69 @@ fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) 
     raw || smart
 }
 
+/// Opens the picture on the system clipboard as a new, unsaved document of one pixel layer.
+///
+/// Like opening a file, the replacement is staged before the session changes and a superseded
+/// request never replaces a newer open. The picture is 8-bit sRGB, which is what the clipboard
+/// carries, so the document is an 8-bit one.
+#[tauri::command]
+pub async fn open_clipboard_image(
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ProjectLoadResult, AppError> {
+    let started = Instant::now();
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let limit = crate::resources::max_working_pixels();
+    let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let pasted = crate::clipboard::read_image(limit)
+            .map_err(|error| AppError::Clipboard(error.to_string()))?;
+        let (width, height) = pasted.image.dimensions();
+        crate::layers::validate_dimensions(width, height)?;
+        let now = crate::operations::support::Clock::now(&crate::operations::support::SystemClock);
+        let mut document = LayerDocument::new(width, height);
+        document.precision = crate::pixel::DocumentPrecision::LegacySrgb8;
+        let layer = crate::operations::structure::new_layer(
+            "l1",
+            "Pasted image",
+            crate::layers::LayerContent::Pixel {
+                pixel_id: "px1".to_string(),
+                width,
+                height,
+            },
+            &now,
+        );
+        document.active_layer_id = Some(layer.id.clone());
+        document.layers.push(layer);
+        let loaded = LoadedProject {
+            document,
+            document_operations: Vec::new(),
+            pixels: vec![("px1".to_string(), pasted.image)],
+            linear_pixels: Vec::new(),
+            application_version: env!("CARGO_PKG_VERSION").into(),
+            created_at: now.clone(),
+            modified_at: now,
+            source_metadata: None,
+        };
+        // An empty path denotes an unsaved source, not a real input file.
+        let mut prepared = prepare_project(loaded, PathBuf::new(), request_id)?;
+        prepared.source.metadata.filename = "Pasted image".into();
+        prepared.result.metadata.filename = "Pasted image".into();
+        prepared.source.metadata.format = "Clipboard".into();
+        prepared.result.metadata.format = "Clipboard".into();
+        Ok::<_, AppError>(prepared)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("clipboard worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(prepared.result)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SvgImportResult {
@@ -1800,6 +1863,10 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         export_exr_document,
         import_svg_document,
         import_exr_document,
+        open_clipboard_image,
+        super::clipboard::copy_to_clipboard,
+        super::clipboard::paste_clipboard_image,
+        super::clipboard::clipboard_has_image,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,

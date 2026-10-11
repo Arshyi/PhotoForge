@@ -235,6 +235,13 @@
     type SvgImportReport
   } from './lib/layers/svg';
   import {
+    copySentence,
+    copyToClipboard,
+    openClipboardImage,
+    pasteClipboardImage,
+    pasteSentence
+  } from './lib/layers/clipboard';
+  import {
     exportExrDocument,
     exrExportSentence,
     exrImportSentence,
@@ -664,6 +671,10 @@
       case 'transform_commit':
         transformActive = false;
         return;
+      case 'clipboard':
+        if (intent.action === 'paste') void pasteFromClipboard();
+        else void copyPicture(intent.action === 'copy_merged');
+        return;
       case 'mask':
         void applyMaskOperation(
           intent.action === 'select_all'
@@ -1054,7 +1065,11 @@
       changeSourceRegion: () => void changeSourceRegion(),
       openAutomation: () => void openAutomationEditor(),
       startRecording: () => startRecording(),
-      stopRecording: () => stopRecording()
+      stopRecording: () => stopRecording(),
+      copyLayer: () => void copyPicture(false),
+      copyMerged: () => void copyPicture(true),
+      paste: () => void pasteFromClipboard(),
+      newFromClipboard: () => void newFromClipboard()
     }
   };
   $: paletteCommands = [
@@ -2971,6 +2986,79 @@
       const fileName = result.project.metadata.filename;
       psdReport = { report: result.report, fileName, mode: 'import' };
       notify(exrImportSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /**
+   * Puts the active layer (or, merged, everything visible with the document's edits) on the system
+   * clipboard as a picture, limited to the selection if there is one. The document is not changed.
+   */
+  async function copyPicture(merged: boolean) {
+    const document = layerDocument;
+    if (!document || !metadata || layerBusy || opening) return;
+    const layerId = merged ? null : (document.activeLayerId ?? null);
+    if (!merged && !layerId) {
+      notify('Select a layer first, or copy the merged picture.', 'error');
+      return;
+    }
+    layerBusy = true;
+    try {
+      let selection = selectionState.activeMask;
+      if (selection && !merged) {
+        // A layer is copied as it sits on the canvas, so the selection is taken to canvas space,
+        // as for a mask made from it.
+        selection = (await stageWorkflowGeometry([], operations, selectionState)).selection.activeMask ?? null;
+      }
+      const result = await copyToClipboard(document, cloneOperations(operations), layerId, selection);
+      notify(copySentence(result));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  /**
+   * Places the picture on the clipboard as a new layer; with no document open, opens it as one.
+   */
+  async function pasteFromClipboard() {
+    if (!layerDocument || !metadata) {
+      await newFromClipboard();
+      return;
+    }
+    if (!allowWorkspaceMutation()) return;
+    let pasted: Awaited<ReturnType<typeof pasteClipboardImage>>;
+    layerBusy = true;
+    try {
+      pasted = await pasteClipboardImage();
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+      return;
+    } finally {
+      layerBusy = false;
+    }
+    await runPanelPlan(() => panel.placeImage(pasted));
+    notify(pasteSentence(pasted));
+  }
+
+  /** Opens the picture on the clipboard as a new, unsaved document. */
+  async function newFromClipboard() {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await openClipboardImage(ownRequest);
+      if (!result.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project.
+      installProject(result, null);
+      notify(`Opened the ${result.canvasWidth} × ${result.canvasHeight} picture from the clipboard as a new document.`);
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {

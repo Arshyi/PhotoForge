@@ -2,6 +2,7 @@
 // dispatch, argument deserialization, and managed state — instead of calling the
 // underlying Rust functions directly. Nothing outside the app consumes them.
 pub mod application;
+pub mod clipboard;
 pub mod color;
 pub mod color_management;
 pub mod commands;
@@ -154,9 +155,10 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
 }
 
 use commands::{
-    convert_layers_to_smart_object, create_blank_layer_document, export_exr_document,
-    export_psd_document, export_svg_document, import_exr_document, import_psd_document,
-    import_smart_object, import_svg_document, inspect_smart_links, relink_smart_source,
+    clipboard_has_image, convert_layers_to_smart_object, copy_to_clipboard,
+    create_blank_layer_document, export_exr_document, export_psd_document, export_svg_document,
+    import_exr_document, import_psd_document, import_smart_object, import_svg_document,
+    inspect_smart_links, open_clipboard_image, paste_clipboard_image, relink_smart_source,
     resource_status, set_memory_budget, update_smart_source,
 };
 
@@ -199,6 +201,10 @@ pub fn run() {
             export_psd_document,
             export_svg_document,
             export_exr_document,
+            copy_to_clipboard,
+            paste_clipboard_image,
+            open_clipboard_image,
+            clipboard_has_image,
             render_preview,
             analyze_image,
             get_component_snapshot,

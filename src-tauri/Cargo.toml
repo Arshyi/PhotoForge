@@ -102,8 +102,14 @@ windows-core = "=0.61.2"
 # adds no second copy. Used for three narrow reads and nothing else: physical
 # and available memory (the resource manager's budget), this process's working
 # set (to check the estimator against reality), and free disk space (the
-# out-of-core and disk-cache story). No window, handle or registry access.
+# out-of-core and disk-cache story); and the clipboard (src/clipboard/win.rs: open it, put
+# bytes under a format, take bytes from one; Win32_System_Ole for the format numbers). No
+# window, registry or process access. Feature flags only: no package is added.
 windows = { version = "=0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",

@@ -402,6 +402,10 @@ not implemented; validation/application support is not generation support.
   ([openexr.md](openexr.md)). Neither has been opened in the applications that use them
   (Inkscape, Illustrator; Nuke, Blender, Photoshop); both were read back by this program and
   checked against an independent renderer or reader.
+- **The system clipboard carries pictures, not layers.** Copy puts a layer or the merged picture
+  (8-bit sRGB, as PNG and CF_DIBV5) on the Windows clipboard, and paste places a clipboard picture
+  as a new layer or opens it as a document ([clipboard.md](clipboard.md)). Copying a layer *as a
+  layer* between documents (with its text, shape, smart-object or adjustment content) is not done.
 - Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is

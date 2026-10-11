@@ -128,7 +128,8 @@ function context(overrides: Partial<CoreCommandContext> = {}): CoreCommandContex
       resetEdits: noop, toggleCompare: noop, newPixelLayer: noop, newGroup: noop, duplicateLayer: noop,
       deleteLayer: noop, groupLayers: noop, ungroupLayer: noop, mergeDown: noop, flatten: noop,
       resetTransform: noop, openSettings: noop, openPlugins: noop, runPluginFilter: noop,
-      changeSourceRegion: noop, openAutomation: noop, startRecording: noop, stopRecording: noop
+      changeSourceRegion: noop, openAutomation: noop, startRecording: noop, stopRecording: noop,
+      copyLayer: noop, copyMerged: noop, paste: noop, newFromClipboard: noop
     },
     ...overrides
   };

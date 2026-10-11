@@ -17,6 +17,9 @@ pub enum AppError {
     /// OpenEXR file with only deep data): the message says what is wrong with the file, whole.
     #[error("{0}")]
     ForeignFile(String),
+    /// The system clipboard could not be used. The message says why, whole.
+    #[error("{0}")]
+    Clipboard(String),
     #[error("PhotoForge could not process this edit pipeline: {0}")]
     ProcessingFailure(String),
     #[error("PhotoForge could not analyze this image. Try reopening it.")]
@@ -200,6 +203,7 @@ impl AppError {
             Self::DecodeFailure => "decode_failure",
             Self::PsdFile(_) => "psd_file",
             Self::ForeignFile(_) => "foreign_file",
+            Self::Clipboard(_) => "clipboard",
             Self::ProcessingFailure(_) => "processing_failure",
             Self::AnalysisFailure => "analysis_failure",
             Self::AnalysisUnavailable => "analysis_unavailable",
