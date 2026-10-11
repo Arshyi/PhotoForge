@@ -8,9 +8,19 @@
     type PsdReportKind
   } from '../layers/psd';
   import type { SvgExportReport, SvgImportReport } from '../layers/svg';
+  import type { ExrExportReport, ExrImportReport } from '../layers/exr';
 
-  /** The report of an import, or of an export when `mode` says so. An SVG's is shown too. */
-  export let report: PsdImportReport | PsdExportReport | SvgExportReport | SvgImportReport;
+  /**
+   * The report of an import, or of an export when `mode` says so. An SVG's and an OpenEXR file's
+   * are shown too.
+   */
+  export let report:
+    | PsdImportReport
+    | PsdExportReport
+    | SvgExportReport
+    | SvgImportReport
+    | ExrImportReport
+    | ExrExportReport;
   export let mode: 'import' | 'export' = 'import';
   export let fileName = '';
   export let onclose: () => void = () => {};
@@ -19,6 +29,7 @@
   $: counts = summarise(report);
 
   $: isSvg = report.format === 'SVG';
+  $: isExr = report.format === 'OpenEXR';
   $: exporting = mode === 'export';
   $: headings = {
     not_imported: {
@@ -29,14 +40,18 @@
       title: 'Left out of the file',
       help: isSvg
         ? 'These are not in the SVG, which holds shapes. Your document here is unchanged.'
-        : 'These are not in the Photoshop file, and the layers around them show without them there. Your document here is unchanged.'
+        : isExr
+          ? 'These are not in the OpenEXR file, which holds one picture. Your document here is unchanged.'
+          : 'These are not in the Photoshop file, and the layers around them show without them there. Your document here is unchanged.'
     },
     approximated: {
       title: exporting
         ? 'Written, but not exactly as in PhotoForge'
         : isSvg
           ? 'Imported, but not exactly as in the SVG'
-          : 'Imported, but not exactly as in Photoshop',
+          : isExr
+            ? 'Imported, but not exactly as in the OpenEXR file'
+            : 'Imported, but not exactly as in Photoshop',
       help: exporting
         ? 'These went into the file, changed in the way each line describes.'
         : 'These came across, changed in the way each line describes.'
@@ -90,8 +105,8 @@
   >
     <div class="modal-heading">
       <div>
-        <span>{isSvg ? (exporting ? 'SVG export' : 'SVG import') : exporting ? 'Photoshop export' : 'Photoshop import'}</span>
-        <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : 'Photoshop document')}</h1>
+        <span>{isSvg ? (exporting ? 'SVG export' : 'SVG import') : isExr ? (exporting ? 'OpenEXR export' : 'OpenEXR import') : exporting ? 'Photoshop export' : 'Photoshop import'}</span>
+        <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : isExr ? 'OpenEXR image' : 'Photoshop document')}</h1>
       </div>
       <button type="button" aria-label="Close import report" on:click={onclose}>×</button>
     </div>
@@ -127,6 +142,9 @@
         {#if isSvg && exporting}
           Your document in PhotoForge is not changed. Open the file in a browser or a vector editor
           to see it there; where it differs from PhotoForge is listed above.
+        {:else if isExr && exporting}
+          Your document in PhotoForge is not changed. The file holds one picture of scene-linear
+          light; open it in Blender, Nuke, Photoshop or any editor that reads OpenEXR.
         {:else if mode === 'export'}
           Your document in PhotoForge is not changed. Open the file in Photoshop, or any editor that
           reads PSD, to continue there.

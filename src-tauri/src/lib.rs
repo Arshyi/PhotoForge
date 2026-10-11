@@ -29,6 +29,7 @@ pub mod metadata;
 mod network_policy;
 /// The operation registry and transaction engine: the one path by which a plugin, a
 /// macro, a workflow, a planner or a batch run edits a document.
+pub mod openexr;
 pub mod operations;
 pub mod pixel;
 /// Plugins: filters in a WebAssembly sandbox, declarative commands and panels, and the
@@ -145,16 +146,18 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
         create_blank_layer_document,
         import_psd_document,
         import_svg_document,
+        import_exr_document,
         export_psd_document,
-        export_svg_document
+        export_svg_document,
+        export_exr_document
     ])
 }
 
 use commands::{
-    convert_layers_to_smart_object, create_blank_layer_document, export_psd_document,
-    export_svg_document, import_psd_document, import_smart_object, import_svg_document,
-    inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
-    update_smart_source,
+    convert_layers_to_smart_object, create_blank_layer_document, export_exr_document,
+    export_psd_document, export_svg_document, import_exr_document, import_psd_document,
+    import_smart_object, import_svg_document, inspect_smart_links, relink_smart_source,
+    resource_status, set_memory_budget, update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -192,8 +195,10 @@ pub fn run() {
             create_blank_layer_document,
             import_psd_document,
             import_svg_document,
+            import_exr_document,
             export_psd_document,
             export_svg_document,
+            export_exr_document,
             render_preview,
             analyze_image,
             get_component_snapshot,

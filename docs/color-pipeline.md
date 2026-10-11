@@ -119,3 +119,14 @@ working-space transform, masks, blend semantics, ICC conversion, or 16-bit
 output conversion. Any unsupported or failed GPU operation falls back to the
 same CPU implementation. The detailed backend scope and tolerances are in
 [gpu-rendering.md](gpu-rendering.md).
+
+## OpenEXR (Phase 15)
+
+An OpenEXR file is scene-linear light, which is what a high-precision document is, so it is read
+without a transfer curve: the samples are the document's values, including those above one and
+below zero. Two conventions are converted explicitly. Alpha, which OpenEXR stores premultiplied
+into the colour, is divided out (the document uses straight alpha); and a file whose
+`chromaticities` attribute is not Rec. 709 (ACEScg, ACES 2065-1, Rec. 2020, XYZ) is taken to sRGB
+primaries by a matrix, with the white point adapted by the Bradford transform. Writing is the
+reverse, with a `chromaticities` attribute stating Rec. 709, because that is what the working
+space is. See [openexr.md](openexr.md).

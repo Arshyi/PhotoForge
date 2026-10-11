@@ -33,7 +33,7 @@ pub use disk_cache::{DiskCacheStats, DiskTileCache, MAX_DISK_TILE_BYTES};
 pub use linear::{render_document_float, render_document_typed, render_document_typed_cached};
 pub use model::{
     validate_dimensions, Layer, LayerContent, LayerDocument, LayerKind, LayerMask, LayerMetadata,
-    LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS,
+    LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS, MAX_LAYER_NAME_CHARS,
 };
 pub use project::{
     attach_source_metadata, decode_project, encode_project, encode_project_typed, load_project,

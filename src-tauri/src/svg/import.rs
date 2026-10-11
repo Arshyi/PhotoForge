@@ -1581,11 +1581,11 @@ pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
         nodes_limit: MAX_NODES,
     };
     let document = Document::parse_with_options(text, options).map_err(|error| {
-        AppError::ProcessingFailure(format!("the file is not an SVG that can be read: {error}"))
+        AppError::foreign_file(format!("the file is not an SVG that can be read: {error}"))
     })?;
     let root = document.root_element();
     if root.tag_name().name() != "svg" {
-        return Err(AppError::ProcessingFailure(
+        return Err(AppError::foreign_file(
             "the file is XML but its root is not <svg>".into(),
         ));
     }
@@ -1610,12 +1610,12 @@ pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
     let width = size("width", view_box.map(|v| v.2)).or(view_box.map(|v| v.2));
     let height = size("height", view_box.map(|v| v.3)).or(view_box.map(|v| v.3));
     let (Some(width), Some(height)) = (width, height) else {
-        return Err(AppError::ProcessingFailure(
+        return Err(AppError::foreign_file(
             "the SVG has neither a width and height nor a view box, so it has no size".into(),
         ));
     };
     if width > MAX_EDGE || height > MAX_EDGE {
-        return Err(AppError::ProcessingFailure(format!(
+        return Err(AppError::foreign_file(format!(
             "the SVG is {width:.0} × {height:.0} pixels; the largest edge read is {MAX_EDGE:.0}"
         )));
     }
@@ -1726,16 +1726,14 @@ pub fn import_svg(path: &Path) -> Result<ImportedSvg, AppError> {
         return Err(AppError::UnsupportedImageFormat);
     }
     if metadata.len() > MAX_SVG_BYTES {
-        return Err(AppError::ProcessingFailure(format!(
+        return Err(AppError::foreign_file(format!(
             "the SVG is {} bytes; the largest file read is {MAX_SVG_BYTES}",
             metadata.len()
         )));
     }
     let bytes = std::fs::read(path).map_err(|_| AppError::DecodeFailure)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| {
-        AppError::ProcessingFailure(
-            "the SVG is not UTF-8 text (compressed .svgz is not read)".into(),
-        )
+        AppError::foreign_file("the SVG is not UTF-8 text (compressed .svgz is not read)".into())
     })?;
     import_svg_text(text)
 }

@@ -47,6 +47,13 @@ png = "0.18"
 # the font-configuration parser, and has no dependencies of its own. Everything SVG-specific
 # (paths, transforms, styles) is read by PhotoForge's own code over what this returns.
 roxmltree = "0.20"
+# OpenEXR (docs/openexr.md). Pinned to exactly 1.74.0, the release before the DWA codecs: 1.74.1
+# and 1.74.2 add a SIMD dispatch crate (`pulp`) and `num-complex` for them, are a month old, and
+# bring unsafe-capable code into a reader of a stranger's files. 1.74.0 reads none, RLE, ZIP,
+# ZIPS, PIZ, PXR24, B44 and B44A, which is what Photoshop, Blender, Nuke and cameras write; DWAA
+# and DWAB are refused with their name. Pure Rust, BSD-3-Clause, no threads (the `rayon` feature
+# is off: PhotoForge decides how many threads a job may use).
+exr = { version = "=1.74.0", default-features = false }
 # Text: shaping, bidirectional layout, system font discovery and fallback.
 # Pure Rust, so no font or text DLL is packaged. swash is taken directly as
 # well, for glyph outlines: PhotoForge rasterises them with its own float

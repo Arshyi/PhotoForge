@@ -396,6 +396,12 @@ not implemented; validation/application support is not generation support.
   them with a report of what did not go into the file ([psd-export.md](psd-export.md)). The
   written files have been read back by this program and by an independent parser, and have not
   been opened in Photoshop.
+- **SVG and OpenEXR files are opened and written, with a report each way.** An SVG opens as shape
+  layers and the shape layers are written as SVG ([svg.md](svg.md)); an OpenEXR file opens as a
+  high-precision document and the composite is written as scene-linear float
+  ([openexr.md](openexr.md)). Neither has been opened in the applications that use them
+  (Inkscape, Illustrator; Nuke, Blender, Photoshop); both were read back by this program and
+  checked against an independent renderer or reader.
 - Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is

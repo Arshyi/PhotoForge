@@ -41,6 +41,7 @@ Under every policy, because they are about being correct and not about privacy:
 | PNG | `eXIf` | `iTXt` "XML:com.adobe.xmp" | no standard place; the report says so |
 | WebP | `EXIF` | `XMP ` | no place; the report says so |
 | PSD / PSB | image resource 1058 | 1060 | 1028 |
+| OpenEXR | no place; the report says so | no place | no place |
 | `.photoforge` project | entries beside the layers; older versions ignore them | | |
 
 A JPEG segment holds 64 KiB, so a larger EXIF block or XMP packet is reported as not stored.

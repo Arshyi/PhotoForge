@@ -1432,6 +1432,141 @@ pub async fn export_svg_document(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExrImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::openexr::ExrImportReport,
+}
+
+/// Opens an OpenEXR file as a new, unsaved high-precision document.
+///
+/// Like opening a Photoshop file, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. The file is admitted from its header before any
+/// pixel is decoded, and what the picture carries that PhotoForge has no place for is named in
+/// the report.
+#[tauri::command]
+pub async fn import_exr_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ExrImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported =
+            crate::openexr::import_exr(&checked, crate::psd::ImportLimits::from_resources())?;
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is an OpenEXR file, not a project.
+        prepared.source.metadata.format = "OpenEXR".to_string();
+        prepared.result.metadata.format = "OpenEXR".to_string();
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("OpenEXR import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(ExrImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExrExportResult {
+    pub output_path: String,
+    pub report: crate::openexr::ExrExportReport,
+    /// What the export did with the photograph's EXIF, XMP and IPTC: an OpenEXR file has no place
+    /// for any of them, and says so.
+    pub metadata: crate::metadata::MetadataReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the document, composited, as an OpenEXR file of scene-linear light.
+///
+/// `bit_depth` is 16 (half float) or 32 (single precision, the default). The editable document is
+/// never changed, and an existing file is replaced only by a complete new one.
+#[tauri::command]
+pub async fn export_exr_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    bit_depth: Option<u16>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
+    state: State<'_, AppState>,
+) -> Result<ExrExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    let destination = PathBuf::from(output_path);
+    let is_exr = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"));
+    let parent_exists = destination
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty() && parent.is_dir());
+    if !is_exr || !destination.is_absolute() || !parent_exists || destination.is_dir() {
+        return Err(AppError::InvalidOutputPath);
+    }
+    // A file made without a plug-in the document needs would be a different picture.
+    let plugins = crate::plugins::store::global();
+    crate::plugins::document::ensure_available(&plugins, &document)?;
+    crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
+    let _permit = state.export_gate.lock().await;
+    let mut plan = crate::metadata::Plan::new(
+        session_source_metadata(&state).as_deref(),
+        metadata_policy.unwrap_or_default(),
+        crate::metadata::OutputFacts {
+            width: document.canvas_width,
+            height: document.canvas_height,
+            wide_gamut_profile: false,
+        },
+    );
+    // An OpenEXR file has no place for EXIF, XMP or IPTC: whatever the policy would have kept is
+    // said not to have been.
+    crate::metadata::report_unplaced(
+        &mut plan.report,
+        &plan.prepared,
+        crate::metadata::container::Placed::default(),
+    );
+    let (resolved, _) = resolve_pixels(&state, &document, false)?;
+    let started = Instant::now();
+    let (written, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        // An export never replaces a file the document still reads from.
+        if document_reads_from(&document, &destination) {
+            return Err(AppError::InvalidOutputPath);
+        }
+        let exported = crate::openexr::export_exr(
+            &document,
+            &resolved,
+            &crate::openexr::ExrOptions {
+                operations,
+                bit_depth,
+            },
+        )?;
+        crate::psd::export::write_beside_then_rename(&destination, &exported.bytes)?;
+        Ok::<_, AppError>((destination, exported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("OpenEXR export worker stopped".into()))??;
+    Ok(ExrExportResult {
+        output_path: written.to_string_lossy().into_owned(),
+        report,
+        metadata: std::mem::take(&mut plan.report),
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PsdExportResult {
     /// Where the file was written. Not always where it was asked for: a document too large for a
     /// PSD is written as a PSB, with that extension.
@@ -1662,7 +1797,9 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         export_layer_composite,
         export_psd_document,
         export_svg_document,
+        export_exr_document,
         import_svg_document,
+        import_exr_document,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,

@@ -234,6 +234,15 @@
     type SvgExportReport,
     type SvgImportReport
   } from './lib/layers/svg';
+  import {
+    exportExrDocument,
+    exrExportSentence,
+    exrImportSentence,
+    importExrDocument,
+    isExrPath,
+    type ExrExportReport,
+    type ExrImportReport
+  } from './lib/layers/exr';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import {
     describeSource,
@@ -427,7 +436,13 @@
    */
   /** The report of the Photoshop document just opened, while it is being read. */
   let psdReport: {
-    report: PsdImportReport | PsdExportReport | SvgExportReport | SvgImportReport;
+    report:
+      | PsdImportReport
+      | PsdExportReport
+      | SvgExportReport
+      | SvgImportReport
+      | ExrImportReport
+      | ExrExportReport;
     fileName: string;
     mode: 'import' | 'export';
   } | null = null;
@@ -709,6 +724,7 @@
           { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
           { name: 'Photoshop (PSD, PSB)', extensions: ['psd', 'psb'] },
           { name: 'SVG (opened as shape layers)', extensions: ['svg'] },
+          { name: 'OpenEXR (scene-linear, opened as layers)', extensions: ['exr'] },
           { name: 'Camera RAW (DNG)', extensions: ['dng'] }
         ]
       });
@@ -1143,6 +1159,11 @@
     // An SVG likewise: shapes, not pixels, with a report of what the subset left out.
     if (isSvgPath(path)) {
       await importSvg(path);
+      return;
+    }
+    // An OpenEXR file likewise: scene-linear float pixels, read in their own convention.
+    if (isExrPath(path)) {
+      await importExr(path);
       return;
     }
     // Before anything about the open document is touched, so that choosing Cancel
@@ -2932,6 +2953,32 @@
     }
   }
 
+  /**
+   * Opens an OpenEXR file as a new, unsaved high-precision document: scene-linear light, with
+   * premultiplied alpha made straight and the file's primaries converted to sRGB's.
+   */
+  async function importExr(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importExrDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the EXR.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(exrImportSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
   async function openProject() {
     if (!allowWorkspaceMutation()) return;
     cancelTransformGesture();
@@ -4098,7 +4145,8 @@
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
           { name: 'WebP image', extensions: ['webp'] },
           { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] },
-          { name: 'SVG (shape layers)', extensions: ['svg'] }
+          { name: 'SVG (shape layers)', extensions: ['svg'] },
+          { name: 'OpenEXR (scene-linear float, composited)', extensions: ['exr'] }
         ]
       });
       if (!outputPath) return;
@@ -4130,6 +4178,17 @@
         const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
         psdReport = { report: written.report, fileName, mode: 'export' };
         notify(svgExportSentence(fileName, written.report));
+        return;
+      }
+      if (isExrPath(outputPath)) {
+        // An OpenEXR file holds one picture of scene-linear light: the profile, colour space and
+        // dither choices above do not apply, and nothing is tone-mapped or clipped.
+        if (!layerDocument) throw new Error('OpenEXR export needs a layered document.');
+        const written = await exportExrDocument(outputPath, layerDocument, exportOperations, null, metadataPolicy);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify([exrExportSentence(fileName, written.report), metadataSentence(written.metadata)].filter(Boolean).join(' '));
         return;
       }
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
