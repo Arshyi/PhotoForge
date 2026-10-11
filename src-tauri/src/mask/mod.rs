@@ -15,6 +15,7 @@ mod transform;
 
 pub(crate) use bitmap::checked_length as checked_mask_length;
 pub use bitmap::MaskBitmap;
+pub(crate) use bitmap::MAX_MASK_PIXELS;
 pub(crate) use color_range::select_with_progress as select_color_range_with_progress;
 pub use color_range::{select as select_color_range, ColorRangeOptions};
 pub use diagnostics::{inspect as mask_diagnostics, MaskDiagnostics};

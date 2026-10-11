@@ -831,6 +831,120 @@ mod importer {
         );
     }
 
+    /// A group (a bounding divider, a leaf, the folder record) whose folder record carries a
+    /// mask with an empty rectangle, so that no mask data has to exist for its grid to be made.
+    fn group_with_an_empty_mask() -> Vec<TestLayer> {
+        let mut group = TestLayer::divider("Scene", 1);
+        group.mask = Some(((0, 0, 0, 0), 255, 0));
+        group.channels.push((-2, Vec::new()));
+        vec![
+            TestLayer::divider("</Layer group>", 3),
+            flat("Leaf", (0, 0, 2, 2), [9, 9, 9]),
+            group,
+        ]
+    }
+
+    #[test]
+    fn a_mask_rectangle_no_job_could_hold_is_left_out_before_it_is_decoded() {
+        // The rectangle runs from the least i32 to the greatest: 4,294,967,295 x 1000 pixels,
+        // declared by a file of a few kilobytes. The decoder sizes its output from it, so
+        // before the importer admitted a mask this reached `Vec::with_capacity(4.29e12)`,
+        // which aborts the process: this test passes only because it no longer gets there.
+        let mut layer = flat("Wide", (0, 0, 1000, 1), [10, 20, 30]);
+        layer.compression = 1; // PackBits, so there is a row table and no data to size it by
+        layer.mask = Some(((0, i32::MIN, 1000, i32::MAX), 0, 0));
+        layer.channels.push((-2, vec![255; 1000]));
+        let (_dir, path) = write("wide.psd", &build(&TestDoc::rgb8(1, 1000, vec![layer])));
+        let imported = import_psd(&path, BIG).unwrap();
+        let layers = &imported.project.document.layers;
+        assert_eq!(layers.len(), 1);
+        assert!(layers[0].mask.is_none());
+        let left_out = entries(&imported.report, ReportKind::NotImported);
+        assert_eq!(left_out.len(), 1, "{left_out:?}");
+        assert!(
+            left_out[0].starts_with("Wide: The layer's mask is 4294967295 x 1000 pixels")
+                && left_out[0].ends_with("it was not imported."),
+            "{left_out:?}"
+        );
+    }
+
+    #[test]
+    fn a_mask_is_admitted_by_the_memory_decoding_it_needs() {
+        // A 2 x 2 layer with a 16 x 16 mask rectangle, which a mask may have. Decoding it holds
+        // the layer's 2 x 2 grid (4 bytes), the 256-byte plane and the 256 floats it is
+        // widened to (1024 bytes): 1284, which must fit the one job's bytes.
+        let mut layer = flat("Masked", (0, 0, 2, 2), [1, 2, 3]);
+        layer.mask = Some(((0, 0, 16, 16), 0, 0));
+        layer.channels.push((-2, vec![200; 256]));
+        let (_dir, path) = write("peak.psd", &build(&TestDoc::rgb8(2, 2, vec![layer])));
+        let import = |job_bytes| import_psd(&path, ImportLimits { job_bytes, ..BIG }).unwrap();
+
+        let fits = import(1284);
+        assert!(fits.project.document.layers[0].mask.is_some());
+        assert!(entries(&fits.report, ReportKind::NotImported).is_empty());
+
+        let over = import(1283);
+        assert_eq!(over.project.document.layers.len(), 1);
+        assert!(over.project.document.layers[0].mask.is_none());
+        let left_out = entries(&over.report, ReportKind::NotImported);
+        assert_eq!(left_out.len(), 1, "{left_out:?}");
+        assert!(
+            left_out[0].starts_with("Masked: The layer's mask is 16 x 16 pixels")
+                && left_out[0].ends_with("it was not imported."),
+            "{left_out:?}"
+        );
+    }
+
+    #[test]
+    fn a_group_or_adjustment_mask_is_left_out_when_its_canvas_grid_does_not_fit() {
+        // Their masks live on the whole canvas, here 64 x 64: a 4096-byte grid.
+        let mut layers = group_with_an_empty_mask();
+        let mut invert = adjustment("Invert 1", b"nvrt", Vec::new());
+        invert.mask = Some(((0, 0, 0, 0), 255, 0));
+        invert.channels.push((-2, Vec::new()));
+        layers.push(invert);
+        let (_dir, path) = write("canvas.psd", &build(&TestDoc::rgb8(64, 64, layers)));
+        let import = |job_bytes| import_psd(&path, ImportLimits { job_bytes, ..BIG }).unwrap();
+
+        let fits = import(4096);
+        let document = &fits.project.document;
+        assert_eq!(document.layers.len(), 2);
+        assert!(document.layers.iter().all(|layer| layer.mask.is_some()));
+
+        let over = import(4095);
+        let document = &over.project.document;
+        assert_eq!(document.layers.len(), 2);
+        assert!(document.layers.iter().all(|layer| layer.mask.is_none()));
+        let left_out = entries(&over.report, ReportKind::NotImported);
+        assert_eq!(left_out.len(), 2, "{left_out:?}");
+        for (line, name) in left_out.iter().zip(["Scene", "Invert 1"]) {
+            assert!(
+                line.starts_with(&format!("{name}: The layer's mask would be 64 x 64 pixels"))
+                    && line.ends_with("it was not imported."),
+                "{left_out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_canvas_costs_no_mask_sized_buffer() {
+        // 100,000 x 100,000 is a canvas the importer lets through to its layers (each edge is
+        // under the hard limit); a group with an empty mask used to allocate and fill 10 GB
+        // for the grid before any size was looked at. The file is refused for its canvas,
+        // after the mask has been left out and without one being made.
+        let mut doc = TestDoc::rgb8(2, 2, group_with_an_empty_mask());
+        doc.version = 2;
+        doc.width = 100_000;
+        doc.height = 100_000;
+        doc.merged = Vec::new();
+        let (_dir, path) = write("huge.psb", &build(&doc));
+        let error = import_psd(&path, BIG).err().expect("refused");
+        assert!(
+            matches!(error, crate::error::AppError::ImageTooLarge { .. }),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_blend_mode_photoforge_lacks_becomes_normal_and_is_reported() {
         // Dissolve is the one: its dither is not reproducible.

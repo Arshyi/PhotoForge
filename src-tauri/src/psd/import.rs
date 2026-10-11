@@ -46,7 +46,7 @@ use crate::layers::{
     BlendMode, Layer, LayerContent, LayerDocument, LayerMask, LoadedProject, MAX_GROUP_DEPTH,
     MAX_LAYERS,
 };
-use crate::mask::{MaskBitmap, MaskSnapshot};
+use crate::mask::{MaskBitmap, MaskSnapshot, MAX_MASK_PIXELS};
 use crate::operations::structure::new_layer;
 use crate::operations::support::{Clock, SystemClock};
 use crate::pixel::DocumentPrecision;
@@ -993,9 +993,46 @@ impl<'a> Importer<'a> {
             right: (i64::from(rect.right) + offset_x) as i32,
         };
         let (target_width, target_height) = (target.width(), target.height());
-        let mut coverage = vec![default_color; (target_width * target_height) as usize];
+        let depth = self.document.header.depth;
+        // Two sizes are the file's to choose: the grid (the whole canvas for a group or an
+        // adjustment layer) and the mask's own rectangle, which nothing else bounds. Both are
+        // admitted here, before anything is allocated or read for them.
+        //
+        // The grid is a byte a pixel and may hold no more than a mask may (what
+        // `MaskBitmap::from_coverage` would refuse afterwards), nor more than one job.
+        let grid = target_width.saturating_mul(target_height);
+        if grid > MAX_MASK_PIXELS.min(self.limits.job_bytes) {
+            self.report.push(
+                ReportKind::NotImported,
+                Some(record.display_name()),
+                format!("The layer's mask would be {target_width} x {target_height} pixels, more than PhotoForge allows for a mask; it was not imported."),
+            );
+            return Ok(None);
+        }
+        // Reading the rectangle holds the grid, the plane as the file stores it, and the
+        // floats `sample_plane` widens it to (four bytes a pixel), as a layer's peak is
+        // counted. That peak must fit one job.
+        let rect_pixels = rect.width().saturating_mul(rect.height());
+        let plane_bytes = rect_pixels.saturating_mul(u64::from(depth / 8).max(1));
+        let peak = grid
+            .saturating_add(plane_bytes)
+            .saturating_add(rect_pixels.saturating_mul(4));
+        if peak > self.limits.job_bytes {
+            self.report.push(
+                ReportKind::NotImported,
+                Some(record.display_name()),
+                format!(
+                    "The layer's mask is {} x {} pixels and needs about {} MiB to import, more than the {} MiB one job may use; it was not imported.",
+                    rect.width(),
+                    rect.height(),
+                    peak / (1 << 20),
+                    self.limits.job_bytes / (1 << 20)
+                ),
+            );
+            return Ok(None);
+        }
+        let mut coverage = vec![default_color; grid as usize];
         if !rect.is_empty() {
-            let depth = self.document.header.depth;
             let version = self.document.header.version;
             let spec = ChannelSpec {
                 offset: channel.offset,
@@ -1004,14 +1041,9 @@ impl<'a> Importer<'a> {
                 height: rect.height(),
                 depth,
             };
-            let plane = decode_channel(
-                reader,
-                version,
-                &spec,
-                rect.width() * rect.height() * u64::from(depth / 8).max(1),
-            )
-            .map_err(AppError::from)?;
-            let values = sample_plane(&plane, depth, (rect.width() * rect.height()) as usize, true);
+            let plane =
+                decode_channel(reader, version, &spec, plane_bytes).map_err(AppError::from)?;
+            let values = sample_plane(&plane, depth, rect_pixels as usize, true);
             for y in 0..rect.height() as i64 {
                 for x in 0..rect.width() as i64 {
                     let tx = i64::from(rect.left) + x - i64::from(target.left);
