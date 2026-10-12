@@ -75,6 +75,18 @@ impl Primaries {
         );
         // [r g b] * s = w: the scale of each primary that makes RGB (1, 1, 1) the white point.
         let primaries: Matrix = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
+        // A triangle that is nearly flat (three primaries almost on a line) has an inverse made of
+        // rounding error: the file's numbers do not describe a colour space, and the result of
+        // using them is garbage that looks like colour. The test is relative, so that a small
+        // gamut is not mistaken for a flat one.
+        let column_norm = |c: &[f64; 3]| (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+        let spread = column_norm(&r) * column_norm(&g) * column_norm(&b);
+        let volume = (r[0] * (g[1] * b[2] - g[2] * b[1]) - g[0] * (r[1] * b[2] - r[2] * b[1])
+            + b[0] * (r[1] * g[2] - r[2] * g[1]))
+            .abs();
+        if !spread.is_finite() || spread <= 0.0 || volume / spread < 1e-3 {
+            return None;
+        }
         let inverse = invert(&primaries)?;
         let s = multiply_vector(&inverse, &w);
         Some([
@@ -334,6 +346,14 @@ mod tests {
             ..REC709
         };
         assert!(black_white_point.to_working_space().is_none());
+        // Nearly collinear: not exactly flat, so not caught by the determinant alone.
+        let nearly_flat = Primaries {
+            red: (0.100, 0.100),
+            green: (0.200, 0.200),
+            blue: (0.300, 0.300_01),
+            white: (0.3127, 0.3290),
+        };
+        assert!(nearly_flat.to_working_space().is_none());
         let not_a_number = Primaries {
             green: (f32::NAN, 0.6),
             ..REC709

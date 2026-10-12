@@ -73,12 +73,23 @@
     return [...lines.values()];
   }
 
+  /**
+   * The most lines one section shows. A hostile or merely enormous file can report one line per
+   * shape, and a window with ten thousand list items in it does not respond; the count in the
+   * heading is still of every finding.
+   */
+  const MAX_LINES = 200;
+
   $: groups = order
-    .map((kind) => ({
-      kind,
-      count: report.entries.filter((entry) => entry.kind === kind).length,
-      lines: condensed(report.entries.filter((entry) => entry.kind === kind))
-    }))
+    .map((kind) => {
+      const all = condensed(report.entries.filter((entry) => entry.kind === kind));
+      return {
+        kind,
+        count: report.entries.filter((entry) => entry.kind === kind).length,
+        lines: all.slice(0, MAX_LINES),
+        hidden: Math.max(0, all.length - MAX_LINES)
+      };
+    })
     .filter((group) => group.count > 0);
 
   function keys(event: KeyboardEvent) {
@@ -135,6 +146,9 @@
                 {#if line.times > 1}<span class="times">on {line.times} layers with this name</span>{/if}
               </li>
             {/each}
+            {#if group.hidden > 0}
+              <li class="more"><span>…and {group.hidden} more lines like these.</span></li>
+            {/if}
           </ul>
         </section>
       {/each}

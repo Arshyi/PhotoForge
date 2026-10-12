@@ -464,11 +464,15 @@ pub async fn export_mask_file(
     let outcome = async {
         let _permit = state.mask_gate.lock().await;
         prepare_request(&state, &progress, document_id, request_id)?;
+        let source = super::layers::session_source_path(&state)?;
         let cancelled = state.mask_cancelled.clone();
         let worker_progress = progress.clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let destination = PathBuf::from(path);
+            // Writing a mask over the photograph the document came from would destroy it.
+            crate::infrastructure::image_io::refuse_to_replace_source(&source, &destination)?;
             save_mask_with_progress(
-                &PathBuf::from(path),
+                &destination,
                 &document,
                 &worker_progress,
                 cancelled.as_ref(),
@@ -522,11 +526,15 @@ pub async fn export_mask_png(
     let outcome = async {
         let _permit = state.mask_gate.lock().await;
         prepare_request(&state, &progress, document_id, request_id)?;
+        let source = super::layers::session_source_path(&state)?;
         let cancelled = state.mask_cancelled.clone();
         let worker_progress = progress.clone();
         tauri::async_runtime::spawn_blocking(move || {
+            let destination = PathBuf::from(path);
+            // Writing a mask over the photograph the document came from would destroy it.
+            crate::infrastructure::image_io::refuse_to_replace_source(&source, &destination)?;
             export_png_snapshot_with_progress(
-                &PathBuf::from(path),
+                &destination,
                 &mask,
                 &worker_progress,
                 cancelled.as_ref(),

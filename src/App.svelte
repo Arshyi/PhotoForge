@@ -596,11 +596,14 @@
           selectionTool: selectionState.tool,
           settingsOpen,
           // The Refine Selection dialog owns the keyboard while it is open.
-          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog || pluginModalOpen),
+          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog || pluginModalOpen || psdReport),
           bindings: shortcuts
         }
       );
       if (!intent) return;
+      // Ctrl+C with some text selected on the page copies that text, as the person expects; only
+      // with nothing selected is it a copy of the picture.
+      if (intent.type === 'clipboard' && intent.action !== 'paste' && pageTextIsSelected()) return;
       event.preventDefault();
       runShortcut(intent);
     };
@@ -695,6 +698,15 @@
       case 'binding':
         runBinding(intent.action);
         return;
+    }
+  }
+
+  /** Whether some text is selected on the page (a toast, a report line, a field's content). */
+  function pageTextIsSelected(): boolean {
+    try {
+      return (window.getSelection()?.toString() ?? '').length > 0;
+    } catch {
+      return false;
     }
   }
 
@@ -2332,7 +2344,9 @@
     } finally {
       layerBusy = false;
     }
-    await runPanelPlan(() => panel.placeImage(imported));
+    const placed = await runPanelPlan(() => panel.placeImage(imported));
+    // Refused or dropped: no layer shows the decoded buffer, so it must not stay in the session.
+    if (!placed) void releaseUnreferencedPixels();
   }
 
   /** Panel actions the engine makes; they queue behind each other instead of being refused. */

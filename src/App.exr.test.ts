@@ -275,3 +275,21 @@ describe('writing an OpenEXR file', () => {
     expect(calls('export_exr_document')).toHaveLength(0);
   });
 });
+
+describe('a report with very many findings', () => {
+  it('shows a bounded number of lines and says how many it did not', async () => {
+    entries = Array.from({ length: 500 }, (_, index) => ({
+      kind: 'not_imported' as const,
+      layer: null,
+      detail: `Channel number ${index} was not read as colour.`
+    }));
+    render(App);
+    await chooseFile(EXR);
+    const dialog = await screen.findByRole('dialog', { name: /shot\.exr/ });
+    const left = within(dialog).getByRole('region', { name: 'Left out' });
+    // The heading counts every finding; the list shows 200 of them and one line about the rest.
+    expect(within(left).getByRole('heading', { level: 2 }).textContent).toMatch(/500/);
+    expect(within(left).getAllByRole('listitem')).toHaveLength(201);
+    expect(within(left).getByText(/…and 300 more lines like these/)).toBeTruthy();
+  });
+});

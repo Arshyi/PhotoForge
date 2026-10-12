@@ -18,7 +18,15 @@ pub const PROJECT_EXTENSION: &str = "photoforge";
 /// Container magic. The trailing CR/LF pair makes a file mangled by a text-mode
 /// transfer fail immediately instead of decoding into nonsense.
 pub const PROJECT_MAGIC: &[u8; 8] = b"PFORGE\r\n";
-pub const PROJECT_FORMAT_VERSION: u32 = 2;
+/// The newest format this build reads and writes.
+///
+/// A project is written as the **lowest** version that holds what it contains (see
+/// `required_format_version`): a document that uses nothing newer than Phase 14 is still a
+/// version 2 project that every earlier build opens, and one that uses Phase 15's state is
+/// version 3, which an earlier build refuses by name instead of reading it wrongly.
+pub const PROJECT_FORMAT_VERSION: u32 = 3;
+/// What every Phase 14 build reads.
+const BASE_FORMAT_VERSION: u32 = 2;
 
 pub const MAX_PROJECT_BYTES: u64 = 1_073_741_824;
 pub const MAX_MANIFEST_BYTES: u64 = 33_554_432;
@@ -107,7 +115,7 @@ const ENTRY_SOURCE: &str = "metadata/source.txt";
 /// carrying them still opens in an older version, without the metadata. The container's
 /// entry count and its checksum are updated, nothing else is touched.
 pub fn attach_source_metadata(
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
     metadata: &SourceMetadata,
 ) -> Result<Vec<u8>, AppError> {
     let mut extra: Vec<(&str, Vec<u8>)> = Vec::new();
@@ -162,27 +170,37 @@ pub fn attach_source_metadata(
             "a project may not hold this many entries".into(),
         ));
     }
-    let mut out = Vec::with_capacity(bytes.len() + 1024);
-    out.extend_from_slice(&bytes[..count_at]);
-    out.extend_from_slice(&((count + extra.len()) as u32).to_le_bytes());
-    out.extend_from_slice(&bytes[count_at + 4..body_end]);
-    for (name, payload) in &extra {
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.push(ENCODING_RAW);
-        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        out.extend_from_slice(&fnv1a64(payload).to_le_bytes());
-        out.extend_from_slice(payload);
-    }
-    if out.len() as u64 + 8 > MAX_PROJECT_BYTES {
+    // The size it will have, checked before a byte is moved: a project a little under the cap
+    // can be over it with its metadata, and that is said before a second copy is made of it.
+    let added: u64 = extra
+        .iter()
+        .map(|(name, payload)| 2 + name.len() as u64 + 1 + 8 + 8 + payload.len() as u64)
+        .sum();
+    let total = bytes.len() as u64 + added;
+    if total > MAX_PROJECT_BYTES {
         return Err(AppError::ProjectTooLarge {
-            bytes: out.len() as u64 + 8,
+            bytes: total,
             limit: MAX_PROJECT_BYTES,
         });
     }
-    let trailer = fnv1a64(&out);
-    out.extend_from_slice(&trailer.to_le_bytes());
-    Ok(out)
+    // In place: the trailer comes off, the count is rewritten, the entries are appended, and the
+    // trailer is made again. The container is not copied.
+    bytes.truncate(body_end);
+    bytes[count_at..count_at + 4].copy_from_slice(&((count + extra.len()) as u32).to_le_bytes());
+    bytes
+        .try_reserve(added as usize + 8)
+        .map_err(|_| AppError::OutOfMemoryRisk)?;
+    for (name, payload) in &extra {
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(ENCODING_RAW);
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&fnv1a64(payload).to_le_bytes());
+        bytes.extend_from_slice(payload);
+    }
+    let trailer = fnv1a64(&bytes);
+    bytes.extend_from_slice(&trailer.to_le_bytes());
+    Ok(bytes)
 }
 
 /// The source metadata a project's entries hold, if any. Entries that are not understood are
@@ -454,6 +472,24 @@ pub fn encode_project_typed(
     )
 }
 
+/// The lowest format version that holds `document` without loss in the builds that read it.
+///
+/// Phase 15 stores state an earlier build does not know: a layer clipped to the one beneath it
+/// (`clipped`) and ten Photoshop blend modes. A Phase 14 build drops the clip flag without a word,
+/// and the clipping is gone for good when it saves; it refuses an unknown blend mode with an
+/// unreadable-manifest error. A project that uses either is therefore written as version 3, which
+/// such a build refuses as a version it does not know. Everything else is version 2, as before.
+fn required_format_version(document: &LayerDocument) -> u32 {
+    let newer = document
+        .iter_all()
+        .any(|layer| layer.clipped || layer.blend_mode.is_photoshop_only());
+    if newer {
+        PROJECT_FORMAT_VERSION
+    } else {
+        BASE_FORMAT_VERSION
+    }
+}
+
 fn encode_project_sources(
     document: &LayerDocument,
     document_operations: &[EditOperation],
@@ -590,8 +626,9 @@ fn encode_project_sources(
         mask_entries.push(entry);
     }
 
+    let format_version = required_format_version(document);
     let manifest = ProjectManifest {
-        format_version: PROJECT_FORMAT_VERSION,
+        format_version,
         application: "PhotoForge".into(),
         application_version: application_version.to_string(),
         created_at: created_at.to_string(),
@@ -637,7 +674,7 @@ fn encode_project_sources(
         .try_reserve_exact(required as usize)
         .map_err(|_| AppError::OutOfMemoryRisk)?;
     bytes.extend_from_slice(PROJECT_MAGIC);
-    bytes.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&format_version.to_le_bytes());
     bytes.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&manifest_bytes);
     bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -746,7 +783,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         offset: PROJECT_MAGIC.len(),
     };
     let version = cursor.u32()?;
-    if !matches!(version, 1 | PROJECT_FORMAT_VERSION) {
+    if !(1..=PROJECT_FORMAT_VERSION).contains(&version) {
         return Err(AppError::UnsupportedProjectVersion(version));
     }
     let manifest_len = cursor.u64()?;
@@ -1661,6 +1698,83 @@ mod tests {
             decode_project(&padded),
             Err(AppError::ProjectFormat(_))
         ));
+    }
+
+    fn version_of(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_project_that_uses_nothing_newer_is_still_version_2() {
+        // Byte for byte what an earlier build wrote and reads.
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        assert_eq!(version_of(&bytes), 2);
+        assert_eq!(decode_project(&bytes).unwrap().document, document);
+    }
+
+    #[test]
+    fn clipping_or_a_photoshop_blend_mode_makes_a_version_3_project_this_build_reads() {
+        use crate::layers::BlendMode;
+        let pixels = sample_pixels();
+        let mut clipped = sample_document();
+        // The group above the base is clipped to it.
+        clipped.layers[1].clipped = true;
+        assert!(clipped.validate().is_ok());
+        let bytes = encode(&clipped, &pixels);
+        assert_eq!(version_of(&bytes), 3);
+        let loaded = decode_project(&bytes).unwrap();
+        assert!(loaded.document.layers[1].clipped);
+
+        for mode in BlendMode::ALL {
+            let mut document = sample_document();
+            document.layers[0].blend_mode = mode;
+            let bytes = encode(&document, &pixels);
+            let expected = if mode.is_photoshop_only() { 3 } else { 2 };
+            assert_eq!(version_of(&bytes), expected, "{mode:?}");
+            assert_eq!(
+                decode_project(&bytes).unwrap().document.layers[0].blend_mode,
+                mode
+            );
+        }
+        assert_eq!(
+            BlendMode::ALL
+                .iter()
+                .filter(|mode| mode.is_photoshop_only())
+                .count(),
+            10
+        );
+    }
+
+    #[test]
+    fn what_an_earlier_build_wrote_is_still_read() {
+        // A project of either older version, rewritten by hand: version 1 and 2 headers.
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        assert_eq!(version_of(&bytes), 2);
+        assert!(decode_project(&bytes).is_ok());
+    }
+
+    #[test]
+    fn metadata_is_attached_in_place_and_the_cap_is_checked_before_copying() {
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        let before = bytes.len();
+        let metadata = SourceMetadata::from_blocks(
+            Some(vec![1, 2, 3, 4]),
+            Some(b"<x:xmpmeta/>".to_vec()),
+            None,
+        );
+        let attached = attach_source_metadata(bytes, &metadata).unwrap();
+        assert!(attached.len() > before);
+        let loaded = decode_project(&attached).unwrap();
+        assert_eq!(loaded.document, document);
+        assert!(loaded.source_metadata.is_some());
+        // The integrity check holds over the rewritten container.
+        let mut corrupted = attached.clone();
+        let middle = corrupted.len() / 2;
+        corrupted[middle] ^= 0xff;
+        assert!(decode_project(&corrupted).is_err());
     }
 
     #[test]

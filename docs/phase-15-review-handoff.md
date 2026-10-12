@@ -1,5 +1,11 @@
 # Phase 15 review and fixes: handoff
 
+> **Update.** This branch was built and tested on Windows afterwards, and part of the open list
+> below was fixed there: see [phase-15-5-review-results.md](phase-15-5-review-results.md). Open
+> work items 1, 3, 5 and 6 and about a dozen ledger rows (the clipboard parsers, the report
+> dialog, the OpenEXR primaries, the hard-link check) are done; item 2 is recorded in
+> `docs/layers.md`. The ledger rows below are left as the review wrote them.
+
 Written 12 October 2026 at the end of a cloud session. This note says what was reviewed, what was fixed, what was and was not verified, and what is still open, so that work can continue from a local checkout without this session.
 
 ## Where the work is

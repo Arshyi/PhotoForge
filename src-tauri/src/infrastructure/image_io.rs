@@ -507,8 +507,8 @@ pub(crate) fn refuse_to_replace_source(source: &Path, destination: &Path) -> Res
 }
 
 /// Whether two existing paths are one file under two names (a hard link), which no spelling of
-/// the path shows. Only Unix reports a file's identity through the standard library; elsewhere
-/// the resolved paths that [`paths_equal`] compares are all there is.
+/// the path shows. Unix reports a file's identity through the standard library; Windows is asked
+/// for its volume serial number and file index.
 #[cfg(unix)]
 fn is_same_file(left: &Path, right: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -518,7 +518,30 @@ fn is_same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn is_same_file(left: &Path, right: &Path) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    fn identity(path: &Path) -> Option<(u32, u32, u32)> {
+        let file = fs::File::open(path).ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the handle belongs to `file`, which is open for the whole call, and `info` is a
+        // structure of the size the call expects.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+        Some((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    // A file that cannot be opened to be asked is not shown to be the same file.
+    matches!((identity(left), identity(right)), (Some(a), Some(b)) if a == b)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn is_same_file(_left: &Path, _right: &Path) -> bool {
     false
 }
@@ -808,7 +831,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_hard_link_to_the_source_is_the_source() {
         let (directory, source) = folder_with_source();

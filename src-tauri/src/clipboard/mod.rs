@@ -119,25 +119,51 @@ pub fn decode_png(bytes: &[u8], max_pixels: u64) -> Result<RgbaImage, ClipboardE
     }
     if pixels > max_pixels {
         return Err(ClipboardError::TooLarge {
-            bytes: pixels * 4,
-            limit: max_pixels * 4,
+            bytes: pixels.saturating_mul(4),
+            limit: max_pixels.saturating_mul(4),
         });
     }
-    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+    // The decoder's own allocation limit is its default (512 MiB), which is below what the pixel
+    // bound admits; it is set from the same bound instead: the picture as 8-bit RGBA, up to three
+    // copies of it (a 16-bit source, the conversion, the row buffers), and a margin.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(width);
+    limits.max_image_height = Some(height);
+    limits.max_alloc = Some(
+        max_pixels
+            .saturating_mul(12)
+            .saturating_add(64 * 1024 * 1024),
+    );
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
         .map_err(|error| ClipboardError::Unreadable(error.to_string()))?;
     Ok(decoded.to_rgba8())
 }
 
 /// Replaces the clipboard with `image`, as `PNG` and `CF_DIBV5`.
+///
+/// Everything is made, and its memory allocated, before the clipboard is touched, so that running
+/// out of memory costs the copy and not what was on the clipboard.
+///
+/// The picture is also marked as not for upload to the cloud clipboard (`CanUploadToCloudClipboard`
+/// of 0), which Windows honours when the person has clipboard sync on: a picture from an editor
+/// that sends nothing anywhere is not sent by the system either. It stays in the local clipboard
+/// history, which is the person's own.
 #[cfg(windows)]
 pub fn write_image(image: &RgbaImage) -> Result<Written, ClipboardError> {
     let png = encode_png(image)?;
     let dib = dib::encode_v5(image, DIBV5_MASK_TABLE);
-    let png_format = win::png_format();
+    let png_staged = win::stage(&png)?;
+    let dib_staged = win::stage(&dib)?;
+    let no_cloud = win::stage(&0_u32.to_le_bytes())?;
     let clipboard = win::OpenClipboardGuard::open()?;
     clipboard.clear()?;
-    clipboard.set(png_format, &png)?;
-    clipboard.set(win::dibv5_format(), &dib)?;
+    clipboard.set(win::png_format(), png_staged)?;
+    clipboard.set(win::dibv5_format(), dib_staged)?;
+    clipboard.set(win::cloud_upload_format(), no_cloud)?;
     Ok(Written {
         width: image.width(),
         height: image.height(),
@@ -152,53 +178,50 @@ pub fn write_image(image: &RgbaImage) -> Result<Written, ClipboardError> {
 #[cfg(windows)]
 #[doc(hidden)]
 pub fn write_dibv5_only(image: &RgbaImage, mask_table: bool) -> Result<(), ClipboardError> {
-    let dib = dib::encode_v5(image, mask_table);
+    let dib = win::stage(&dib::encode_v5(image, mask_table))?;
     let clipboard = win::OpenClipboardGuard::open()?;
     clipboard.clear()?;
-    clipboard.set(win::dibv5_format(), &dib)
+    clipboard.set(win::dibv5_format(), dib)
 }
 
 /// Reads the picture on the clipboard: `PNG` first, then `CF_DIBV5`, then `CF_DIB`.
 #[cfg(windows)]
 pub fn read_image(max_pixels: u64) -> Result<Pasted, ClipboardError> {
-    let png_format = win::png_format();
-    let clipboard = win::OpenClipboardGuard::open()?;
     let mut last_problem: Option<ClipboardError> = None;
     // Each form is tried in turn; a form that is there but unreadable falls through to the next,
     // and the first problem is what is reported if none works.
-    if let Some(bytes) = clipboard.get(png_format)? {
-        match decode_png(&bytes, max_pixels) {
-            Ok(image) => {
-                return Ok(Pasted {
-                    image,
-                    format: ClipboardFormat::Png,
-                })
-            }
-            Err(error) => last_problem = Some(error),
-        }
-    }
     for (format, kind) in [
+        (win::png_format(), ClipboardFormat::Png),
         (win::dibv5_format(), ClipboardFormat::DibV5),
         (win::dib_format(), ClipboardFormat::Dib),
     ] {
-        if let Some(bytes) = clipboard.get(format)? {
-            match dib::decode(&bytes, max_pixels) {
-                Ok(image) => {
-                    return Ok(Pasted {
-                        image,
-                        format: kind,
-                    })
-                }
-                Err(error) => {
-                    let error = match error {
-                        dib::DibError::TooLarge { pixels, limit } => ClipboardError::TooLarge {
-                            bytes: pixels * 4,
-                            limit: limit * 4,
-                        },
-                        other => ClipboardError::Unreadable(other.to_string()),
-                    };
-                    last_problem.get_or_insert(error);
-                }
+        // The clipboard is open only while the bytes are copied out of it. Decoding a large
+        // picture takes a while, and a program that wants the clipboard (or a copy of this
+        // one's) should not wait for that.
+        let bytes = {
+            let clipboard = win::OpenClipboardGuard::open()?;
+            clipboard.get(format)?
+        };
+        let Some(bytes) = bytes else { continue };
+        let decoded = match kind {
+            ClipboardFormat::Png => decode_png(&bytes, max_pixels),
+            _ => dib::decode(&bytes, max_pixels).map_err(|error| match error {
+                dib::DibError::TooLarge { pixels, limit } => ClipboardError::TooLarge {
+                    bytes: pixels.saturating_mul(4),
+                    limit: limit.saturating_mul(4),
+                },
+                other => ClipboardError::Unreadable(other.to_string()),
+            }),
+        };
+        match decoded {
+            Ok(image) => {
+                return Ok(Pasted {
+                    image,
+                    format: kind,
+                })
+            }
+            Err(error) => {
+                last_problem.get_or_insert(error);
             }
         }
     }
@@ -265,6 +288,14 @@ mod tests {
         let mut forged = bytes.clone();
         forged[16..20].copy_from_slice(&0x7FFF_FFFF_u32.to_be_bytes());
         forged[20..24].copy_from_slice(&0x7FFF_FFFF_u32.to_be_bytes());
+        assert!(matches!(
+            decode_png(&forged, 1 << 24),
+            Err(ClipboardError::TooLarge { .. })
+        ));
+        // The largest the header can say: the byte counts do not overflow on the way to the
+        // refusal (a debug build would have panicked).
+        forged[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+        forged[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
         assert!(matches!(
             decode_png(&forged, 1 << 24),
             Err(ClipboardError::TooLarge { .. })

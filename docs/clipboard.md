@@ -32,6 +32,16 @@ happened. (To keep them, export an OpenEXR file.)
 The clipboard is replaced whole. PhotoForge never monitors it, never reads it except when asked to
 paste, and never writes to it except when asked to copy.
 
+**Everything is made before the clipboard is touched.** The picture is encoded and its memory
+allocated first; only then is the clipboard emptied and filled. Running out of memory costs the
+copy, not what was on the clipboard.
+
+**It is marked as not for the cloud clipboard.** A copy carries `CanUploadToCloudClipboard` = 0.
+When the person has Windows' clipboard sync turned on, Windows honours it and does not upload
+the picture: an editor that sends nothing anywhere does not have the system send its pictures.
+The picture still goes into the local clipboard history, which is the person's own. (A program
+that wants a picture to roam can be given one by saving a file.)
+
 Within PhotoForge one use of the clipboard happens at a time (Windows does not exclude a second
 program that opens the clipboard with no window of its own, so a copy and a paste of PhotoForge's
 could otherwise interleave). A program that opens it with a window, as most do, is excluded by
@@ -52,6 +62,9 @@ Two behaviours worth knowing:
 * **An alpha channel that is zero at every pixel is ignored.** A great many programs write a 32-bit
   bitmap and leave the fourth byte zero; taken at its word the picture would paste as invisible.
   (The same rule as for OpenEXR files.) A 32-bit bitmap with no alpha mask is opaque.
+* **A colour table before the pixels of a 16-, 24- or 32-bit bitmap is skipped** (`biClrUsed`
+  entries; some programs write one to suggest colours to a display with few). It used to be read
+  as pixels, which shifted the picture.
 * **Windows' own synthesised `CF_DIBV5` repeats the three colour masks** as a table between the
   header and the pixels, which the V5 header does not call for. It is told by those three
   DWORDs being the header's masks, and skipped. (PhotoForge writes the layout the header
@@ -64,7 +77,9 @@ A clipboard is another program's data. Nothing is allocated from a size it claim
 form are capped at 1 GiB; a PNG's header and a bitmap's header are checked against the working
 pixel limit before a pixel buffer exists; every length is checked against the data that is there;
 and the clipboard is held open only while bytes are copied (and tried again for about 0.3 seconds
-if another program holds it, then reported as in use).
+if another program holds it, then reported as in use). A paste copies the bytes out and **lets the
+clipboard go before decoding**: a large picture takes a while to decode, and no other program
+should wait for that.
 
 ## Dependency
 

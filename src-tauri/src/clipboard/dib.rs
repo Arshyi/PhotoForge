@@ -148,8 +148,9 @@ impl Channel {
         }
         let shift = mask.trailing_zeros();
         let max = mask >> shift;
-        // A run of contiguous ones: the next value up is a power of two.
-        if max & (max + 1) != 0 {
+        // A run of contiguous ones: the next value up is a power of two. (In 64 bits, because the
+        // run may be all 32.)
+        if u64::from(max) & (u64::from(max) + 1) != 0 {
             return None;
         }
         Some(Self { mask, shift, max })
@@ -247,6 +248,9 @@ pub fn decode(bytes: &[u8], max_pixels: u64) -> Result<RgbaImage, DibError> {
         cursor += 12;
     }
 
+    // A palette where the depth has one; and, at the deeper depths, the colour table some programs
+    // write there anyway (`biClrUsed` entries, to suggest colours to a display with few). The
+    // pixels follow it, so it is skipped, and not read as pixels.
     let palette_entries = if bit_count <= 8 {
         let all = 1_usize << bit_count;
         match colours_used as usize {
@@ -254,8 +258,10 @@ pub fn decode(bytes: &[u8], max_pixels: u64) -> Result<RgbaImage, DibError> {
             used if used <= all => used,
             _ => return Err(DibError::BadDimensions),
         }
+    } else if colours_used as usize <= 256 {
+        colours_used as usize
     } else {
-        0
+        return Err(DibError::BadDimensions);
     };
     let palette_start = cursor;
     cursor = cursor
@@ -316,7 +322,7 @@ pub fn decode(bytes: &[u8], max_pixels: u64) -> Result<RgbaImage, DibError> {
         _ => None,
     };
 
-    let palette: Vec<[u8; 3]> = (0..palette_entries)
+    let palette: Vec<[u8; 3]> = (0..if bit_count <= 8 { palette_entries } else { 0 })
         .map(|index| {
             let at = palette_start + index * 4;
             // RGBQUAD is B, G, R, reserved.
@@ -522,6 +528,33 @@ mod tests {
         assert_eq!(image.get_pixel(1, 0).0, [0, 0, 255, 255]);
         assert_eq!(image.get_pixel(0, 1).0, [0, 0, 255, 255]);
         assert_eq!(image.get_pixel(1, 1).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn a_colour_table_before_the_pixels_of_a_deep_bitmap_is_skipped() {
+        // 24 bits per pixel with biClrUsed = 2: two table entries (8 bytes), then the pixels.
+        let mut bytes = header(40, 1, 1, 24, BI_RGB, 2);
+        bytes.extend_from_slice(&[9, 9, 9, 0, 8, 8, 8, 0]);
+        bytes.extend_from_slice(&[0, 0, 255, 0]); // red, padded to four bytes
+        let image = decode(&bytes, 100).unwrap();
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        // A table that claims more entries than anything has is refused.
+        let bytes = header(40, 1, 1, 24, BI_RGB, 70_000);
+        assert!(decode(&bytes, 100).is_err());
+    }
+
+    #[test]
+    fn a_mask_of_all_thirty_two_bits_is_a_mask_not_an_overflow() {
+        let mut bytes = header(40, 1, 1, 32, BI_BITFIELDS, 0);
+        for _ in 0..3 {
+            bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0x80, 0x40, 0x20, 0x10]);
+        // Whatever it reads as, it does not panic, and a 32-bit channel is scaled to eight bits.
+        let image = decode(&bytes, 100).unwrap();
+        assert_eq!(image.dimensions(), (1, 1));
+        assert!(Channel::new(u32::MAX).is_some());
+        assert_eq!(Channel::new(u32::MAX).unwrap().value(u32::MAX), 255);
     }
 
     #[test]

@@ -317,3 +317,20 @@ fn a_clipboard_another_program_holds_is_busy_not_a_hang() {
     write_image(&picture()).unwrap();
     assert!(has_image());
 }
+
+#[test]
+fn a_copy_tells_windows_not_to_upload_it_to_the_cloud_clipboard() {
+    real_clipboard!();
+    write_image(&picture()).unwrap();
+    let report = powershell(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $d = [System.Windows.Forms.Clipboard]::GetDataObject(); \
+         if (-not $d.GetDataPresent('CanUploadToCloudClipboard')) { 'absent' } else { \
+           $s = $d.GetData('CanUploadToCloudClipboard'); \
+           if ($s -is [System.IO.MemoryStream]) { ($s.ToArray() -join ',') } else { \"other: $s\" } }",
+    );
+    assert_eq!(report, "0,0,0,0", "the cloud-upload flag was {report}");
+    // And it did not stop the picture being a picture.
+    assert!(has_image());
+    assert_eq!(read_image(1 << 20).unwrap().image, picture());
+}

@@ -105,6 +105,8 @@ beforeEach(() => {
         }
         return { document, revision: 'r'.repeat(64), label: request.label, steps: [], createdPixelIds: [], lastCreated: null };
       }
+      case 'import_layer_image':
+        return { pixelId: 'px-import', width: 6, height: 5, filename: 'a.png', raw: null, origin: null };
       case 'paste_clipboard_image':
         if (failPaste) throw new Error(failPaste);
         return { pixelId: 'px-pasted', width: 8, height: 6, filename: 'Pasted image', format: 'png' };
@@ -272,5 +274,53 @@ describe('pasting', () => {
     await fireEvent.keyDown(field, { key: 'v', ctrlKey: true });
     expect(calls('paste_clipboard_image')).toHaveLength(0);
     field.remove();
+  });
+});
+
+describe('what Ctrl+C and Ctrl+V leave alone', () => {
+  it('leaves Ctrl+C to the page when text is selected on it', async () => {
+    await openDocument();
+    const selection = vi.spyOn(window, 'getSelection');
+    selection.mockReturnValue({ toString: () => 'some words that were selected' } as unknown as Selection);
+    await fireEvent.keyDown(window, { key: 'c', ctrlKey: true });
+    await settle();
+    expect(calls('copy_to_clipboard')).toHaveLength(0);
+    // With nothing selected it is a copy of the picture again.
+    selection.mockReturnValue({ toString: () => '' } as unknown as Selection);
+    await fireEvent.keyDown(window, { key: 'c', ctrlKey: true });
+    await waitFor(() => expect(calls('copy_to_clipboard')).toHaveLength(1));
+  });
+
+  it('does not paste behind an open import report', async () => {
+    render(App);
+    vi.mocked(open).mockResolvedValueOnce(EXR);
+    await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await screen.findByRole('dialog', { name: /shot\.exr/ });
+    await fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+    await settle();
+    expect(calls('paste_clipboard_image')).toHaveLength(0);
+    expect(calls('open_clipboard_image')).toHaveLength(0);
+  });
+});
+
+describe('placing an image file the engine then refuses', () => {
+  it('lets the decoded buffer go rather than keeping it in the session', async () => {
+    refuseTransaction = 'This document contains 513 layers; the limit is 512. Nothing was changed.';
+    await openDocument();
+    vi.mocked(open).mockResolvedValueOnce(String.raw`C:\pictures\a.png`);
+    await fireEvent.click(screen.getByRole('button', { name: 'Place image as layer' }));
+    await waitFor(() => expect(calls('import_layer_image')).toHaveLength(1));
+    await waitFor(() => expect(requests()).toHaveLength(1));
+    const retained = () => {
+      const all = vi.mocked(invoke).mock.calls;
+      const placed = all.findIndex(([name]) => name === 'import_layer_image');
+      return all
+        .slice(placed + 1)
+        .filter(([name]) => name === 'retain_layer_pixels')
+        .map(([, args]) => (args as { pixelIds: string[] }).pixelIds);
+    };
+    await waitFor(() => expect(retained().length).toBeGreaterThan(0));
+    // Only what the document uses is kept; the imported picture's buffer is not.
+    expect(retained().slice(-1)[0]).toEqual(['px1']);
   });
 });

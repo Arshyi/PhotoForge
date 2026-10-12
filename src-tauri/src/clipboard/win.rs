@@ -61,28 +61,20 @@ impl OpenClipboardGuard {
         unsafe { EmptyClipboard() }.map_err(|e| ClipboardError::Windows(e.to_string()))
     }
 
-    /// Puts `bytes` on the clipboard under `format`.
-    pub fn set(&self, format: u32, bytes: &[u8]) -> Result<(), ClipboardError> {
-        // SAFETY: standard allocate, lock, copy, unlock, hand over. On a successful
-        // `SetClipboardData` the system owns the memory; on failure it is freed here.
-        unsafe {
-            let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))
-                .map_err(|e| ClipboardError::Windows(e.to_string()))?;
-            let target = GlobalLock(handle);
-            if target.is_null() {
-                let _ = GlobalFree(Some(handle));
-                return Err(ClipboardError::Windows(
-                    "the clipboard memory could not be locked".into(),
-                ));
-            }
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), target.cast::<u8>(), bytes.len());
-            let _ = GlobalUnlock(handle);
-            match SetClipboardData(format, Some(HANDLE(handle.0))) {
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    let _ = GlobalFree(Some(handle));
-                    Err(ClipboardError::Windows(error.to_string()))
-                }
+    /// Gives `staged` to the clipboard under `format`. On success the system owns the memory; on
+    /// failure it is freed with the value.
+    pub fn set(&self, format: u32, mut staged: Staged) -> Result<(), ClipboardError> {
+        let handle = staged.0.take().ok_or_else(|| {
+            ClipboardError::Windows("there was nothing prepared to put on the clipboard".into())
+        })?;
+        // SAFETY: the clipboard is open and `handle` is a global memory block that this call
+        // either hands to the system (on success) or frees here (on failure).
+        match unsafe { SetClipboardData(format, Some(HANDLE(handle.0))) } {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // SAFETY: the system did not take the block.
+                let _ = unsafe { GlobalFree(Some(handle)) };
+                Err(ClipboardError::Windows(error.to_string()))
             }
         }
     }
@@ -140,6 +132,47 @@ impl Drop for OpenClipboardGuard {
         // SAFETY: the clipboard was opened by this guard.
         let _ = unsafe { CloseClipboard() };
     }
+}
+
+/// Memory prepared for the clipboard, not yet given to it. Preparing is the part that can fail for
+/// want of memory, and it is done before the clipboard is emptied; a value dropped without being
+/// given away frees its memory.
+pub struct Staged(Option<HGLOBAL>);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            // SAFETY: the block was allocated by `stage` and never handed to the system.
+            let _ = unsafe { GlobalFree(Some(handle)) };
+        }
+    }
+}
+
+/// Allocates global memory holding a copy of `bytes`.
+pub fn stage(bytes: &[u8]) -> Result<Staged, ClipboardError> {
+    // SAFETY: allocate, lock, copy exactly `bytes.len()` bytes into a block of at least that
+    // size, unlock. The block is owned by the returned value until it is given away.
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))
+            .map_err(|e| ClipboardError::Windows(e.to_string()))?;
+        let target = GlobalLock(handle);
+        if target.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return Err(ClipboardError::Windows(
+                "the clipboard memory could not be locked".into(),
+            ));
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), target.cast::<u8>(), bytes.len());
+        let _ = GlobalUnlock(handle);
+        Ok(Staged(Some(handle)))
+    }
+}
+
+/// The registered format that tells Windows whether the content may go to the cloud clipboard (a
+/// DWORD: 0 for no).
+pub fn cloud_upload_format() -> u32 {
+    // SAFETY: registering a name returns the same number for the same name, system-wide.
+    unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) }
 }
 
 /// The registered clipboard format called "PNG", which Office, browsers, Photoshop, GIMP and

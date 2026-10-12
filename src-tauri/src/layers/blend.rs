@@ -41,6 +41,24 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
+    /// Whether this is one of the ten modes Photoshop has and the W3C set (and so every build
+    /// before Phase 15) does not. A project that uses one cannot be read by such a build.
+    pub fn is_photoshop_only(self) -> bool {
+        matches!(
+            self,
+            Self::LinearBurn
+                | Self::LinearDodge
+                | Self::DarkerColor
+                | Self::LighterColor
+                | Self::VividLight
+                | Self::LinearLight
+                | Self::PinLight
+                | Self::HardMix
+                | Self::Subtract
+                | Self::Divide
+        )
+    }
+
     pub const ALL: [Self; 26] = [
         Self::Normal,
         Self::Multiply,

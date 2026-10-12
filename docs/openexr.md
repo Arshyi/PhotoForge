@@ -176,6 +176,14 @@ primaries, the admission, the report) is PhotoForge's own code in `src-tauri/src
   into 65,504, which hid a half-float clamp that had never been made. The test now reads the file's
   samples raw.
 
+## Highlights above white under blend modes
+
+An EXR is kept unclipped in the document, and **Normal, Multiply, Screen, Darken, Lighten,
+Difference and Exclusion** keep it unclipped when layers are composited. **Every other blend mode
+evaluates its operands and its result clamped to 0 to 1**, so a layer in Overlay, Soft Light, Vivid
+Light and the like loses its highlights above white where it composites. A single-layer EXR is
+unaffected. (See [layers.md](layers.md).)
+
 ## Not checked
 
 * The files PhotoForge writes **in Nuke, Blender, After Effects or Photoshop**. They have been

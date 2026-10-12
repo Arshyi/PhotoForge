@@ -412,6 +412,13 @@ not implemented; validation/application support is not generation support.
   (8-bit sRGB, as PNG and CF_DIBV5) on the Windows clipboard, and paste places a clipboard picture
   as a new layer or opens it as a document ([clipboard.md](clipboard.md)). Copying a layer *as a
   layer* between documents (with its text, shape, smart-object or adjustment content) is not done.
+- **High-dynamic-range values are clipped by most blend modes.** In a high-precision document
+  Normal, Multiply, Screen, Darken, Lighten, Difference and Exclusion are evaluated without a
+  ceiling; every other mode (Overlay, Soft Light, Hard Light, Color Dodge, Color Burn, the four
+  non-separable modes and the ten Photoshop ones) evaluates its operands and result clamped to 0
+  to 1. A picture with highlights above white (an OpenEXR file, a 32-bit PSD) loses them under
+  those modes; under Normal it keeps them. Photoshop's own 32-bit mode offers only a subset of
+  the modes for the same reason. The import report does not say so.
 - Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is

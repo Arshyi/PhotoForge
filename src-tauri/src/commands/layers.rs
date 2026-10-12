@@ -1375,7 +1375,7 @@ fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) 
 /// The file the open document was read from, or an empty path when there is none: no document is
 /// open, or it is one that never came from a file (a clipboard picture or a new blank document,
 /// whose source path is empty).
-fn session_source_path(state: &AppState) -> Result<PathBuf, AppError> {
+pub(crate) fn session_source_path(state: &AppState) -> Result<PathBuf, AppError> {
     let session = state
         .session
         .lock()
@@ -1927,6 +1927,8 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         export_psd_document,
         export_svg_document,
         export_exr_document,
+        super::mask::export_mask_file,
+        super::mask::export_mask_png,
         import_svg_document,
         import_exr_document,
         open_clipboard_image,
