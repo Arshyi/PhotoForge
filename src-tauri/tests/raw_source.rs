@@ -287,6 +287,7 @@ fn layer(width: u32, height: u32, view: Option<Rect>) -> RawLayerSource {
         decoder_version: "2".into(),
         capture: RawCaptureMetadata::default(),
         orientation_applied: 1,
+        crop: None,
         view,
     }
 }

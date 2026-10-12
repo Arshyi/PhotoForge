@@ -333,7 +333,7 @@ fn a_real_converters_file_gives_its_exif_and_xmp() {
 #[test]
 fn a_real_photograph_is_turned_by_each_orientation_value() {
     use photoforge_lib::orientation;
-    use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_upright};
+    use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_picture};
 
     let Some(original) = read(LOSSLESS) else {
         eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
@@ -382,7 +382,7 @@ fn a_real_photograph_is_turned_by_each_orientation_value() {
     leave("orientation-1".to_string(), &upright.image);
     for value in 2..=8_u16 {
         let turned =
-            develop_bytes_upright(&with_orientation(value), &parameters, RenderScale::Preview)
+            develop_bytes_picture(&with_orientation(value), &parameters, RenderScale::Preview)
                 .unwrap();
         let want = orientation::oriented_size(value as u8, width, height);
         assert_eq!(turned.image.dimensions(), want, "orientation {value}");
@@ -393,5 +393,73 @@ fn a_real_photograph_is_turned_by_each_orientation_value() {
         );
         assert_eq!(turned.source_dimensions, upright.source_dimensions);
         leave(format!("orientation-{value}"), &turned.image);
+    }
+}
+
+/// The Canon sample declares an active area of 5796 × 3870 at (122, 80) on its 5920 × 3950 sensor
+/// and a default crop of 5760 × 3840 at (18, 16) inside it, which is what the camera is
+/// specified to produce: the picture is the rectangle (140, 96, 5760, 3840). The numbers were
+/// read out of the file by a separate parser (`tools/tiff_dump.py` in the working notes) and
+/// agree with the camera's published image size.
+///
+/// Developed whole, the picture is that rectangle, and a window of it is exactly what developing
+/// that window of the sensor on its own gives.
+#[test]
+fn a_real_photograph_is_cut_to_the_picture_its_camera_declares() {
+    use photoforge_lib::raw::develop::{
+        develop_region, develop_sensor, develop_sensor_picture, RenderScale,
+    };
+    use photoforge_lib::source::Rect;
+
+    let Some(bytes) = read(LOSSLESS) else {
+        eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
+        return;
+    };
+    let sensor = dng::decode(&bytes).expect("decodes");
+    assert_eq!((sensor.width, sensor.height), (5920, 3950));
+    assert_eq!(sensor.active_area, (122, 80, 5796, 3870));
+    assert_eq!(sensor.default_crop, Some((18, 16, 5760, 3840)));
+    let picture = Rect {
+        x: 140,
+        y: 96,
+        width: 5760,
+        height: 3840,
+    };
+    assert_eq!(sensor.picture_rect(), Some(picture));
+
+    let parameters = DevelopmentParameters::default();
+    // A preview is cut in proportion.
+    let whole = develop_sensor(&sensor, &parameters, RenderScale::Preview).unwrap();
+    let shown = develop_sensor_picture(&sensor, &parameters, RenderScale::Preview).unwrap();
+    let (preview_width, preview_height) = whole.image.dimensions();
+    let (cut_width, cut_height) = shown.image.dimensions();
+    let ratio = |cut: u32, whole: u32, of: f64| (f64::from(cut) - f64::from(whole) * of).abs();
+    assert!(
+        ratio(cut_width, preview_width, 5760.0 / 5920.0) <= 1.0,
+        "{cut_width}"
+    );
+    assert!(
+        ratio(cut_height, preview_height, 3840.0 / 3950.0) <= 1.0,
+        "{cut_height}"
+    );
+
+    // Whole and at full scale: 5760 × 3840, and a window of it is the window developed alone.
+    let full = develop_sensor_picture(&sensor, &parameters, RenderScale::Full).unwrap();
+    assert_eq!(full.image.dimensions(), (5760, 3840));
+    let window = Rect {
+        x: 140 + 1000,
+        y: 96 + 700,
+        width: 48,
+        height: 48,
+    };
+    let alone = develop_region(&bytes, window, &parameters).unwrap();
+    for row in 0..48_u32 {
+        for column in 0..48_u32 {
+            assert_eq!(
+                full.image.get(1000 + column, 700 + row),
+                alone.image.get(column, row),
+                "({column}, {row})"
+            );
+        }
     }
 }

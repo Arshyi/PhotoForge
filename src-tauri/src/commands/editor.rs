@@ -678,14 +678,15 @@ async fn open_raw_image_inner(
     let developed = match tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         let defaults = crate::color::DevelopmentParameters::default();
-        // A sensor developed whole is turned upright from its orientation tag, and the layer
-        // records which turn, so developing it again turns it the same way. A region is in the
-        // sensor's coordinates: it is not turned, and carries the tag with its pixels.
-        let (developed, summary, applied) = match region {
+        // A sensor developed whole is cut to the picture the camera says it holds (the default
+        // crop inside its active area) and turned upright from its orientation tag, and the layer
+        // records both, so developing it again does the same. A region is in the sensor's
+        // coordinates: it is neither cut nor turned, and carries the tag with its pixels.
+        let (developed, summary, applied, crop) = match region {
             None => {
                 let sensor =
                     crate::raw::dng::decode(&bytes).map_err(crate::source::dng::map_raw)?;
-                let developed = crate::raw::develop::develop_sensor_upright(
+                let developed = crate::raw::develop::develop_sensor_picture(
                     &sensor,
                     &defaults,
                     crate::raw::develop::RenderScale::Full,
@@ -695,13 +696,13 @@ async fn open_raw_image_inner(
                     .ok()
                     .filter(|value| crate::orientation::is_valid(*value))
                     .unwrap_or(1);
-                (developed, sensor.summary(), applied)
+                (developed, sensor.summary(), applied, sensor.picture_rect())
             }
             Some(rect) => {
                 let (developed, summary) =
                     crate::raw::develop::develop_region_described(&bytes, rect, &defaults)
                         .map_err(crate::source::dng::map_raw)?;
-                (developed, summary, 1)
+                (developed, summary, 1, None)
             }
         };
         // The identity recorded is that of the bytes just decoded, not of whatever
@@ -723,7 +724,14 @@ async fn open_raw_image_inner(
                 found.orientation_applied = region.is_none();
                 found
             });
-        Ok::<_, AppError>((developed, summary, reference, source_metadata, applied))
+        Ok::<_, AppError>((
+            developed,
+            summary,
+            reference,
+            source_metadata,
+            applied,
+            crop,
+        ))
     })
     .await
     {
@@ -737,7 +745,7 @@ async fn open_raw_image_inner(
             return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
         }
     };
-    let (developed, sensor, reference, source_metadata, applied) = developed;
+    let (developed, sensor, reference, source_metadata, applied, crop) = developed;
 
     let rendered = developed.image.to_rgba8();
     let (width, height) = (rendered.width(), rendered.height());
@@ -814,6 +822,7 @@ async fn open_raw_image_inner(
         capture: sensor.metadata.clone(),
         view: region,
         orientation_applied: applied,
+        crop,
     };
     if let Err(error) = source.validate() {
         clear_pending_open(state, request_id);
