@@ -9,6 +9,7 @@
   } from '../layers/psd';
   import type { SvgExportReport, SvgImportReport } from '../layers/svg';
   import type { ExrExportReport, ExrImportReport } from '../layers/exr';
+  import type { TiffImportReport } from '../layers/tiff';
 
   /**
    * The report of an import, or of an export when `mode` says so. An SVG's and an OpenEXR file's
@@ -20,7 +21,8 @@
     | SvgExportReport
     | SvgImportReport
     | ExrImportReport
-    | ExrExportReport;
+    | ExrExportReport
+    | TiffImportReport;
   export let mode: 'import' | 'export' = 'import';
   export let fileName = '';
   export let onclose: () => void = () => {};
@@ -30,6 +32,7 @@
 
   $: isSvg = report.format === 'SVG';
   $: isExr = report.format === 'OpenEXR';
+  $: isTiff = report.format === 'TIFF';
   $: exporting = mode === 'export';
   $: headings = {
     not_imported: {
@@ -51,7 +54,9 @@
           ? 'Imported, but not exactly as in the SVG'
           : isExr
             ? 'Imported, but not exactly as in the OpenEXR file'
-            : 'Imported, but not exactly as in Photoshop',
+            : isTiff
+              ? 'Imported, but not exactly as in the TIFF file'
+              : 'Imported, but not exactly as in Photoshop',
       help: exporting
         ? 'These went into the file, changed in the way each line describes.'
         : 'These came across, changed in the way each line describes.'
@@ -116,8 +121,8 @@
   >
     <div class="modal-heading">
       <div>
-        <span>{isSvg ? (exporting ? 'SVG export' : 'SVG import') : isExr ? (exporting ? 'OpenEXR export' : 'OpenEXR import') : exporting ? 'Photoshop export' : 'Photoshop import'}</span>
-        <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : isExr ? 'OpenEXR image' : 'Photoshop document')}</h1>
+        <span>{isSvg ? (exporting ? 'SVG export' : 'SVG import') : isExr ? (exporting ? 'OpenEXR export' : 'OpenEXR import') : isTiff ? 'TIFF import' : exporting ? 'Photoshop export' : 'Photoshop import'}</span>
+        <h1 id="psd-report-title">{fileName || (isSvg ? 'SVG' : isExr ? 'OpenEXR image' : isTiff ? 'TIFF image' : 'Photoshop document')}</h1>
       </div>
       <button type="button" aria-label="Close import report" on:click={onclose}>×</button>
     </div>

@@ -320,6 +320,39 @@ pub fn save_image_with_metadata(
                 .encode(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
                 .map_err(map_export_error)?;
         }
+        ImageFormat::Tiff => {
+            // A TIFF takes its metadata as tags of its own, so it is written with them, and the
+            // account is completed here; the other formats have it inserted afterwards.
+            let rgba = image.to_rgba8();
+            let opaque = rgba.pixels().all(|pixel| pixel[3] == 255);
+            let samples = if opaque { 3 } else { 4 };
+            let mut cursor = Cursor::new(Vec::new());
+            let spec = crate::tiff::Spec {
+                width,
+                height,
+                bits: 8,
+                alpha: !opaque,
+                compression: crate::tiff::Compression::Deflate,
+                icc: None,
+                metadata: plan.as_ref().map(|plan| &plan.prepared),
+            };
+            let written = crate::tiff::write(&mut cursor, &spec, |y, row| {
+                let start = y as usize * width as usize * 4;
+                for pixel in rgba.as_raw()[start..start + width as usize * 4].chunks_exact(4) {
+                    row.extend_from_slice(&pixel[..samples]);
+                }
+                Ok(())
+            })?;
+            if let Some(plan) = plan {
+                crate::tiff::account(plan, &written);
+            }
+            let file = fs::File::create(&safe_path).map_err(map_export_io_error)?;
+            let mut writer = BufWriter::new(file);
+            std::io::Write::write_all(&mut writer, &cursor.into_inner())
+                .map_err(map_export_io_error)?;
+            std::io::Write::flush(&mut writer).map_err(map_export_io_error)?;
+            return Ok(safe_path);
+        }
         _ => return Err(AppError::InvalidOutputPath),
     }
     if let Some(plan) = plan {
@@ -565,6 +598,7 @@ pub(super) fn output_format(path: &Path) -> Result<ImageFormat, AppError> {
         Some("png") => Ok(ImageFormat::Png),
         Some("jpg" | "jpeg") => Ok(ImageFormat::Jpeg),
         Some("webp") => Ok(ImageFormat::WebP),
+        Some("tif" | "tiff") => Ok(ImageFormat::Tiff),
         _ => Err(AppError::InvalidOutputPath),
     }
 }
@@ -574,6 +608,7 @@ fn format_name(format: ImageFormat) -> &'static str {
         ImageFormat::Png => "PNG",
         ImageFormat::Jpeg => "JPEG",
         ImageFormat::WebP => "WebP",
+        ImageFormat::Tiff => "TIFF",
         _ => "Unsupported",
     }
 }

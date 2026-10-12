@@ -703,7 +703,11 @@ async fn open_raw_image_inner(
             sensor_height,
         )
         .map_err(crate::source::dng::map_raw)?;
-        Ok::<_, AppError>((developed, summary, reference))
+        // The camera's own EXIF, XMP and IPTC, from the same bytes. The file is a TIFF, so the
+        // block is built from its directories; the orientation is read and not applied, because
+        // development leaves the sensor's own way up and the tag has to travel with the pixels.
+        let source_metadata = crate::metadata::tiff::read(&bytes).filter(|found| !found.is_empty());
+        Ok::<_, AppError>((developed, summary, reference, source_metadata))
     })
     .await
     {
@@ -717,7 +721,7 @@ async fn open_raw_image_inner(
             return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
         }
     };
-    let (developed, sensor, reference) = developed;
+    let (developed, sensor, reference, source_metadata) = developed;
 
     let rendered = developed.image.to_rgba8();
     let (width, height) = (rendered.width(), rendered.height());
@@ -741,7 +745,7 @@ async fn open_raw_image_inner(
         exif_available: sensor.metadata.manufacturer.is_some(),
         raw: Some(sensor.metadata.clone()),
         origin: None,
-        source_metadata: None,
+        source_metadata: source_metadata.as_ref().map(|found| found.summary()),
     };
 
     if !request.is_current() {
@@ -805,7 +809,7 @@ async fn open_raw_image_inner(
         preview: std::sync::Arc::new(preview),
         metadata: metadata.clone(),
         working: Some(working),
-        source_metadata: None,
+        source_metadata: source_metadata.map(std::sync::Arc::new),
     };
 
     let result = OpenRawImageResult {

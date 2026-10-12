@@ -254,3 +254,72 @@ fn decoding_leaves_the_source_file_untouched() {
     );
     assert_eq!(digest_before, digest_after);
 }
+
+/// What a real converter's file says about itself, through the metadata reader. The values are
+/// what the file contains, read out of it by a separate program (see
+/// `C:\PFBuild\p15\tools\tiff_dump.py` in the working notes) and not assumed: a Canon 5D Mark III
+/// frame written by Adobe DNG Converter, with its serial numbers in the Exif directory, an
+/// artist, an XMP packet that names the body's serial number, no place and no IPTC.
+///
+/// When `PHOTOFORGE_METADATA_DUMP` names a directory the blocks are written there, so another
+/// program can read the same bytes and be compared.
+#[test]
+fn a_real_converters_file_gives_its_exif_and_xmp() {
+    use photoforge_lib::metadata::{exif, left_behind, prepare, xmp, MetadataPolicy, OutputFacts};
+    let mut found_any = false;
+    for name in [UNCOMPRESSED, LOSSLESS, LOSSY] {
+        let Some(bytes) = read(name) else {
+            continue;
+        };
+        found_any = true;
+        let found = photoforge_lib::metadata::tiff::read(&bytes).expect("a TIFF");
+        let block = found.exif.as_deref().expect("an EXIF block was built");
+        let summary = exif::summarize(block).expect("the block is walkable");
+        assert_eq!(summary.make.as_deref(), Some("Canon"), "{name}");
+        assert_eq!(summary.model.as_deref(), Some("Canon EOS 5D Mark III"));
+        assert_eq!(summary.lens.as_deref(), Some("EF70-200mm f/2.8L IS II USM"));
+        assert_eq!(summary.taken.as_deref(), Some("2017:01:05 13:52:55"));
+        assert_eq!(summary.orientation, 1);
+        assert!(!summary.has_location);
+        assert!(!summary.has_thumbnail);
+        assert!(summary.has_identifiers, "body and lens serial numbers");
+        // Adobe's converter keeps the camera's maker note in DNGPrivateData, which is left.
+        assert_eq!(found.left_behind, left_behind::MAKER_NOTE, "{name}");
+        assert!(found.summary().has_maker_note);
+        assert!(found.iptc.is_none());
+        let packet = found.xmp.as_deref().expect("an XMP packet");
+        assert_eq!(packet.len(), 6238, "{name}");
+        assert!(xmp::inspect(packet).identity, "aux:SerialNumber");
+        // The block is small: descriptive tags only, nothing of the sensor.
+        assert!(block.len() < 2048, "{} bytes", block.len());
+
+        // And the policies, on the real thing.
+        let facts = OutputFacts {
+            width: 1000,
+            height: 667,
+            wide_gamut_profile: false,
+        };
+        let (private, report) = prepare(&found, MetadataPolicy::RemovePrivate, facts);
+        assert!(private.xmp.is_none(), "names the body's serial number");
+        let cleaned = exif::summarize(private.exif.as_deref().unwrap()).unwrap();
+        assert!(!cleaned.has_identifiers);
+        assert_eq!(cleaned.model.as_deref(), Some("Canon EOS 5D Mark III"));
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.detail.contains("serial number")));
+        let (kept, _) = prepare(&found, MetadataPolicy::KeepAll, facts);
+        assert_eq!(kept.xmp.as_deref().map(<[u8]>::len), Some(6238));
+
+        if let Ok(directory) = std::env::var("PHOTOFORGE_METADATA_DUMP") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let stem = name.trim_end_matches(".DNG");
+            std::fs::write(directory.join(format!("{stem}.exif.bin")), block).unwrap();
+            std::fs::write(directory.join(format!("{stem}.xmp.xml")), packet).unwrap();
+        }
+    }
+    if !found_any {
+        eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
+    }
+}

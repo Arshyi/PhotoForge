@@ -43,12 +43,12 @@ const TAG_LENS_MODEL: u16 = 0xA434;
 const IDENTIFYING_TAGS: [u16; 5] = [0xA430, 0xA431, 0xA435, 0xA420, 0xC62F];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Order {
+pub(super) enum Order {
     Little,
     Big,
 }
 
-fn order_of(block: &[u8]) -> Option<Order> {
+pub(super) fn order_of(block: &[u8]) -> Option<Order> {
     match block.get(..4)? {
         b"II*\0" => Some(Order::Little),
         b"MM\0*" => Some(Order::Big),
@@ -56,7 +56,7 @@ fn order_of(block: &[u8]) -> Option<Order> {
     }
 }
 
-fn get_u16(block: &[u8], order: Order, at: usize) -> Option<u16> {
+pub(super) fn get_u16(block: &[u8], order: Order, at: usize) -> Option<u16> {
     let bytes: [u8; 2] = block.get(at..at.checked_add(2)?)?.try_into().ok()?;
     Some(match order {
         Order::Little => u16::from_le_bytes(bytes),
@@ -64,7 +64,7 @@ fn get_u16(block: &[u8], order: Order, at: usize) -> Option<u16> {
     })
 }
 
-fn get_u32(block: &[u8], order: Order, at: usize) -> Option<u32> {
+pub(super) fn get_u32(block: &[u8], order: Order, at: usize) -> Option<u32> {
     let bytes: [u8; 4] = block.get(at..at.checked_add(4)?)?.try_into().ok()?;
     Some(match order {
         Order::Little => u32::from_le_bytes(bytes),
@@ -105,26 +105,26 @@ fn kind_size(kind: u16) -> u64 {
 }
 
 #[derive(Debug, Clone)]
-struct Entry {
+pub(super) struct Entry {
     /// Where the 12 bytes of the entry start.
-    at: usize,
-    tag: u16,
-    kind: u16,
-    count: u32,
+    pub(super) at: usize,
+    pub(super) tag: u16,
+    pub(super) kind: u16,
+    pub(super) count: u32,
     /// Where the value is and how long it is, when that lies inside the block.
-    data: Option<(usize, usize)>,
+    pub(super) data: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
-struct Ifd {
+pub(super) struct Ifd {
     at: usize,
-    entries: Vec<Entry>,
+    pub(super) entries: Vec<Entry>,
     next_at: usize,
     next: u32,
 }
 
 impl Ifd {
-    fn find(&self, tag: u16) -> Option<&Entry> {
+    pub(super) fn find(&self, tag: u16) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.tag == tag)
     }
 
@@ -134,7 +134,7 @@ impl Ifd {
     }
 }
 
-fn read_ifd(block: &[u8], order: Order, at: usize) -> Option<Ifd> {
+pub(super) fn read_ifd(block: &[u8], order: Order, at: usize) -> Option<Ifd> {
     let count = usize::from(get_u16(block, order, at)?);
     if count > MAX_ENTRIES {
         return None;
@@ -180,7 +180,7 @@ fn read_ifd(block: &[u8], order: Order, at: usize) -> Option<Ifd> {
 }
 
 /// A value that is one offset: the pointer entries (Exif, GPS).
-fn pointer(block: &[u8], order: Order, ifd: &Ifd, tag: u16) -> Option<usize> {
+pub(super) fn pointer(block: &[u8], order: Order, ifd: &Ifd, tag: u16) -> Option<usize> {
     let entry = ifd.find(tag)?;
     if entry.count != 1 || !matches!(entry.kind, 4 | 13) {
         return None;

@@ -164,7 +164,7 @@ struct ColourPlan {
 /// Whether an embedded RGB profile behaves as sRGB, by transforming a few colours and
 /// comparing with the sRGB transfer function. Profiles are often "sRGB IEC61966-2.1" and
 /// sometimes a v4 equivalent; both pass, and a wide-gamut or gamma-2.2 profile does not.
-fn is_srgb_equivalent(transform: &IccRowTransform) -> bool {
+pub(crate) fn is_srgb_equivalent(transform: &IccRowTransform) -> bool {
     let samples: [[f32; 3]; 8] = [
         [0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0],

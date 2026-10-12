@@ -61,6 +61,16 @@ RAW support lives in `src-tauri/src/raw.rs` and its submodules:
 No third-party RAW decoder is linked and no separate RAW-decoder DLL is
 packaged. The dependency decision is recorded in [raw-development.md](raw-development.md).
 
+TIFF as a picture lives in `src-tauri/src/tiff/` (no TIFF library; see [tiff.md](tiff.md)):
+
+| Module | Responsibility |
+| --- | --- |
+| `tiff::structure` | Header and directories, read by seeking, bounded |
+| `tiff::codec` | PackBits, LZW, Deflate and the two predictors, each told how much it may produce |
+| `tiff::import` | Layout, colour plan, admission, strips and tiles into an upright raster, report |
+| `tiff::metadata` | The picture's EXIF, XMP and IPTC (the builder is `metadata::tiff`, shared with DNG) |
+| `tiff::export` | The writer: strips, Deflate with differencing, profile, metadata tags |
+
 A RAW layer carries `Layer.raw`: the source reference, its hash, the development
 parameters, and the camera metadata. The developed raster in a project is a
 cache; the record is the document. The field is `#[serde(default)]`, so projects

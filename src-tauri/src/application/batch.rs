@@ -156,7 +156,13 @@ pub fn run_batch(
                             crate::raw::develop::RenderScale::Full,
                         )
                         .map_err(|e| AppError::RawInspection(e.to_string()))?;
-                        (developed.image.into(), path.clone(), None)
+                        // The camera's EXIF, XMP and IPTC from the same bytes, as opening the
+                        // file would give them, so the policy applies to a RAW input as it does
+                        // to a JPEG's.
+                        let source_metadata = crate::metadata::tiff::read(&bytes)
+                            .filter(|found| !found.is_empty())
+                            .map(Arc::new);
+                        (developed.image.into(), path.clone(), source_metadata)
                     } else {
                         let loaded = load_image(path)?;
                         let pixels = match loaded.working {
@@ -670,6 +676,49 @@ mod tests {
         assert_eq!(image.color(), image::ColorType::Rgba16);
         assert!(image.to_rgba16().pixels().any(|p| p[0] % 257 != 0));
         assert_eq!(fs::read(input.join("a.dng")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_batch_dng_carries_its_metadata_under_the_policy() {
+        use crate::metadata::{exif, scan, MetadataPolicy};
+
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("in");
+        let output = root.path().join("out");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        let mut builder = crate::raw::dng::fixtures::DngBuilder::new(4, 4, vec![1001; 16])
+            .levels(vec![0], (1, 1), 4095)
+            .exif_entry(0xA434, 2, b"Lens 35mm f/2\0".to_vec())
+            .exif_entry(0xA431, 2, b"BODY-SERIAL-42\0".to_vec())
+            .gps_entry(0x0001, 2, b"N\0".to_vec());
+        builder.make = "Acme".into();
+        builder.model = "Cam-One".into();
+        fs::write(input.join("a.dng"), builder.build()).unwrap();
+
+        for (policy, place, serial) in [
+            (MetadataPolicy::KeepAll, true, true),
+            (MetadataPolicy::RemovePrivate, false, false),
+        ] {
+            let mut options = options(&input, &output);
+            options.metadata_policy = policy;
+            options.overwrite = true;
+            let result = run_batch(
+                992,
+                options,
+                workflow(),
+                Arc::new(Mutex::new(BatchStatus::default())),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+            assert_eq!((result.completed, result.failed), (1, 0), "{result:?}");
+            let found = scan::read(&output.join("a-0001.png")).unwrap();
+            let summary = exif::summarize(found.exif.as_deref().expect("EXIF is written")).unwrap();
+            assert_eq!(summary.make.as_deref(), Some("Acme"), "{policy:?}");
+            assert_eq!(summary.lens.as_deref(), Some("Lens 35mm f/2"));
+            assert_eq!(summary.has_location, place, "{policy:?}");
+            assert_eq!(summary.has_identifiers, serial, "{policy:?}");
+        }
     }
 
     #[test]

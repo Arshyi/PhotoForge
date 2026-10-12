@@ -43,6 +43,8 @@ pub mod resources;
 /// Bounded reads of image sources, and the provenance of what was read.
 pub mod source;
 pub mod svg;
+/// Reading and writing TIFF pictures, bounded, with no TIFF library.
+pub mod tiff;
 
 use application::AppState;
 use commands::{
@@ -92,6 +94,8 @@ pub fn register_raw_flow_commands<R: tauri::Runtime>(
         relink_raw_source,
         export_raw_layer_png16,
         open_raw_image,
+        export_image,
+        export_layer_composite,
         probe_image_source,
         source_preview_image,
         cancel_source_preview
@@ -148,6 +152,7 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
         import_psd_document,
         import_svg_document,
         import_exr_document,
+        import_tiff_document,
         export_psd_document,
         export_svg_document,
         export_exr_document
@@ -158,8 +163,8 @@ use commands::{
     clipboard_has_image, convert_layers_to_smart_object, copy_to_clipboard,
     create_blank_layer_document, export_exr_document, export_psd_document, export_svg_document,
     import_exr_document, import_psd_document, import_smart_object, import_svg_document,
-    inspect_smart_links, open_clipboard_image, paste_clipboard_image, relink_smart_source,
-    resource_status, set_memory_budget, update_smart_source,
+    import_tiff_document, inspect_smart_links, open_clipboard_image, paste_clipboard_image,
+    relink_smart_source, resource_status, set_memory_budget, update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -198,6 +203,7 @@ pub fn run() {
             import_psd_document,
             import_svg_document,
             import_exr_document,
+            import_tiff_document,
             export_psd_document,
             export_svg_document,
             export_exr_document,
