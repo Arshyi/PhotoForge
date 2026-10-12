@@ -44,6 +44,8 @@ high-precision canvas or convert an existing document under **Color and
 precision**. The Layers panel can convert a layer or contiguous sibling
 selection into a smart object, edit source contents in an isolated subdocument,
 create an independent copy, check links, relink, and explicitly rasterize.
+A clipped layer stays clipped when it is converted, and a selection that would split a
+clipping group is refused (see [layers.md](layers.md#tree-operations-and-invalid-states)).
 Rasterizing replaces only the selected semantic content with a canvas-sized
 pixel layer; placement properties that would otherwise be applied twice remain
 editable on the replacement layer. Undo restores the source and instance trees.

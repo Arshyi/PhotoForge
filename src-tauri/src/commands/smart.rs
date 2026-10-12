@@ -119,12 +119,16 @@ fn convert_document(
         content.opacity = 1.0;
         content.blend_mode = BlendMode::Normal;
         content.visible = true;
+        // The relation to the base beneath belongs to the layer in the document,
+        // and so to its instance. It is the first layer of its source's own stack.
+        content.clipped = false;
         let mut replacement = instance(instance_id, first.name.clone(), source_id.clone());
         replacement.transform = first.transform;
         replacement.mask = first.mask;
         replacement.opacity = first.opacity;
         replacement.blend_mode = first.blend_mode;
         replacement.visible = first.visible;
+        replacement.clipped = path.last().is_some_and(|&position| position > 0) && first.clipped;
         replacement.metadata = first.metadata;
         (
             SmartSource::new(width, height, vec![content]),
@@ -133,18 +137,22 @@ fn convert_document(
         )
     } else {
         // A smart source, like a merge, renders on transparency. Reuse the
-        // same contiguity and backdrop checks so conversion cannot change the
-        // meaning of an adjustment or a blend-dependent selection.
-        let ordered = super::layers::merge_targets(&document, layer_ids)?;
-        let start = ordered
+        // same contiguity, backdrop and clipping checks so conversion cannot
+        // change the meaning of an adjustment, a blend-dependent selection or a
+        // clipping group.
+        let plan = super::layers::merge_plan(&document, layer_ids)?;
+        let start = plan
+            .layers
             .iter()
             .filter_map(|layer| document.path_to(&layer.id))
             .filter_map(|p| p.last().copied())
             .min()
             .expect("nonempty selection");
+        let mut replacement = instance(instance_id, "Smart Object".into(), source_id.clone());
+        replacement.clipped = plan.clipped;
         (
-            SmartSource::new(document.canvas_width, document.canvas_height, ordered),
-            instance(instance_id, "Smart Object".into(), source_id.clone()),
+            SmartSource::new(document.canvas_width, document.canvas_height, plan.layers),
+            replacement,
             start,
         )
     };
@@ -585,6 +593,60 @@ mod tests {
         let single = convert_document(before.clone(), &["second".into()]).unwrap();
         assert_eq!(single.layers[1].blend_mode, BlendMode::Multiply);
         assert!(convert_document(before, &["missing".into()]).is_err());
+    }
+
+    fn clipped_stack() -> LayerDocument {
+        let mut before = document();
+        for (id, clipped) in [("tint", true), ("top", true), ("cover", false)] {
+            let mut layer = test_pixel_layer(id, &format!("px-{id}"), 20, 10);
+            layer.clipped = clipped;
+            before.layers.push(layer);
+        }
+        before
+    }
+
+    #[test]
+    fn a_clipped_layer_becomes_a_clipped_instance_of_an_unclipped_source() {
+        let before = clipped_stack();
+        let after = convert_document(before, &["tint".into()]).unwrap();
+        let instance = after
+            .layers
+            .iter()
+            .find(|layer| layer.kind() == LayerKind::SmartObject)
+            .unwrap();
+        assert!(instance.clipped, "the instance lost its clip");
+        // The layer above it is still clipped, and still to the same base.
+        assert!(after.find("top").unwrap().clipped);
+        let source = after.smart_sources.values().next().unwrap();
+        assert!(!source.layers[0].clipped);
+    }
+
+    #[test]
+    fn a_selection_inside_one_clipping_group_converts_to_one_clipped_instance() {
+        let after = convert_document(clipped_stack(), &["tint".into(), "top".into()]).unwrap();
+        let instance = after
+            .layers
+            .iter()
+            .find(|layer| layer.kind() == LayerKind::SmartObject)
+            .unwrap();
+        assert!(instance.clipped);
+        let source = after.smart_sources.values().next().unwrap();
+        assert!(source.layers.iter().all(|layer| !layer.clipped));
+        assert_eq!(after.layers.len(), 3);
+    }
+
+    #[test]
+    fn a_selection_that_would_split_a_clipping_group_is_refused() {
+        let before = clipped_stack();
+        // `tint` is clipped to `original`, and `cover` is a base of its own.
+        for ids in [vec!["tint", "top", "cover"], vec!["top", "cover"]] {
+            let ids: Vec<String> = ids.into_iter().map(String::from).collect();
+            let error = convert_document(before.clone(), &ids).unwrap_err();
+            assert!(error.to_string().contains("clipping group"), "{error}");
+        }
+        // Converting the base alone, with the layers clipped to it left in place.
+        let after = convert_document(before, &["original".into()]).unwrap();
+        assert!(after.find("tint").unwrap().clipped);
     }
 
     #[test]

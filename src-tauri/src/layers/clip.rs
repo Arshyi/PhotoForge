@@ -24,6 +24,7 @@
 //! file: which layers belong together, and how a layer is to be painted.
 
 use super::{BlendMode, Layer, LayerContent};
+use crate::error::AppError;
 
 /// How a layer's pixels combine with what is already beneath them.
 ///
@@ -123,6 +124,57 @@ pub(super) fn clip_groups(layers: &[Layer]) -> impl Iterator<Item = ClipGroup<'_
     })
 }
 
+/// Whether the layer at `index` is clipped to something beneath it. The first
+/// layer of a stack never is, whatever it says about itself.
+fn is_clipped_member(siblings: &[Layer], index: usize) -> bool {
+    index > 0 && siblings.get(index).is_some_and(|layer| layer.clipped)
+}
+
+/// What replacing the contiguous range `start..=end` of one stack with a single
+/// layer does to clipping, as whether that layer is itself clipped. Merge Down and
+/// Convert to Smart Object both replace a range this way, and the picture must come
+/// out the same, so a range that cannot be replaced exactly is refused.
+///
+/// The replacement takes the place of the range's lowest layer:
+///
+/// * a range that starts on a clipped layer sits inside a group whose base is below
+///   it. If every layer of the range is clipped, the replacement is clipped to that
+///   same base and the layers above it stay in the group. If the range also holds
+///   another base, there is no single place for the replacement in the group;
+/// * a range that starts on a base is replaced by a base. Layers clipped above the
+///   range keep following it only when they were clipped to that same base, which is
+///   so when no other base lies inside the range. Otherwise they were clipped to the
+///   range's last base and would take the shape of the whole range instead.
+///
+/// An adjustment layer has no shape to clip to, so the layers above it paint as
+/// ordinary ones; replaced by a pixel layer they would suddenly be clipped to it.
+pub(crate) fn range_clipping(
+    siblings: &[Layer],
+    start: usize,
+    end: usize,
+) -> Result<bool, AppError> {
+    let joins_group = is_clipped_member(siblings, start);
+    let one_group = (start + 1..=end).all(|index| is_clipped_member(siblings, index));
+    let leaves_followers = is_clipped_member(siblings, end + 1);
+    if !one_group && (joins_group || leaves_followers) {
+        return Err(AppError::InvalidLayerDocument(
+            "this merge would split a clipping group (a layer and the layers clipped to it): work from the top of the group down, or release the clipping first".into(),
+        ));
+    }
+    if one_group
+        && leaves_followers
+        && !joins_group
+        && siblings
+            .get(start)
+            .is_some_and(|base| !can_hold_clipped(base))
+    {
+        return Err(AppError::InvalidLayerDocument(
+            "layers are clipped to an adjustment layer in this merge, and would be clipped to the merged layer instead: release the clipping first".into(),
+        ));
+    }
+    Ok(joins_group)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +267,96 @@ mod tests {
         };
         let layers = [base, layer("b", true)];
         assert!(!clip_groups(&layers).next().unwrap().needs_buffer());
+    }
+
+    mod ranges {
+        use super::*;
+
+        /// A stack from bottom to top: `b` for a base, `c` for a clipped layer.
+        fn stack(pattern: &str) -> Vec<Layer> {
+            pattern
+                .chars()
+                .enumerate()
+                .map(|(index, kind)| layer(&format!("l{index}"), kind == 'c'))
+                .collect()
+        }
+
+        fn replaced(pattern: &str, start: usize, end: usize) -> Result<bool, String> {
+            range_clipping(&stack(pattern), start, end).map_err(|error| error.to_string())
+        }
+
+        #[test]
+        fn a_range_with_nothing_clipped_is_replaced_by_a_base() {
+            assert_eq!(replaced("bbbb", 1, 2), Ok(false));
+            assert_eq!(replaced("bbbb", 0, 3), Ok(false));
+        }
+
+        #[test]
+        fn a_whole_group_or_several_are_replaced_by_a_base() {
+            assert_eq!(replaced("bbccb", 1, 3), Ok(false));
+            assert_eq!(replaced("bbccbcb", 1, 5), Ok(false));
+            assert_eq!(replaced("bbcc", 1, 3), Ok(false));
+        }
+
+        #[test]
+        fn a_base_with_the_start_of_its_own_group_leaves_the_rest_following_it() {
+            assert_eq!(replaced("bbccc", 1, 2), Ok(false));
+            assert_eq!(replaced("bbccc", 1, 3), Ok(false));
+        }
+
+        #[test]
+        fn clipped_layers_alone_are_replaced_by_a_clipped_layer() {
+            assert_eq!(replaced("bbcc", 2, 3), Ok(true));
+            assert_eq!(replaced("bbccc", 2, 3), Ok(true));
+            assert_eq!(replaced("bbccb", 2, 3), Ok(true));
+            assert_eq!(replaced("bbcc", 3, 3), Ok(true));
+        }
+
+        #[test]
+        fn the_bottom_layer_is_never_clipped_whatever_it_says() {
+            let layers = [layer("a", true), layer("b", true)];
+            assert_eq!(range_clipping(&layers, 0, 1).ok(), Some(false));
+            assert_eq!(range_clipping(&layers, 0, 0).ok(), Some(false));
+        }
+
+        #[test]
+        fn a_range_that_starts_inside_a_group_and_reaches_another_base_is_refused() {
+            // [a, b (c), c]: nowhere to put one layer that is both b and c.
+            assert!(replaced("bcb", 1, 2)
+                .unwrap_err()
+                .contains("clipping group"));
+            assert!(replaced("bccb", 2, 3).is_err());
+            assert!(replaced("bcbc", 1, 3).is_err());
+        }
+
+        #[test]
+        fn a_range_that_ends_on_a_base_whose_clipped_layers_stay_behind_is_refused() {
+            // [a, b, c, x (c)] merging b and c leaves x clipped to the result.
+            assert!(replaced("bbbc", 1, 2)
+                .unwrap_err()
+                .contains("clipping group"));
+            assert!(replaced("bbbc", 0, 2).is_err());
+            assert!(replaced("bbbcc", 1, 2).is_err());
+        }
+
+        #[test]
+        fn layers_clipped_to_an_adjustment_do_not_follow_a_pixel_layer_in_its_place() {
+            // [ground, adjustment, c1 (c), c2 (c)]: c1 and c2 paint as ordinary
+            // layers. Replacing the adjustment and c1 with a pixel layer would
+            // clip c2 to it.
+            let mut layers = stack("bbcc");
+            layers[1].content = LayerContent::Adjustment {
+                operation: Box::new(crate::domain::EditOperation::Grayscale),
+            };
+            assert!(range_clipping(&layers, 1, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("adjustment"));
+            // Taking c2 too, nothing is left to follow the replacement.
+            assert_eq!(range_clipping(&layers, 1, 3).ok(), Some(false));
+            // A pixel base in the same place is fine.
+            assert_eq!(range_clipping(&stack("bbcc"), 1, 2).ok(), Some(false));
+        }
     }
 
     mod rendering {

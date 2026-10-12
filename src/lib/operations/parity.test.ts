@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  childrenOf,
   createAdjustmentLayer,
   createDocument,
   createGroupLayer,
@@ -27,14 +28,17 @@ import {
   groupLayers,
   insertLayer,
   moveLayer,
+  pathTo,
   removeLayer,
   ungroupLayer,
   updateLayer
 } from '../layers/tree';
 import { resetTransform } from '../layers/transformTool';
+import { mergeSafetyProblem } from '../layers/mergeSafety';
 import type { Layer, LayerDocument } from '../layers/types';
 
 const FIXTURE = resolve(__dirname, '../../../src-tauri/tests/fixtures/operations_parity.json');
+const MERGE_FIXTURE = resolve(__dirname, '../../../src-tauri/tests/fixtures/operations_merge_parity.json');
 const STAMP = '2026-01-01T00:00:00.000Z';
 const NOW = new Date(STAMP);
 
@@ -256,5 +260,84 @@ describe('the TypeScript tree functions and the Rust engine agree', () => {
     expect(existsSync(FIXTURE), 'run with UPDATE_FIXTURES=1 to create the fixture').toBe(true);
     // Compared as values so line endings cannot matter.
     expect(JSON.parse(readFileSync(FIXTURE, 'utf8'))).toEqual(JSON.parse(text));
+  });
+});
+
+/**
+ * Merge Down is decided in two places: the panel asks `mergeSafetyProblem` before it
+ * sends anything, and the engine decides again when it runs. The merge itself bakes
+ * pixels, which TypeScript does not do, so what is compared here is the verdict and,
+ * for a merge that goes ahead, the stack it leaves: each layer's name and whether it
+ * is still clipped. Clipping is where the two have disagreed.
+ */
+describe('the TypeScript merge check and the Rust engine agree', () => {
+  type Stack = Array<[id: string, clipped: boolean]>;
+  interface MergeVector {
+    name: string;
+    document: LayerDocument;
+    /** The layer Merge down is run on. */
+    id: string;
+    refused: boolean;
+    /** The stack that is left, bottom to top, when the merge goes ahead. */
+    after: Stack | null;
+  }
+
+  const stack = (spec: Stack, active: string) =>
+    document(spec.map(([id, clipped]) => (clipped ? { ...pixel(id), clipped: true } : pixel(id))), active);
+
+  /** What the panel decides for `id`, as App.svelte asks it. */
+  function verdict(doc: LayerDocument, id: string): boolean {
+    const path = pathTo(doc, id)!;
+    const siblings = path.length > 1 ? childrenOf(doc.layers[path[0]]) : doc.layers;
+    const below = siblings[path[path.length - 1] - 1];
+    return mergeSafetyProblem(doc, [below.id, id]) !== null;
+  }
+
+  const ok = (name: string, spec: Stack, id: string, after: Stack): MergeVector =>
+    ({ name, document: stack(spec, id), id, refused: false, after });
+  const refused = (name: string, spec: Stack, id: string): MergeVector =>
+    ({ name, document: stack(spec, id), id, refused: true, after: null });
+
+  const vectors: MergeVector[] = [
+    ok('two plain layers', [['a', false], ['b', false], ['c', false]], 'c', [['a', false], ['b', false]]),
+    ok('a clipped layer into its base', [['a', false], ['b', false], ['c', true]], 'c', [['a', false], ['b', false]]),
+    refused('a base into a layer clipped to the one below', [['a', false], ['b', true], ['c', false]], 'c'),
+    refused('a base that has a clipped layer above it', [['a', false], ['b', false], ['c', false], ['x', true]], 'c'),
+    refused('a base into the ground, with a clipped layer above it', [['ground', false], ['base', false], ['ink', true]], 'base'),
+    ok('a clipped layer into its base, others still clipped above', [['ground', false], ['base', false], ['ink', true], ['tint', true]], 'ink',
+      [['ground', false], ['base', false], ['tint', true]]),
+    ok('clipped layers into each other', [['ground', false], ['base', false], ['c1', true], ['d', true]], 'd',
+      [['ground', false], ['base', false], ['c1', true]]),
+    ok('clipped layers into each other, another clipped above', [['ground', false], ['base', false], ['c1', true], ['d', true], ['e', true]], 'd',
+      [['ground', false], ['base', false], ['c1', true], ['e', true]]),
+    ok('a base into a base after a clipping group', [['a', false], ['b', false], ['c', true], ['d', false], ['e', false]], 'e',
+      [['a', false], ['b', false], ['c', true], ['d', false]]),
+    {
+      name: 'layers clipped to an adjustment layer',
+      document: document([fixed(createAdjustmentLayer('Grey', { type: 'grayscale' } as never, NOW), 'adj'), { ...pixel('x'), clipped: true }, { ...pixel('y'), clipped: true }], 'x'),
+      id: 'x',
+      refused: true,
+      after: null
+    },
+    {
+      name: 'the last layer clipped to an adjustment layer',
+      document: document([fixed(createAdjustmentLayer('Grey', { type: 'grayscale' } as never, NOW), 'adj'), { ...pixel('x'), clipped: true }, { ...pixel('y'), clipped: true }], 'y'),
+      id: 'y',
+      refused: false,
+      after: [['adj', false], ['x', true]]
+    }
+  ];
+
+  it('has the verdict the TypeScript check gives, for every vector', () => {
+    for (const entry of vectors) {
+      expect(verdict(entry.document, entry.id), entry.name).toBe(entry.refused);
+    }
+  });
+
+  it('produces exactly the vectors the Rust engine is tested against', () => {
+    const text = JSON.stringify(vectors, null, 2) + '\n';
+    if (process.env.UPDATE_FIXTURES) writeFileSync(MERGE_FIXTURE, text);
+    expect(existsSync(MERGE_FIXTURE), 'run with UPDATE_FIXTURES=1 to create the fixture').toBe(true);
+    expect(JSON.parse(readFileSync(MERGE_FIXTURE, 'utf8'))).toEqual(JSON.parse(text));
   });
 });

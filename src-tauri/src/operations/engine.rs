@@ -42,7 +42,7 @@ use super::structure::{
 use super::support::{document_revision, Clock, IdSource, RandomIds, SequenceIds, SystemClock};
 use crate::application::AppState;
 use crate::commands::layers::{
-    apply_edit_to_layer, mask_for_layer, merge_targets, render_subset_into_buffer,
+    apply_edit_to_layer, mask_for_layer, merge_plan, render_subset_into_buffer,
 };
 use crate::domain::EditOperation;
 use crate::error::AppError;
@@ -775,7 +775,10 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
                 .ok_or_else(|| AppError::LayerNotFound(id.clone()))?;
             let (below_id, below_name) = (below.id.clone(), below.name.clone());
             ensure_subtree_unlocked(&tx.document, &below_id)?;
-            let ordered = merge_targets(&tx.document, &[below_id.clone(), id.clone()])?;
+            // The engine is the authority on whether this merge keeps the picture,
+            // clipping included, whatever the interface checked before asking.
+            let plan = merge_plan(&tx.document, &[below_id.clone(), id.clone()])?;
+            let (ordered, replacement_clipped) = (plan.layers, plan.clipped);
             let merged = if tx.dry {
                 crate::commands::layers::LayerPixelsResult {
                     pixel_id: tx.placeholder(),
@@ -798,10 +801,16 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
                     "the merge returned pixels of an unexpected size".into(),
                 ));
             }
-            remove_layer(&mut tx.document, &id)?;
-            remove_layer(&mut tx.document, &below_id)?;
+            // Not `remove_layer`: it promotes the first layer clipped to a base it
+            // removes, which is right for deleting one. Here the layers clipped above
+            // the pair keep their flags and follow the replacement, which the plan
+            // has established is the layer they were clipped to or stands in for it.
+            tx.document.remove(&id)?;
+            tx.document.remove(&below_id)?;
+            // The selection may have been inside `below`; the replacement takes it.
+            tx.document.active_layer_id = None;
             let replacement_id = tx.ids.next("l");
-            let replacement = new_layer(
+            let mut replacement = new_layer(
                 &replacement_id,
                 &below_name,
                 LayerContent::Pixel {
@@ -811,6 +820,7 @@ async fn run_step(tx: &mut Tx<'_>, operation: &Operation) -> Result<Outcome, App
                 },
                 &tx.now(),
             );
+            replacement.clipped = replacement_clipped;
             insert_layer(
                 &mut tx.document,
                 replacement,

@@ -25,6 +25,7 @@ pub(crate) mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
 pub use cache::{CacheStats, DocumentFingerprint, TileCache, DEFAULT_CACHE_BYTES};
+pub(crate) use clip::range_clipping;
 pub(crate) use composite::{mask_coverage, render_transform};
 pub use composite::{
     render_document, render_layers, PixelSource, RenderOptions, MAX_RENDER_THREADS,

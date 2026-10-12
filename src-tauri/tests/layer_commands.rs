@@ -708,6 +708,115 @@ fn merging_a_blend_dependent_subset_refuses_to_bake_an_omitted_backdrop() {
 }
 
 #[test]
+fn merging_a_range_that_splits_a_clipping_group_is_refused() {
+    let directory = temp_dir();
+    let harness = Harness::new();
+    let source = write_png(directory.path(), "source.png", &quadrants(8, 8));
+    harness.open_session(&source, 4);
+    let pixels: Vec<String> = (0..4)
+        .map(|_| {
+            harness.import(&source)["pixelId"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    let stack = |clipped: [bool; 4]| {
+        let layers = ["a", "b", "c", "x"]
+            .iter()
+            .zip(&pixels)
+            .zip(clipped)
+            .map(|((id, pixel), clipped)| {
+                let mut layer = pixel_layer(id, pixel, 8, 8);
+                layer.clipped = clipped;
+                layer
+            })
+            .collect();
+        document((8, 8), layers)
+    };
+    // [a, b (clipped to a), c]: the range starts inside a group and reaches a base.
+    let error = harness.err(
+        "merge_layer_pixels",
+        json!({ "document": stack([false, true, false, false]), "layerIds": ["b", "c"] }),
+    );
+    assert!(error.contains("clipping group"), "{error}");
+    // [a, b, c, x (clipped to c)]: x would be left clipped to the merged layer.
+    let error = harness.err(
+        "merge_layer_pixels",
+        json!({ "document": stack([false, false, false, true]), "layerIds": ["b", "c"] }),
+    );
+    assert!(error.contains("clipping group"), "{error}");
+    // A base together with everything clipped to it is a whole group, and merges.
+    harness.ok(
+        "merge_layer_pixels",
+        json!({ "document": stack([false, false, false, true]), "layerIds": ["c", "x"] }),
+    );
+}
+
+#[test]
+fn merging_clipped_layers_gives_pixels_that_are_clipped_in_place_of_them() {
+    let directory = temp_dir();
+    let harness = Harness::new();
+    let ground = write_png(directory.path(), "ground.png", &quadrants(16, 16));
+    // The base covers the left half only; what is clipped to it ends there.
+    let base_image = RgbaImage::from_fn(16, 16, |x, _| {
+        if x < 8 {
+            Rgba([200, 30, 30, 255])
+        } else {
+            Rgba([0, 0, 0, 0])
+        }
+    });
+    let base = write_png(directory.path(), "base.png", &base_image);
+    let wash = write_png(
+        directory.path(),
+        "wash.png",
+        &RgbaImage::from_fn(16, 16, |x, y| Rgba([x as u8 * 15, 80, y as u8 * 15, 230])),
+    );
+    let glow = write_png(
+        directory.path(),
+        "glow.png",
+        &RgbaImage::from_fn(16, 16, |_, _| Rgba([240, 240, 20, 110])),
+    );
+    harness.open_session(&ground, 5);
+    let pixel = |path: &std::path::Path| {
+        harness.import(path)["pixelId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let mut wash_layer = pixel_layer("wash", &pixel(&wash), 16, 16);
+    wash_layer.clipped = true;
+    wash_layer.opacity = 0.8;
+    let mut glow_layer = pixel_layer("glow", &pixel(&glow), 16, 16);
+    glow_layer.clipped = true;
+    let before = document(
+        (16, 16),
+        vec![
+            pixel_layer("ground", &pixel(&ground), 16, 16),
+            pixel_layer("base", &pixel(&base), 16, 16),
+            wash_layer.clone(),
+            glow_layer.clone(),
+        ],
+    );
+    let merged = harness.ok(
+        "merge_layer_pixels",
+        json!({ "document": before, "layerIds": ["wash", "glow"] }),
+    );
+    let replacement = |clipped: bool| {
+        let mut layer = pixel_layer("merged", merged["pixelId"].as_str().unwrap(), 16, 16);
+        layer.clipped = clipped;
+        let mut layers = before.layers[..2].to_vec();
+        layers.push(layer);
+        document((16, 16), layers)
+    };
+    let expected = harness.composite(&before, 5, 1);
+    // Standing in for the two clipped layers, the pixels are clipped as they were.
+    assert!(max_channel_difference(&expected, &harness.composite(&replacement(true), 5, 2)) <= 1);
+    // And the test can tell: baked as a base of its own, the picture is different.
+    assert!(max_channel_difference(&expected, &harness.composite(&replacement(false), 5, 3)) > 8);
+}
+
+#[test]
 fn merging_several_layers_from_inside_a_group_keeps_their_appearance() {
     let directory = temp_dir();
     let harness = Harness::new();

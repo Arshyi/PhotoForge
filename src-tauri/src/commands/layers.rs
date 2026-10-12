@@ -5,8 +5,9 @@ use crate::image_processing::high_precision::pipeline_typed;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
 use crate::infrastructure::{encode_preview, load_image, LoadedImage};
 use crate::layers::{
-    layer_mask_to_selection, preview_dimensions, selection_to_layer_mask, BlendMode, Layer,
-    LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
+    layer_mask_to_selection, preview_dimensions, range_clipping, selection_to_layer_mask,
+    BlendMode, Layer, LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions,
+    ResolvedPixels,
 };
 use crate::layers::{
     render_document_streaming, render_document_typed, render_document_typed_cached,
@@ -533,15 +534,29 @@ pub(crate) async fn render_subset_into_buffer(
     })
 }
 
+/// A validated merge: the layers to render, and whether the layer that replaces
+/// them is clipped.
+pub(crate) struct MergePlan {
+    /// The range in the document's own bottom-to-top order, ready to render.
+    pub layers: Vec<Layer>,
+    /// The replacement takes the lowest layer's place in a clipping group, so it is
+    /// clipped to that group's base like the layer it stands in for.
+    pub clipped: bool,
+}
+
 /// Validates that a merge request can be represented by one ordinary pixel
 /// layer without silently changing the visible composite. A contiguous normal
 /// source-over range is associative and can be rendered against transparency;
 /// a range that omits its backdrop cannot safely bake blend-dependent layers,
 /// adjustments, or pass-through groups.
-pub(crate) fn merge_targets(
+///
+/// Clipping is part of the picture too. A range inside a clipping group is
+/// rendered as ordinary layers and replaced by a clipped layer; a range that would
+/// split a group is refused (see `range_clipping`).
+pub(crate) fn merge_plan(
     document: &LayerDocument,
     layer_ids: &[String],
-) -> Result<Vec<Layer>, AppError> {
+) -> Result<MergePlan, AppError> {
     if layer_ids.is_empty() {
         return Err(AppError::InvalidLayerDocument(
             "merging requires at least one layer".into(),
@@ -584,7 +599,7 @@ pub(crate) fn merge_targets(
             "merging requires a contiguous sibling range".into(),
         ));
     }
-    let selected: Vec<Layer> = indices
+    let mut selected: Vec<Layer> = indices
         .iter()
         .map(|index| {
             siblings
@@ -593,6 +608,19 @@ pub(crate) fn merge_targets(
                 .ok_or_else(|| AppError::LayerNotFound(layer_ids[0].clone()))
         })
         .collect::<Result<_, _>>()?;
+
+    let clipped = range_clipping(siblings, indices[0], indices[indices.len() - 1])?;
+    if clipped {
+        // The base this range is clipped to lies outside it. Rendered as ordinary
+        // layers, one over the other, it is the shape a single clipped layer takes
+        // on that base; rendered with the flags, its lowest layer would paint as
+        // a base of its own and the others would be clipped to it.
+        for layer in &mut selected {
+            layer.clipped = false;
+        }
+    }
+    // The lowest layer of what is rendered is a base, as it is in the document.
+    selected[0].clipped = false;
 
     let omitted_backdrop = indices[0] > 0 || parent.is_some_and(|layer| layer.is_pass_through());
     if omitted_backdrop
@@ -606,7 +634,18 @@ pub(crate) fn merge_targets(
             "this merge depends on layers beneath the selection because of a blend mode, adjustment layer, or pass-through group".into(),
         ));
     }
-    Ok(selected)
+    Ok(MergePlan {
+        layers: selected,
+        clipped,
+    })
+}
+
+/// The layers a merge renders; see `merge_plan`.
+pub(crate) fn merge_targets(
+    document: &LayerDocument,
+    layer_ids: &[String],
+) -> Result<Vec<Layer>, AppError> {
+    merge_plan(document, layer_ids).map(|plan| plan.layers)
 }
 
 /// Merges the named layers, bottom to top, into a single pixel buffer.

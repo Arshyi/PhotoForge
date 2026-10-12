@@ -180,6 +180,24 @@ describe('running a layer workflow', () => {
     ])).toEqual({ ok: false, problem: expect.stringMatching(/depends on layers beneath/) });
   });
 
+  it('rejects a merge that would change what a clipped layer is clipped to', () => {
+    const bottom = pixel('Bottom');
+    const base = pixel('Base');
+    const top = { ...pixel('Top'), clipped: true };
+    const clippedAbove = { ...createDocument(16, 16, [bottom, base, top]), activeLayerId: base.id };
+    expect(() => runLayerWorkflow(clippedAbove, [
+      { type: 'merge_down', selector: { type: 'active' } }
+    ])).toThrow(/split a clipping group/);
+    expect(planLayerWorkflow(clippedAbove, [
+      { type: 'merge_down', selector: { type: 'active' } }
+    ])).toEqual({ ok: false, problem: expect.stringMatching(/split a clipping group/) });
+    // The clipped layer merging into its base keeps the picture, so it is allowed.
+    const intoBase = { ...clippedAbove, activeLayerId: top.id };
+    expect(planLayerWorkflow(intoBase, [
+      { type: 'merge_down', selector: { type: 'active' } }
+    ])).toEqual({ ok: true });
+  });
+
   it('rejects an out-of-range opacity and an empty operation list', () => {
     const { document } = documentWith();
     expect(() =>

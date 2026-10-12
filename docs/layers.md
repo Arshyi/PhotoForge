@@ -149,6 +149,12 @@ Clipping follows the tree operations rather than fighting them:
   stays together instead of attaching itself to whatever lies beneath.
 - **A copy of a base** is placed above its clipping group; **a copy of a clipped layer** stays in it.
 - **Grouping** releases the lowest layer of the new group, which has nothing beneath it there.
+- **Merge Down and Convert to Smart Object** keep the picture or are refused. Merging a clipped
+  layer into its base, or into another layer clipped to the same base, leaves it in the group and
+  the layers above it clipped as they were. Merging a base that has layers clipped to it, or into
+  a layer that is itself clipped, would change what is drawn, so it is refused with a message:
+  merge from the top of the group down, or release the clipping first. A clipped layer converted
+  to a smart object stays clipped.
 - The bottom layer of any stack is never clipped: the engine clears the flag after every step.
 
 The following are rejected rather than tolerated:
@@ -281,8 +287,8 @@ preserves the document's own bottom-to-top order rather than the order
 identifiers were listed in, so a merge can never reorder pixels. Merge Down also
 requires a contiguous sibling range and fails closed when an omitted backdrop
 could affect the result through a non-Normal blend, adjustment layer, or
-pass-through group; the same guard runs in the frontend workflow and Rust IPC
-boundary.
+pass-through group, or when it would split a clipping group; the same guard runs
+in the frontend workflow, the Rust IPC boundary and the operation engine.
 
 ## Undo and redo
 
