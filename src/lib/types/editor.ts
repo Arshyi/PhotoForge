@@ -251,6 +251,12 @@ export interface RawLayerSource {
    * turns it the same way. Absent when the raster is the sensor's own way up.
    */
   orientationApplied?: number;
+  /**
+   * The rectangle of the sensor, in sensor coordinates, the raster is cut to: the picture the
+   * camera says the sensor holds, without the masked border. Absent for a region and for a
+   * layer saved before it was recorded.
+   */
+  crop?: Rect | null;
 }
 
 /** Mirrors `commands::raw::RawDevelopResult`. */

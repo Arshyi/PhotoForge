@@ -7,7 +7,7 @@
 use photoforge_lib::application::AppState;
 use photoforge_lib::color::DevelopmentParameters;
 use photoforge_lib::metadata::{exif, scan};
-use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_upright, RenderScale};
+use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_picture, RenderScale};
 use photoforge_lib::raw::dng::fixtures::DngBuilder;
 use serde_json::{json, Value};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
@@ -91,7 +91,7 @@ fn brightness(image: &photoforge_lib::color::FloatImage, x: u32, y: u32) -> f32 
 fn the_eight_orientations_put_the_sensors_corner_where_exif_says() {
     let parameters = DevelopmentParameters::default();
     for orientation in 1..=8_u16 {
-        let upright = develop_bytes_upright(&dng(orientation), &parameters, RenderScale::Full)
+        let upright = develop_bytes_picture(&dng(orientation), &parameters, RenderScale::Full)
             .unwrap_or_else(|error| panic!("{orientation}: {error}"));
         let (width, height) = upright.image.dimensions();
         let swapped = orientation >= 5;
@@ -136,14 +136,14 @@ fn an_upright_sensor_is_unchanged_and_the_sensors_own_way_up_is_still_available(
     let parameters = DevelopmentParameters::default();
     let data = dng(1);
     let own = develop_bytes(&data, &parameters, RenderScale::Full).unwrap();
-    let upright = develop_bytes_upright(&data, &parameters, RenderScale::Full).unwrap();
+    let upright = develop_bytes_picture(&data, &parameters, RenderScale::Full).unwrap();
     assert_eq!(own.image, upright.image);
 
     // A sideways one, in the sensor's own orientation, is the same picture before the turn.
     let sideways = dng(6);
     let own = develop_bytes(&sideways, &parameters, RenderScale::Full).unwrap();
     assert_eq!(own.image.dimensions(), (WIDTH, HEIGHT));
-    let turned = develop_bytes_upright(&sideways, &parameters, RenderScale::Full).unwrap();
+    let turned = develop_bytes_picture(&sideways, &parameters, RenderScale::Full).unwrap();
     assert_eq!(turned.image.dimensions(), (HEIGHT, WIDTH));
     let (width, height, pixels) = own.image.into_parts();
     let by_hand = photoforge_lib::orientation::turn(pixels, 6, width, height).unwrap();

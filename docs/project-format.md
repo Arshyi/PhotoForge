@@ -19,7 +19,8 @@ A project is written as the **lowest** version that holds what it contains.
   layer **clipped** to the one beneath it, or one of the ten **Photoshop blend modes**
   (Linear Burn, Linear Dodge, Darker Color, Lighter Color, Vivid Light, Linear Light, Pin Light,
   Hard Mix, Subtract, Divide), or a RAW layer that records the **orientation it was turned by**
-  (`orientationApplied`, below). A Phase 14 build refuses a version 3 project **by name**
+  (`orientationApplied`) or the **crop** it was cut to (`crop`), below. A Phase 14 build
+  refuses a version 3 project **by name**
   ("version 3 is not supported"). Before this rule such a project was version 2: a Phase 14 build
   read it, dropped the clip flags without a word, and destroyed the clipping when it saved.
 
@@ -274,9 +275,12 @@ manifest, each only when used, so a project that uses none of them is written as
   opens and edits exactly as one without. The stored path is inert text; it is checked
   (absolute, local, no traversal, stream or device syntax) only when the person asks to
   check or reopen it. A camera-RAW layer's `source` gains an optional `view` rectangle in
-  sensor coordinates, and an optional `orientationApplied` (2 to 8): the EXIF orientation the
+  sensor coordinates, an optional `orientationApplied` (2 to 8): the EXIF orientation the
   raster was turned by when it was developed whole (absent when it was not turned, and never
-  present with a `view`). A project that records it is written as format version 3.
+  present with a `view`), and an optional `crop` rectangle: the part of the sensor, in sensor
+  coordinates, the raster was cut to when it was developed whole (the default crop inside the
+  active area; absent when the picture is the whole sensor, and never present with a `view`).
+  A project that records either is written as format version 3.
 * **A `plugin_filter` edit** in an adjustment layer or a layer's edits — the plugin's id,
   exact version, content hash, filter, declared locality and parameters. The plugin
   itself is **not** stored in the project. Opening a project never runs a plugin and

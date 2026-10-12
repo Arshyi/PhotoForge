@@ -150,7 +150,7 @@ pub fn run_batch(
                         let bytes = crate::raw::read_source_bytes(&local_path)
                             .map_err(|e| AppError::RawInspection(e.to_string()))?;
                         check_cancel(Some(&cancelled))?;
-                        let developed = crate::raw::develop::develop_bytes_upright(
+                        let developed = crate::raw::develop::develop_bytes_picture(
                             &bytes,
                             &crate::color::DevelopmentParameters::default(),
                             crate::raw::develop::RenderScale::Full,
@@ -759,6 +759,41 @@ mod tests {
             summary.orientation, 1,
             "upright pixels, and the tag says so"
         );
+    }
+
+    #[test]
+    fn a_batch_dng_is_cut_to_the_picture_its_camera_declares() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("in");
+        let output = root.path().join("out");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        let longs = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        // 16 x 12 on the sensor; the active area leaves a 2-pixel border and the default crop
+        // takes 10 x 6 of it, at (1, 1).
+        let builder = crate::raw::dng::fixtures::DngBuilder::new(16, 12, vec![1001; 192])
+            .levels(vec![0], (1, 1), 4095)
+            .entry(50829, 4, longs(&[2, 2, 10, 14]))
+            .entry(50719, 4, longs(&[1, 1]))
+            .entry(50720, 4, longs(&[10, 6]));
+        fs::write(input.join("a.dng"), builder.build()).unwrap();
+
+        let result = run_batch(
+            994,
+            options(&input, &output),
+            workflow(),
+            Arc::new(Mutex::new(BatchStatus::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!((result.completed, result.failed), (1, 0), "{result:?}");
+        let image = image::open(output.join("a-0001.png")).unwrap();
+        assert_eq!(image::GenericImageView::dimensions(&image), (10, 6));
     }
 
     #[test]

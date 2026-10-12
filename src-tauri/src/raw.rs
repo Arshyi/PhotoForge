@@ -544,6 +544,15 @@ pub struct RawLayerSource {
     /// is never turned: its rectangle is in sensor coordinates.
     #[serde(default = "no_orientation", skip_serializing_if = "is_no_orientation")]
     pub orientation_applied: u8,
+    /// The part of the sensor the raster is cut to, in sensor coordinates: the default crop the
+    /// file declares inside its active area, when the layer was developed whole (and so without
+    /// the masked border around the image). Re-developing cuts the same rectangle, so the raster
+    /// keeps the size its masks and transform were made for. A layer saved before this field
+    /// existed has none, and is the whole sensor as it always was. It is never present with a
+    /// `view`: a region is in sensor coordinates and is not cut. The record of a turn
+    /// (`orientation_applied`) is applied after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<crate::source::Rect>,
 }
 
 fn no_orientation() -> u8 {
@@ -566,6 +575,18 @@ impl RawLayerSource {
             return Err(RawError::InvalidMetadata(
                 "a region of a sensor is in the sensor's own orientation and is not turned".into(),
             ));
+        }
+        if let Some(crop) = &self.crop {
+            if self.view.is_some() {
+                return Err(RawError::InvalidMetadata(
+                    "a region of a sensor is in the sensor's coordinates and is not cut".into(),
+                ));
+            }
+            if !crop.is_within(self.reference.width, self.reference.height) {
+                return Err(RawError::InvalidMetadata(
+                    "the crop lies outside the sensor".into(),
+                ));
+            }
         }
         match &self.view {
             // The layer is the whole sensor, so the whole sensor must fit.
@@ -849,6 +870,7 @@ mod tests {
             capture: RawCaptureMetadata::default(),
             view,
             orientation_applied,
+            crop: None,
         }
     }
 
@@ -882,6 +904,75 @@ mod tests {
         assert!(turned_source(1, Some(region)).validate().is_ok());
         let error = turned_source(6, Some(region)).validate().unwrap_err();
         assert!(error.to_string().contains("not turned"), "{error}");
+    }
+
+    #[test]
+    fn the_crop_a_layer_was_cut_to_is_recorded_only_when_there_is_one() {
+        let rect = crate::source::Rect {
+            x: 8,
+            y: 4,
+            width: 40,
+            height: 30,
+        };
+        let plain = serde_json::to_value(turned_source(1, None)).unwrap();
+        assert!(plain.get("crop").is_none(), "{plain}");
+        let mut cut = turned_source(1, None);
+        cut.crop = Some(rect);
+        let value = serde_json::to_value(&cut).unwrap();
+        assert_eq!(value["crop"]["width"], 40);
+        let back: RawLayerSource = serde_json::from_value(value).unwrap();
+        assert_eq!(back.crop, Some(rect));
+        // A record from before the field existed is the whole sensor.
+        let back: RawLayerSource = serde_json::from_value(plain).unwrap();
+        assert_eq!(back.crop, None);
+    }
+
+    #[test]
+    fn a_crop_must_lie_on_the_sensor_and_a_region_is_never_cut() {
+        let on_sensor = crate::source::Rect {
+            x: 8,
+            y: 4,
+            width: 40,
+            height: 30,
+        };
+        let mut source = turned_source(1, None);
+        source.crop = Some(on_sensor);
+        assert!(source.validate().is_ok());
+        // The sensor is 64 x 48.
+        for outside in [
+            crate::source::Rect {
+                x: 40,
+                y: 0,
+                width: 40,
+                height: 10,
+            },
+            crate::source::Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10,
+            },
+            crate::source::Rect {
+                x: 0,
+                y: 40,
+                width: 10,
+                height: 10,
+            },
+        ] {
+            let mut source = turned_source(1, None);
+            source.crop = Some(outside);
+            assert!(source.validate().is_err(), "{outside:?}");
+        }
+        let region = crate::source::Rect {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        };
+        let mut both = turned_source(1, Some(region));
+        both.crop = Some(on_sensor);
+        let error = both.validate().unwrap_err();
+        assert!(error.to_string().contains("not cut"), "{error}");
     }
 
     #[test]

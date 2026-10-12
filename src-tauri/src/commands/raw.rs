@@ -1,7 +1,7 @@
 use crate::application::AppState;
 use crate::color::DevelopmentParameters;
 use crate::error::AppError;
-use crate::raw::develop::{develop_sensor, develop_sensor_upright, DevelopedRaw, RenderScale};
+use crate::raw::develop::{develop_sensor, develop_sensor_picture, DevelopedRaw, RenderScale};
 use crate::raw::{
     decoder_capabilities, dng, inspect_raw_path, read_source_bytes, source_reference_for,
     verify_source, RawCaptureMetadata, RawError, RawInspection, RawLayerSource, RawSourceMode,
@@ -162,8 +162,8 @@ pub async fn open_raw_layer(
         let _job = crate::resources::acquire_job(None)
             .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
         let sensor = dng::decode(&bytes)?;
-        // A whole sensor is turned upright, and the layer records the turn.
-        let developed = develop_sensor_upright(&sensor, &parameters, scale)?;
+        // A whole sensor is cut to its picture and turned upright, and the layer records both.
+        let developed = develop_sensor_picture(&sensor, &parameters, scale)?;
         Ok::<_, RawError>((sensor, developed))
     })
     .await
@@ -186,6 +186,7 @@ pub async fn open_raw_layer(
             .ok()
             .filter(|value| crate::orientation::is_valid(*value))
             .unwrap_or(1),
+        crop: sensor.picture_rect(),
     };
     source.validate().map_err(map)?;
     register(&state, developed, &sensor.summary(), source, started, None)
@@ -278,16 +279,21 @@ pub async fn develop_raw_layer(
 
     let for_worker = parameters.clone();
     let view = request.source.view;
-    // The turn the layer was developed with, so the raster keeps its size and orientation.
+    // The cut and the turn the layer was developed with, so the raster keeps its size and
+    // orientation.
     let applied = u16::from(request.source.orientation_applied);
+    let crop = request.source.crop;
     let decoded = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)
             .map_err(|e| RawError::InvalidMetadata(e.to_string()))?;
         match view {
             None => {
                 let sensor = dng::decode(&bytes)?;
-                let developed =
-                    develop_sensor(&sensor, &for_worker, scale)?.turned_upright(applied)?;
+                let mut developed = develop_sensor(&sensor, &for_worker, scale)?;
+                if let Some(rect) = &crop {
+                    developed = developed.cropped(rect)?;
+                }
+                let developed = developed.turned_upright(applied)?;
                 Ok::<_, RawError>((sensor.summary(), developed))
             }
             // A region layer is re-developed as the same rectangle of the sensor,
@@ -408,6 +414,7 @@ pub async fn export_raw_layer_png16(
 
     let view = source.view;
     let applied = u16::from(source.orientation_applied);
+    let crop = source.crop;
     let (saved, width, height) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         // Always full resolution and the better algorithm, whatever the
@@ -416,6 +423,10 @@ pub async fn export_raw_layer_png16(
             None => {
                 let sensor = dng::decode(&bytes).map_err(map)?;
                 develop_sensor(&sensor, &parameters, RenderScale::Full)
+                    .and_then(|developed| match &crop {
+                        Some(rect) => developed.cropped(rect),
+                        None => Ok(developed),
+                    })
                     .and_then(|developed| developed.turned_upright(applied))
                     .map_err(map)?
             }
@@ -522,6 +533,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         // The same bytes, at a new location.
@@ -548,6 +560,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         let error = relink_raw_source(source, other.to_string_lossy().into_owned())
@@ -573,6 +586,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         let absent = directory.path().join("gone.dng");
@@ -596,6 +610,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         let json = serde_json::to_string(&source).unwrap();
@@ -618,6 +633,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         let json = serde_json::to_string(&source).unwrap();
@@ -640,6 +656,7 @@ mod tests {
             decoder_version: DECODER_VERSION.into(),
             capture: RawCaptureMetadata::default(),
             orientation_applied: 1,
+            crop: None,
             view: None,
         };
         source.decoder = String::new();

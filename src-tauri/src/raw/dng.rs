@@ -193,6 +193,40 @@ pub struct SensorSummary {
 }
 
 impl SensorImage {
+    /// The part of the sensor that is the picture, in sensor coordinates, when that is not all
+    /// of it: the default crop the file declares, inside its active area, or the active area
+    /// itself when it declares none. `None` when the picture is the whole sensor.
+    ///
+    /// The active area excludes the optically black and masked photosites around the image; the
+    /// default crop (an origin relative to the active area's top-left corner, and a size) is the
+    /// part the camera maker's own converter shows. A crop that does not lie inside the active
+    /// area is not believed, and the active area is used.
+    pub fn picture_rect(&self) -> Option<Rect> {
+        let (area_x, area_y, area_width, area_height) = self.active_area;
+        let within = |x: u32, y: u32, width: u32, height: u32| {
+            width > 0
+                && height > 0
+                && u64::from(x) + u64::from(width) <= u64::from(area_width)
+                && u64::from(y) + u64::from(height) <= u64::from(area_height)
+        };
+        let (x, y, width, height) = match self.default_crop {
+            Some((x, y, width, height)) if within(x, y, width, height) => {
+                (area_x + x, area_y + y, width, height)
+            }
+            _ => (area_x, area_y, area_width, area_height),
+        };
+        let rect = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        if !rect.is_within(self.width, self.height) {
+            return None;
+        }
+        (rect.pixels() != u64::from(self.width) * u64::from(self.height)).then_some(rect)
+    }
+
     pub fn summary(&self) -> SensorSummary {
         SensorSummary {
             metadata: self.metadata.clone(),
@@ -1731,6 +1765,76 @@ mod tests {
     fn the_active_area_defaults_to_the_whole_sensor_when_absent() {
         let data = DngBuilder::new(6, 4, ramp(6, 4)).build();
         assert_eq!(decode(&data).unwrap().active_area, (0, 0, 6, 4));
+    }
+
+    fn longs(values: &[u32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    /// A 24 × 16 sensor with the active area (top, left, bottom, right) and the default crop
+    /// (origin x, origin y, width, height) a test gives, either of which may be absent.
+    fn picture_of(area: Option<[u32; 4]>, crop: Option<[u32; 4]>) -> Option<Rect> {
+        let mut builder = DngBuilder::new(24, 16, ramp(24, 16));
+        if let Some(area) = area {
+            builder = builder.entry(TAG_ACTIVE_AREA, 4, longs(&area));
+        }
+        if let Some([x, y, width, height]) = crop {
+            builder = builder
+                .entry(TAG_DEFAULT_CROP_ORIGIN, 4, longs(&[x, y]))
+                .entry(TAG_DEFAULT_CROP_SIZE, 4, longs(&[width, height]));
+        }
+        decode(&builder.build()).unwrap().picture_rect()
+    }
+
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> Option<Rect> {
+        Some(Rect {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    #[test]
+    fn the_picture_is_the_default_crop_inside_the_active_area() {
+        // Nothing declared: the picture is the whole sensor.
+        assert_eq!(picture_of(None, None), None);
+        // The active area alone: the picture is that.
+        assert_eq!(picture_of(Some([2, 4, 14, 22]), None), rect(4, 2, 18, 12));
+        // A default crop is relative to the active area's corner, not the sensor's.
+        assert_eq!(
+            picture_of(Some([2, 4, 14, 22]), Some([3, 1, 10, 8])),
+            rect(7, 3, 10, 8)
+        );
+        // A crop with no active area is relative to the sensor's own corner.
+        assert_eq!(picture_of(None, Some([2, 2, 20, 12])), rect(2, 2, 20, 12));
+    }
+
+    #[test]
+    fn a_picture_that_is_the_whole_sensor_is_no_cut() {
+        assert_eq!(picture_of(Some([0, 0, 16, 24]), None), None);
+        assert_eq!(picture_of(None, Some([0, 0, 24, 16])), None);
+        assert_eq!(
+            picture_of(Some([2, 4, 14, 22]), Some([0, 0, 18, 12])),
+            rect(4, 2, 18, 12)
+        );
+    }
+
+    #[test]
+    fn a_crop_that_does_not_lie_in_the_active_area_is_not_believed() {
+        // Past the active area's right edge, empty, and starting outside: the active area is used.
+        let area = Some([2, 4, 14, 22]);
+        assert_eq!(picture_of(area, Some([10, 0, 12, 6])), rect(4, 2, 18, 12));
+        assert_eq!(picture_of(area, Some([0, 0, 0, 6])), rect(4, 2, 18, 12));
+        assert_eq!(picture_of(area, Some([30, 30, 2, 2])), rect(4, 2, 18, 12));
+        // An active area that is not on the sensor is not believed either.
+        assert_eq!(
+            picture_of(Some([0, 0, 99, 99]), Some([2, 2, 8, 8])),
+            rect(2, 2, 8, 8)
+        );
     }
 
     #[test]

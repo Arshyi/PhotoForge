@@ -75,6 +75,58 @@ pub struct DevelopedRaw {
 }
 
 impl DevelopedRaw {
+    /// The part of the developed sensor that is the picture: `rect`, in sensor coordinates,
+    /// cut out. A preview is a decimated sensor, so the rectangle is scaled by how much the
+    /// sensor was reduced; at full scale it is exact. `source_dimensions` still names the sensor.
+    ///
+    /// The cut is made after demosaicing, so the pixels at its edge have their real neighbours:
+    /// the picture is what a development of the whole sensor holds at that place, which is also
+    /// what `develop_region` returns for the same rectangle.
+    pub fn cropped(self, rect: &Rect) -> Result<Self, RawError> {
+        let Self {
+            image,
+            multipliers,
+            color_managed,
+            demosaic,
+            source_dimensions,
+        } = self;
+        let (source_width, source_height) = source_dimensions;
+        let (width, height, pixels) = image.into_parts();
+        if source_width == 0 || source_height == 0 || width == 0 || height == 0 {
+            return Err(RawError::InvalidMetadata("the picture has no area".into()));
+        }
+        // Rounded to the nearest pixel of the (possibly reduced) picture, and never empty.
+        let scale = |position: u64, size: u32, source: u32| -> u32 {
+            ((position * u64::from(size) + u64::from(source) / 2) / u64::from(source)) as u32
+        };
+        let x0 = scale(u64::from(rect.x), width, source_width).min(width - 1);
+        let y0 = scale(u64::from(rect.y), height, source_height).min(height - 1);
+        let x1 = scale(rect.right(), width, source_width).clamp(x0 + 1, width);
+        let y1 = scale(rect.bottom(), height, source_height).clamp(y0 + 1, height);
+        let image = if (x0, y0, x1, y1) == (0, 0, width, height) {
+            FloatImage::new(width, height, pixels)
+        } else {
+            let (cut_width, cut_height) = ((x1 - x0) as usize, (y1 - y0) as usize);
+            let mut cut: Vec<FloatRgba> = Vec::new();
+            cut.try_reserve_exact(cut_width * cut_height)
+                .map_err(|_| RawError::FileTooLarge)?;
+            for row in y0 as usize..y1 as usize {
+                let start = row * width as usize + x0 as usize;
+                cut.extend_from_slice(&pixels[start..start + cut_width]);
+            }
+            drop(pixels);
+            FloatImage::new(x1 - x0, y1 - y0, cut)
+        }
+        .map_err(|error: ColorPipelineError| RawError::InvalidMetadata(error.to_string()))?;
+        Ok(Self {
+            image,
+            multipliers,
+            color_managed,
+            demosaic,
+            source_dimensions,
+        })
+    }
+
     /// The picture turned upright from an EXIF orientation (2 to 8; anything else, and 1, leaves
     /// it as it is). `source_dimensions` still names the sensor, as the sensor has it.
     ///
@@ -286,18 +338,24 @@ fn preview_factor(width: u32, height: u32) -> u32 {
     (longest.div_ceil(PREVIEW_MAX_EDGE)).max(1)
 }
 
-/// As `develop_sensor`, with the picture turned upright from the sensor's own orientation tag.
+/// As `develop_sensor`, as the picture the camera says it is: cut to the default crop inside the
+/// active area (`SensorImage::picture_rect`), then turned upright from the orientation tag.
 ///
-/// This is how a sensor developed **whole** is shown: a portrait photograph is a portrait. A
-/// region (`develop_region`) and the preview made to choose one (`develop_preview`) are not
-/// turned: their rectangles are in sensor coordinates, so they stay in the sensor's own
-/// orientation and carry the tag with them.
-pub fn develop_sensor_upright(
+/// This is how a sensor developed **whole** is shown: without the masked border around the image,
+/// and a portrait photograph is a portrait. A region (`develop_region`) and the preview made to
+/// choose one (`develop_preview`) are neither cut nor turned: their rectangles are in sensor
+/// coordinates, so they stay as the sensor has them and carry the tag with them.
+pub fn develop_sensor_picture(
     sensor: &dng::SensorImage,
     parameters: &DevelopmentParameters,
     scale: RenderScale,
 ) -> Result<DevelopedRaw, RawError> {
-    develop_sensor(sensor, parameters, scale)?.turned_upright(sensor.orientation)
+    let developed = develop_sensor(sensor, parameters, scale)?;
+    let developed = match sensor.picture_rect() {
+        Some(rect) => developed.cropped(&rect)?,
+        None => developed,
+    };
+    developed.turned_upright(sensor.orientation)
 }
 
 /// Runs the whole development graph on an already decoded sensor image.
@@ -690,8 +748,8 @@ pub fn develop_bytes(
     develop_bytes_oriented(data, parameters, scale, false)
 }
 
-/// As `develop_bytes`, turned upright from the file's orientation tag.
-pub fn develop_bytes_upright(
+/// As `develop_bytes`, as the picture the camera says it is (see `develop_sensor_picture`).
+pub fn develop_bytes_picture(
     data: &[u8],
     parameters: &DevelopmentParameters,
     scale: RenderScale,
@@ -703,7 +761,7 @@ fn develop_bytes_oriented(
     data: &[u8],
     parameters: &DevelopmentParameters,
     scale: RenderScale,
-    upright: bool,
+    picture: bool,
 ) -> Result<DevelopedRaw, RawError> {
     if data.len() as u64 > super::RAW_MAX_FILE_BYTES {
         return Err(RawError::FileTooLarge);
@@ -713,8 +771,8 @@ fn develop_bytes_oriented(
     if pixels > raw_max_pixels() {
         return Err(RawError::FileTooLarge);
     }
-    if upright {
-        develop_sensor_upright(&sensor, parameters, scale)
+    if picture {
+        develop_sensor_picture(&sensor, parameters, scale)
     } else {
         develop_sensor(&sensor, parameters, scale)
     }
@@ -735,6 +793,129 @@ mod tests {
 
     fn parameters() -> DevelopmentParameters {
         DevelopmentParameters::default()
+    }
+
+    /// A 40 × 30 sensor with a gradient, an active area (top 2, left 4, bottom 28, right 38) and a
+    /// default crop at (3, 1) of size 20 × 14 inside it: the picture is (7, 3, 20, 14) on the
+    /// sensor, at odd offsets on purpose, so the Bayer phase of the cut is the awkward one.
+    fn framed_dng(orientation: u16) -> Vec<u8> {
+        let longs = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let samples: Vec<u16> = (0..40 * 30)
+            .map(|index| 200 + ((index % 40) * 37 + (index / 40) * 53) as u16 % 3000)
+            .collect();
+        DngBuilder::new(40, 30, samples)
+            .levels(vec![0], (1, 1), 4095)
+            .neutral([0.55, 1.0, 0.72])
+            .matrix([0.72, 0.18, 0.10, 0.16, 0.74, 0.10, 0.09, 0.20, 0.71])
+            .orientation(orientation)
+            .entry(50829, 4, longs(&[2, 4, 28, 38]))
+            .entry(50719, 4, longs(&[3, 1]))
+            .entry(50720, 4, longs(&[20, 14]))
+            .build()
+    }
+
+    const PICTURE: Rect = Rect {
+        x: 7,
+        y: 3,
+        width: 20,
+        height: 14,
+    };
+
+    #[test]
+    fn the_picture_is_the_cut_of_the_whole_development_and_the_regions_of_the_same_rectangle() {
+        let data = framed_dng(1);
+        let parameters = parameters();
+        let sensor = dng::decode(&data).unwrap();
+        assert_eq!(sensor.picture_rect(), Some(PICTURE));
+
+        let whole = develop_sensor(&sensor, &parameters, RenderScale::Full).unwrap();
+        assert_eq!(whole.image.dimensions(), (40, 30));
+        let picture = develop_sensor_picture(&sensor, &parameters, RenderScale::Full).unwrap();
+        assert_eq!(picture.image.dimensions(), (20, 14));
+        // The sensor's own size is still said as the sensor has it.
+        assert_eq!(picture.source_dimensions, (40, 30));
+        // Every pixel is the whole development's pixel at that place...
+        for y in 0..14_u32 {
+            for x in 0..20_u32 {
+                assert_eq!(
+                    picture.image.get(x, y),
+                    whole.image.get(x + 7, y + 3),
+                    "({x}, {y})"
+                );
+            }
+        }
+        // ...and so is the development of that rectangle on its own.
+        let region = develop_region(&data, PICTURE, &parameters).unwrap();
+        assert_eq!(region.image, picture.image);
+    }
+
+    #[test]
+    fn the_cut_comes_before_the_turn() {
+        let parameters = parameters();
+        let upright =
+            develop_bytes_picture(&framed_dng(1), &parameters, RenderScale::Full).unwrap();
+        let sideways =
+            develop_bytes_picture(&framed_dng(6), &parameters, RenderScale::Full).unwrap();
+        // 20 × 14 picture; a quarter turn makes it 14 × 20.
+        assert_eq!(upright.image.dimensions(), (20, 14));
+        assert_eq!(sideways.image.dimensions(), (14, 20));
+        let (width, height, pixels) = upright.image.into_parts();
+        let by_hand = crate::orientation::turn(pixels, 6, width, height).unwrap();
+        assert_eq!(sideways.image.pixels(), by_hand.as_slice());
+    }
+
+    #[test]
+    fn a_sensor_with_no_declared_picture_is_developed_whole() {
+        let data = flat_dng(16, 16, 2048, 4095);
+        let sensor = dng::decode(&data).unwrap();
+        assert_eq!(sensor.picture_rect(), None);
+        let picture = develop_sensor_picture(&sensor, &parameters(), RenderScale::Full).unwrap();
+        let whole = develop_sensor(&sensor, &parameters(), RenderScale::Full).unwrap();
+        assert_eq!(picture.image, whole.image);
+    }
+
+    #[test]
+    fn a_preview_is_cut_in_proportion_and_never_empty() {
+        // Preview scale decimates the sensor; the picture is cut to the same part of it.
+        let (width, height) = (3200_u32, 2400_u32);
+        let longs = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        let data = DngBuilder::new(width, height, vec![1500; (width * height) as usize])
+            .levels(vec![0], (1, 1), 4095)
+            .entry(50829, 4, longs(&[40, 60, 2360, 3140]))
+            .entry(50719, 4, longs(&[20, 20]))
+            .entry(50720, 4, longs(&[3000, 2200]))
+            .build();
+        let sensor = dng::decode(&data).unwrap();
+        let rect = sensor.picture_rect().unwrap();
+        assert_eq!(
+            rect,
+            Rect {
+                x: 80,
+                y: 60,
+                width: 3000,
+                height: 2200
+            }
+        );
+        let full = develop_sensor(&sensor, &parameters(), RenderScale::Preview).unwrap();
+        let picture = develop_sensor_picture(&sensor, &parameters(), RenderScale::Preview).unwrap();
+        let (full_width, full_height) = full.image.dimensions();
+        let (picture_width, picture_height) = picture.image.dimensions();
+        // The picture is 3000 / 3200 of the width and 2200 / 2400 of the height, to a pixel.
+        let expect_width = f64::from(full_width) * 3000.0 / 3200.0;
+        let expect_height = f64::from(full_height) * 2200.0 / 2400.0;
+        assert!((f64::from(picture_width) - expect_width).abs() <= 1.0);
+        assert!((f64::from(picture_height) - expect_height).abs() <= 1.0);
+        assert!(picture_width > 0 && picture_height > 0);
     }
 
     #[test]

@@ -96,7 +96,7 @@ Read from the file, never assumed:
 - Black level, per CFA position where the file gives one
 - White level
 - Bit depth (8, 10, 12, 14, 16)
-- Active area and the camera's default crop
+- Active area and the camera's default crop (applied to a whole development; see "The picture" below)
 - Orientation (applied to a whole development; see "Orientation" below)
 - As-shot neutral, and the colour matrix
 - Camera make and model, lens, ISO, shutter, aperture, focal length, capture time
@@ -132,6 +132,33 @@ render use every photosite and the better algorithm.
 The preview is the same picture, not merely a smaller one: white balance,
 colour matrix, and tone are identical, and a test asserts the mean of the
 preview matches the full render on a real photograph.
+
+## The picture: active area and default crop
+
+A sensor has photosites around the image that are not the image: optically black and masked
+rows and columns, used to measure the black level. A DNG says where the image is: an **active
+area** (top, left, bottom, right on the sensor) and a **default crop** (an origin relative to the
+active area's corner, and a size), which is the part the camera maker's own converter shows.
+A DNG developed **whole** is cut to that picture (`SensorImage::picture_rect`): the default crop
+inside the active area, or the active area when it declares no crop, or the whole sensor when it
+declares neither. A crop that does not lie inside the active area is not believed, and the active
+area is used.
+
+* **The cut is made after demosaicing**, in sensor coordinates, so the pixels at its edge have
+  their real neighbours. It is exactly what a development of that rectangle on its own gives
+  (`develop_region`, asserted bit for bit), at whatever offset, odd or even, the Bayer pattern has
+  there. The white balance is still measured over the whole sensor, as it is for a region.
+* **The Canon sample** declares an active area of 5796 × 3870 at (122, 80) on its 5920 × 3950
+  sensor and a default crop of 5760 × 3840 at (18, 16) inside it, so its picture is the
+  rectangle (140, 96, 5760, 3840): 5760 × 3840 is the camera's published image size.
+* **The layer records the rectangle** (`crop` in its source, in sensor coordinates), and
+  developing it again cuts the same rectangle, at preview scale in proportion, so its size, its
+  masks and its transform keep meaning what they meant. The cut is applied before the turn
+  described below, in the sensor's coordinates.
+* **A project saved before this has no record** and is the whole sensor as it always was. A
+  project that records a cut is format version 3 (an earlier build refuses it by name).
+* **A region is not cut.** Its rectangle and the preview made to choose it are in the sensor's
+  own coordinates, border included, so a rectangle drawn at the edge of the sensor is that edge.
 
 ## Orientation
 
