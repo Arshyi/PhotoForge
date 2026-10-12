@@ -880,6 +880,61 @@ mod tests {
     }
 
     #[test]
+    fn a_region_chosen_on_the_upright_picture_is_that_window_of_it_for_every_orientation() {
+        let parameters = parameters();
+        for orientation in 1..=8_u16 {
+            let data = framed_dng(orientation);
+            let whole = develop_bytes_picture(&data, &parameters, RenderScale::Full).unwrap();
+            let geometry = dng::inspect_geometry(&data).unwrap();
+            let (width, height) = whole.image.dimensions();
+            assert_eq!(geometry.presented_size(), (width, height));
+            // Odd offsets and sizes on purpose, an edge, a corner, and nearly all of it.
+            for chosen in [
+                Rect {
+                    x: 3,
+                    y: 5,
+                    width: 7,
+                    height: 9,
+                },
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 5,
+                    height: 4,
+                },
+                Rect {
+                    x: width - 6,
+                    y: height - 3,
+                    width: 6,
+                    height: 3,
+                },
+                Rect {
+                    x: 1,
+                    y: 1,
+                    width: width - 2,
+                    height: height - 2,
+                },
+            ] {
+                let rect = geometry.to_sensor(&chosen).expect("on the picture");
+                let region = develop_region(&data, rect, &parameters)
+                    .unwrap()
+                    .turned_upright(orientation)
+                    .unwrap();
+                assert_eq!(region.image.dimensions(), (chosen.width, chosen.height));
+                for y in 0..chosen.height {
+                    for x in 0..chosen.width {
+                        assert_eq!(
+                            region.image.get(x, y),
+                            whole.image.get(chosen.x + x, chosen.y + y),
+                            "orientation {orientation} {chosen:?} ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_preview_is_cut_in_proportion_and_never_empty() {
         // Preview scale decimates the sensor; the picture is cut to the same part of it.
         let (width, height) = (3200_u32, 2400_u32);

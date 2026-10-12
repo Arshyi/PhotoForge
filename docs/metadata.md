@@ -106,10 +106,12 @@ not written (its offsets are into the block it came from; the report says so).
 
 **A DNG developed whole is turned upright** from its orientation tag, so a portrait photograph
 opens as a portrait; the layer records the turn (see [raw-development.md](raw-development.md)),
-the tag is spent, and every export says upright. **A region of a sensor is not turned**: its
-rectangle is in the sensor's own coordinates, so it stays in the sensor's orientation and the tag
-travels with its pixels (and under *Remove everything* too, because a sideways picture is a
-defect and not a privacy choice), as a region of a very large JPEG does.
+the tag is spent, and every export says upright. **A region of a sensor is chosen on that upright
+picture and is turned with it**, so the tag is spent for it too and every export says upright.
+(A region of a very large JPEG or PNG is in the file's own orientation, so its tag travels with
+it, and under *Remove everything* too, because a sideways picture is a defect and not a privacy
+choice.) A region saved before this was chosen on the sensor, is developed as it was, and its
+exports carry the tag as they did.
 
 ## What is not carried, under any policy
 

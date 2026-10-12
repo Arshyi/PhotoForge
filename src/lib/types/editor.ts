@@ -241,14 +241,16 @@ export interface RawLayerSource {
   decoderVersion: string;
   capture: RawCaptureMetadata;
   /**
-   * The part of the sensor this layer is, when it is not all of it. Present only
-   * for a sensor too large to develop whole: the layer is that rectangle, in
-   * sensor coordinates, and re-developing it re-develops that rectangle.
+   * The part of the sensor this layer is, when it is not all of it: a region chosen on the
+   * picture. The layer is those photosites, in sensor coordinates (not the coordinates it was
+   * chosen in), and re-developing it re-develops that rectangle and turns it by
+   * `orientationApplied`.
    */
   view?: Rect | null;
   /**
    * The EXIF orientation (2 to 8) the developed raster was turned by, so developing it again
-   * turns it the same way. Absent when the raster is the sensor's own way up.
+   * turns it the same way, for a whole sensor and for a region alike. Absent when the raster is
+   * the sensor's own way up (which is also how a region saved before regions were turned reads).
    */
   orientationApplied?: number;
   /**

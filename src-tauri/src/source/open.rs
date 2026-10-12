@@ -88,7 +88,9 @@ fn identity_of(probed: &Probed, stored_path: String, sha256: String) -> SourceId
 /// to one rule: the rectangle lies on the source, and it is no larger than the
 /// planner's own answer for this source on this machine.
 pub fn gate_region(probed: &Probed, planned: &AdmissionReport, rect: Rect) -> Result<(), AppError> {
-    if !rect.is_within(probed.width, probed.height) {
+    // Chosen on the image as it is presented: for a camera RAW, its picture turned upright.
+    let (width, height) = probed.presented();
+    if !rect.is_within(width, height) {
         return Err(AppError::InvalidOperation(
             "the region lies outside the image".into(),
         ));

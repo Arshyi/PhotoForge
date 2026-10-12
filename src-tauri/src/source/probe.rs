@@ -38,6 +38,20 @@ pub struct Probed {
     pub bit_depth: u8,
     pub has_alpha: bool,
     pub probe: SourceProbe,
+    /// For a camera RAW, where its picture lies on the sensor and how it is turned. The sensor
+    /// (`width`, `height`) is what the planner prices; the picture is what a region is chosen on.
+    pub picture: Option<crate::raw::dng::PictureGeometry>,
+}
+
+impl Probed {
+    /// The size of the image as a person sees and chooses on it: a camera RAW's picture turned
+    /// upright, the frame for everything else.
+    pub fn presented(&self) -> (u32, u32) {
+        match &self.picture {
+            Some(geometry) => geometry.presented_size(),
+            None => (self.width, self.height),
+        }
+    }
 }
 
 pub fn image_format_of(kind: SourceKind) -> ImageFormat {
@@ -179,12 +193,13 @@ pub fn probe_path(path: &Path) -> Result<Probed, AppError> {
         bit_depth,
         has_alpha,
         probe,
+        picture: None,
     })
 }
 
 /// The header of a DNG: sensor size and how the pixel payload is divided up.
 fn probe_dng(canonical: PathBuf, file_bytes: u64) -> Result<Probed, AppError> {
-    let info = dng::read_info(&canonical)?;
+    let (info, geometry) = dng::read_header(&canonical)?;
     let probe = SourceProbe {
         kind: SourceKind::Dng,
         width: u64::from(info.width),
@@ -206,6 +221,7 @@ fn probe_dng(canonical: PathBuf, file_bytes: u64) -> Result<Probed, AppError> {
         bit_depth: info.bits,
         has_alpha: false,
         probe,
+        picture: Some(geometry),
     })
 }
 

@@ -1,4 +1,5 @@
-//! A DNG developed whole is turned upright from its orientation tag; a region is not.
+//! A DNG developed whole is turned upright from its orientation tag; a region is chosen on the
+//! upright picture and is turned with it.
 //!
 //! The synthetic sensors carry a bright block in the sensor's top-left corner and are otherwise
 //! flat, so where the block lands says which way the picture was turned: the eight EXIF values put
@@ -275,24 +276,30 @@ fn a_layer_recorded_before_the_turn_existed_is_developed_as_it_was() {
 }
 
 #[test]
-fn a_region_stays_in_the_sensors_coordinates_and_keeps_the_tag() {
+fn a_region_is_chosen_on_the_upright_picture_and_is_turned_with_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = write(directory.path(), "portrait.dng", &dng(6));
     let harness = Harness::new();
+    // The upright picture is 24 wide and 32 tall; this is 20 by 10 of it.
     let window = json!({ "x": 2, "y": 2, "width": 20, "height": 10 });
     let opened = harness.ok(
         "open_raw_image",
         json!({ "path": path, "requestId": 6, "region": window }),
     );
-    // Not turned: the rectangle is the rectangle, 20 by 10, in the sensor's own orientation.
+    // The document is the rectangle that was chosen, the way up the picture shows.
     assert_eq!(opened["metadata"]["width"], 20);
     assert_eq!(opened["metadata"]["height"], 10);
-    assert!(opened["source"].get("orientationApplied").is_none());
-    assert_eq!(opened["source"]["view"], window);
-    // So the tag is not spent, and goes with the pixels.
+    // The layer records the photosites it is (a quarter turn exchanges the axes: 10 wide and 20
+    // tall on the sensor) and the turn it was given.
+    assert_eq!(
+        opened["source"]["view"],
+        json!({ "x": 2, "y": 2, "width": 10, "height": 20 })
+    );
+    assert_eq!(opened["source"]["orientationApplied"], 6);
+    // So the tag is spent for it as it is for a whole sensor.
     let summary = &opened["metadata"]["sourceMetadata"];
     assert_eq!(summary["orientation"], 6);
-    assert_eq!(summary["orientationApplied"], false);
+    assert_eq!(summary["orientationApplied"], true);
 
     let out = directory.path().join("region.jpg");
     harness.ok(
@@ -303,12 +310,15 @@ fn a_region_stays_in_the_sensors_coordinates_and_keeps_the_tag() {
             "metadataPolicy": "remove_all",
         }),
     );
-    let found = scan::read(&out).unwrap();
-    assert_eq!(
-        exif::summarize(found.exif.as_deref().unwrap())
-            .unwrap()
-            .orientation,
-        6
+    // Nothing is written that could turn it again.
+    let block = scan::read(&out).and_then(|found| found.exif);
+    let orientation = block
+        .as_deref()
+        .and_then(|bytes| exif::summarize(bytes))
+        .map(|summary| summary.orientation);
+    assert!(
+        orientation.is_none_or(|value| value == 1),
+        "{orientation:?}"
     );
 }
 

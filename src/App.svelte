@@ -150,7 +150,7 @@
   import SmartObjectPanel from './lib/components/SmartObjectPanel.svelte';
   import SmartContentsEditor from './lib/components/SmartContentsEditor.svelte';
   import { sourceDimensions, replaceSmartSourceDocument } from './lib/layers/smart';
-  import { inspectSourceOrigin, probeImageSource } from './lib/source/commands';
+  import { inspectSourceOrigin, probeImageSource, rawRegionOnPicture } from './lib/source/commands';
   import PluginManager from './lib/components/PluginManager.svelte';
   import PluginsPanel from './lib/components/PluginsPanel.svelte';
   import PluginFilterDialog from './lib/components/PluginFilterDialog.svelte';
@@ -366,7 +366,7 @@
       (plugin.manifest?.filters?.length ?? 0) > 0
   );
   /** Set when the dialog was opened by "Change Source Region", with the region to start from. */
-  let sourceDialogChange: { initial: Rect } | null = null;
+  let sourceDialogChange: { initial: Rect | null } | null = null;
   $: sourceBacking = sourceBackingOf(layerDocument);
   /** Appended to the "opened" message when an image that opens whole will use much of the budget. */
   let highMemoryNote = '';
@@ -1166,7 +1166,15 @@
         return;
       }
       const admission = await probeImageSource(backing.path);
-      sourceDialogChange = { initial: backing.rect };
+      // A region of a camera RAW is recorded as photosites of the sensor but is chosen on the
+      // picture (cut to what the camera declares and turned upright), so it starts from where
+      // those photosites are on it. One that took in the masked border has no place there, and
+      // the chooser starts from its own default.
+      const initial =
+        backing.kind === 'raw'
+          ? await rawRegionOnPicture(backing.path, backing.rect)
+          : backing.rect;
+      sourceDialogChange = { initial };
       sourceDialog = admission;
     } catch (error) {
       notify(errorMessage(error), 'error');

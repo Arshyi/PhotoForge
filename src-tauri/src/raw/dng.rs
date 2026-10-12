@@ -192,6 +192,120 @@ pub struct SensorSummary {
     pub white_level: f32,
 }
 
+/// The picture of a `width` × `height` sensor with this active area and default crop, in sensor
+/// coordinates; `None` when it is the whole sensor or does not lie on it. One rule for the
+/// decoded sensor and for the header alone (`inspect_geometry`).
+fn picture_of(
+    width: u32,
+    height: u32,
+    active_area: (u32, u32, u32, u32),
+    default_crop: Option<(u32, u32, u32, u32)>,
+) -> Option<Rect> {
+    let (area_x, area_y, area_width, area_height) = active_area;
+    let within = |x: u32, y: u32, w: u32, h: u32| {
+        w > 0
+            && h > 0
+            && u64::from(x) + u64::from(w) <= u64::from(area_width)
+            && u64::from(y) + u64::from(h) <= u64::from(area_height)
+    };
+    let (x, y, w, h) = match default_crop {
+        Some((x, y, w, h)) if within(x, y, w, h) => (area_x + x, area_y + y, w, h),
+        _ => (area_x, area_y, area_width, area_height),
+    };
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    if !rect.is_within(width, height) {
+        return None;
+    }
+    (rect.pixels() != u64::from(width) * u64::from(height)).then_some(rect)
+}
+
+/// Where a DNG's picture lies on its sensor and which way it is turned, read from the header
+/// alone: what a region has to be chosen on, before a sample is decoded.
+///
+/// The picture a development is cut to (`SensorImage::picture_rect`) and turned upright by the
+/// orientation tag is what the interface calls the image. A person chooses a region on *that*,
+/// so the rectangle is in the picture's own coordinates, and `to_sensor` says which photosites it
+/// is. The same geometry maps a sensor rectangle back, for a region saved in sensor coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PictureGeometry {
+    pub sensor_width: u32,
+    pub sensor_height: u32,
+    /// The picture in sensor coordinates: the default crop inside the active area, the active
+    /// area, or the whole sensor.
+    pub rect: Rect,
+    /// The EXIF orientation (1 to 8) that turns the picture upright.
+    pub orientation: u8,
+}
+
+impl PictureGeometry {
+    /// The part of the sensor a whole development is cut to; `None` when it is all of it.
+    pub fn cut(&self) -> Option<Rect> {
+        (self.rect.pixels() != u64::from(self.sensor_width) * u64::from(self.sensor_height))
+            .then_some(self.rect)
+    }
+
+    /// The picture's size once it is turned upright: the size of the image a person sees.
+    pub fn presented_size(&self) -> (u32, u32) {
+        crate::orientation::oriented_size(self.orientation, self.rect.width, self.rect.height)
+    }
+
+    /// A rectangle chosen on the upright picture, as the rectangle of the sensor it is made of.
+    /// `None` when it is empty or does not lie on the picture.
+    pub fn to_sensor(&self, chosen: &Rect) -> Option<Rect> {
+        let (width, height) = self.presented_size();
+        if !chosen.is_within(width, height) {
+            return None;
+        }
+        let last_x = chosen.x + chosen.width - 1;
+        let last_y = chosen.y + chosen.height - 1;
+        let (width, height) = (self.rect.width, self.rect.height);
+        let first =
+            crate::orientation::unplace(self.orientation, width, height, chosen.x, chosen.y);
+        let last = crate::orientation::unplace(self.orientation, width, height, last_x, last_y);
+        Some(Rect {
+            x: self.rect.x + first.0.min(last.0),
+            y: self.rect.y + first.1.min(last.1),
+            width: first.0.abs_diff(last.0) + 1,
+            height: first.1.abs_diff(last.1) + 1,
+        })
+    }
+
+    /// A rectangle of the sensor that lies on the picture, as it is on the upright picture.
+    /// `None` when it is empty or any part of it is outside the picture.
+    pub fn from_sensor(&self, rect: &Rect) -> Option<Rect> {
+        if rect.width == 0
+            || rect.height == 0
+            || rect.x < self.rect.x
+            || rect.y < self.rect.y
+            || rect.right() > self.rect.right()
+            || rect.bottom() > self.rect.bottom()
+        {
+            return None;
+        }
+        let (local_x, local_y) = (rect.x - self.rect.x, rect.y - self.rect.y);
+        let (width, height) = (self.rect.width, self.rect.height);
+        let first = crate::orientation::place(self.orientation, width, height, local_x, local_y);
+        let last = crate::orientation::place(
+            self.orientation,
+            width,
+            height,
+            local_x + rect.width - 1,
+            local_y + rect.height - 1,
+        );
+        Some(Rect {
+            x: first.0.min(last.0),
+            y: first.1.min(last.1),
+            width: first.0.abs_diff(last.0) + 1,
+            height: first.1.abs_diff(last.1) + 1,
+        })
+    }
+}
+
 impl SensorImage {
     /// The part of the sensor that is the picture, in sensor coordinates, when that is not all
     /// of it: the default crop the file declares, inside its active area, or the active area
@@ -202,29 +316,7 @@ impl SensorImage {
     /// part the camera maker's own converter shows. A crop that does not lie inside the active
     /// area is not believed, and the active area is used.
     pub fn picture_rect(&self) -> Option<Rect> {
-        let (area_x, area_y, area_width, area_height) = self.active_area;
-        let within = |x: u32, y: u32, width: u32, height: u32| {
-            width > 0
-                && height > 0
-                && u64::from(x) + u64::from(width) <= u64::from(area_width)
-                && u64::from(y) + u64::from(height) <= u64::from(area_height)
-        };
-        let (x, y, width, height) = match self.default_crop {
-            Some((x, y, width, height)) if within(x, y, width, height) => {
-                (area_x + x, area_y + y, width, height)
-            }
-            _ => (area_x, area_y, area_width, area_height),
-        };
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
-        if !rect.is_within(self.width, self.height) {
-            return None;
-        }
-        (rect.pixels() != u64::from(self.width) * u64::from(self.height)).then_some(rect)
+        picture_of(self.width, self.height, self.active_area, self.default_crop)
     }
 
     pub fn summary(&self) -> SensorSummary {
@@ -310,6 +402,52 @@ pub fn inspect_layout(data: &[u8]) -> Result<SegmentLayout, RawError> {
         bits,
         raw.u32(TAG_COMPRESSION).unwrap_or(COMPRESSION_NONE),
     )
+}
+
+/// Where the picture lies on the sensor and how it is turned, from the header alone: no sample
+/// is decoded. The rules are those of a development (`SensorImage::picture_rect` and the
+/// orientation tag), so a region chosen with this is cut from the same picture a whole open
+/// would show.
+pub fn inspect_geometry(data: &[u8]) -> Result<PictureGeometry, RawError> {
+    let file = tiff::parse(data).map_err(|error| RawError::Malformed(error.to_string()))?;
+    let raw_index = choose_raw_ifd(&file).ok_or_else(|| {
+        RawError::Malformed("the file contains no full-resolution sensor image".into())
+    })?;
+    let raw = &file.ifds[raw_index];
+    let width = raw
+        .u32(TAG_IMAGE_WIDTH)
+        .ok_or_else(|| RawError::Malformed("the sensor image declares no width".into()))?;
+    let height = raw
+        .u32(TAG_IMAGE_LENGTH)
+        .ok_or_else(|| RawError::Malformed("the sensor image declares no height".into()))?;
+    if width == 0
+        || height == 0
+        || u64::from(width) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+        || u64::from(height) > crate::resources::HARD_MAX_SOURCE_DIMENSION
+    {
+        return Err(RawError::InvalidMetadata(
+            "the sensor image has implausible dimensions".into(),
+        ));
+    }
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let rect = picture_of(
+        width,
+        height,
+        read_active_area(raw, width, height),
+        read_default_crop(raw),
+    )
+    .unwrap_or(whole);
+    Ok(PictureGeometry {
+        sensor_width: width,
+        sensor_height: height,
+        rect,
+        orientation: u8::try_from(read_orientation(&file)).unwrap_or(1),
+    })
 }
 
 /// Calls `visit(x, y, width, height, samples)` for every segment of the sensor,
@@ -1835,6 +1973,149 @@ mod tests {
             picture_of(Some([0, 0, 99, 99]), Some([2, 2, 8, 8])),
             rect(2, 2, 8, 8)
         );
+    }
+
+    /// A 24 × 16 sensor with this orientation, active area and default crop, as bytes.
+    fn framed(orientation: u16, area: Option<[u32; 4]>, crop: Option<[u32; 4]>) -> Vec<u8> {
+        let mut builder = DngBuilder::new(24, 16, ramp(24, 16)).orientation(orientation);
+        if let Some(area) = area {
+            builder = builder.entry(TAG_ACTIVE_AREA, 4, longs(&area));
+        }
+        if let Some([x, y, width, height]) = crop {
+            builder = builder
+                .entry(TAG_DEFAULT_CROP_ORIGIN, 4, longs(&[x, y]))
+                .entry(TAG_DEFAULT_CROP_SIZE, 4, longs(&[width, height]));
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn the_geometry_read_from_the_header_is_the_picture_a_development_is_cut_to() {
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 24,
+            height: 16,
+        };
+        for (area, crop) in [
+            (None, None),
+            (Some([2, 4, 14, 22]), None),
+            (Some([2, 4, 14, 22]), Some([3, 1, 10, 8])),
+            (None, Some([2, 2, 20, 12])),
+            // A crop that is not believed, and an active area that is not on the sensor.
+            (Some([2, 4, 14, 22]), Some([10, 0, 12, 6])),
+            (Some([0, 0, 99, 99]), Some([2, 2, 8, 8])),
+        ] {
+            for orientation in [1_u16, 3, 6, 8] {
+                let data = framed(orientation, area, crop);
+                let sensor = decode(&data).unwrap();
+                let geometry = inspect_geometry(&data).unwrap();
+                assert_eq!((geometry.sensor_width, geometry.sensor_height), (24, 16));
+                assert_eq!(geometry.cut(), sensor.picture_rect(), "{area:?} {crop:?}");
+                assert_eq!(geometry.rect, sensor.picture_rect().unwrap_or(whole));
+                assert_eq!(u16::from(geometry.orientation), sensor.orientation);
+                let (width, height) = geometry.presented_size();
+                let swapped = matches!(orientation, 5..=8);
+                assert_eq!(
+                    (width, height),
+                    if swapped {
+                        (geometry.rect.height, geometry.rect.width)
+                    } else {
+                        (geometry.rect.width, geometry.rect.height)
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rectangle_chosen_on_the_upright_picture_is_the_photosites_it_covers() {
+        // The picture is 10 x 8 at (7, 3); for every orientation and every rectangle of the
+        // upright picture, the sensor rectangle is exactly the photosites turned into it.
+        for orientation in 1..=8_u16 {
+            let data = framed(orientation, Some([2, 4, 14, 22]), Some([3, 1, 10, 8]));
+            let geometry = inspect_geometry(&data).unwrap();
+            assert_eq!(geometry.rect, rect(7, 3, 10, 8).unwrap());
+            let (presented_width, presented_height) = geometry.presented_size();
+            for y in 0..presented_height {
+                for x in 0..presented_width {
+                    for height in 1..=presented_height - y {
+                        for width in 1..=presented_width - x {
+                            let chosen = Rect {
+                                x,
+                                y,
+                                width,
+                                height,
+                            };
+                            let sensor = geometry.to_sensor(&chosen).expect("on the picture");
+                            assert_eq!(sensor.pixels(), chosen.pixels());
+                            assert!(
+                                sensor.x >= 7
+                                    && sensor.y >= 3
+                                    && sensor.right() <= 17
+                                    && sensor.bottom() <= 11,
+                                "{orientation} {chosen:?} -> {sensor:?}"
+                            );
+                            for cy in y..y + height {
+                                for cx in x..x + width {
+                                    let (ux, uy) = crate::orientation::unplace(
+                                        orientation as u8,
+                                        10,
+                                        8,
+                                        cx,
+                                        cy,
+                                    );
+                                    let (sx, sy) = (7 + ux, 3 + uy);
+                                    assert!(
+                                        sx >= sensor.x
+                                            && u64::from(sx) < sensor.right()
+                                            && sy >= sensor.y
+                                            && u64::from(sy) < sensor.bottom(),
+                                        "{orientation} {chosen:?} pixel ({cx}, {cy})"
+                                    );
+                                }
+                            }
+                            assert_eq!(geometry.from_sensor(&sensor), Some(chosen));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_rectangle_off_the_picture_is_not_mapped() {
+        let data = framed(6, Some([2, 4, 14, 22]), Some([3, 1, 10, 8]));
+        let geometry = inspect_geometry(&data).unwrap();
+        // Upright, a quarter turn makes the 10 x 8 picture 8 wide and 10 tall.
+        assert_eq!(geometry.presented_size(), (8, 10));
+        let on = |x, y, width, height| {
+            geometry.to_sensor(&Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert!(on(0, 0, 8, 10).is_some());
+        assert!(on(0, 0, 9, 10).is_none());
+        assert!(on(0, 0, 8, 11).is_none());
+        assert!(on(7, 9, 1, 1).is_some());
+        assert!(on(8, 0, 1, 1).is_none());
+        assert!(on(0, 0, 0, 5).is_none());
+        // And a sensor rectangle that is not wholly on the picture has no place on it.
+        let from = |x, y, width, height| {
+            geometry.from_sensor(&Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert!(from(7, 3, 10, 8).is_some());
+        assert!(from(6, 3, 10, 8).is_none());
+        assert!(from(7, 3, 11, 8).is_none());
+        assert!(from(7, 3, 0, 8).is_none());
     }
 
     #[test]

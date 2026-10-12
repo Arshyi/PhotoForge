@@ -1,5 +1,6 @@
 //! A DNG developed whole is cut to the picture the camera says it holds: the default crop inside
-//! its active area, without the masked border around the image. A region is not.
+//! its active area, without the masked border around the image. A region is chosen on that
+//! picture, and is made of the photosites it covers (`raw_region_picture.rs`).
 //!
 //! The synthetic sensor is 32 × 24 with the active area (top 2, left 4, bottom 22, right 30) and a
 //! default crop of 20 × 12 at (2, 2) inside it, so the picture is the rectangle (6, 4, 20, 12) of
@@ -208,20 +209,38 @@ fn a_layer_recorded_before_the_cut_existed_is_the_whole_sensor_as_it_was() {
 }
 
 #[test]
-fn a_region_is_in_the_sensors_coordinates_and_is_not_cut() {
+fn a_region_is_chosen_on_the_picture_and_recorded_as_the_photosites_it_is() {
     let directory = tempfile::tempdir().unwrap();
     let path = write(directory.path(), "frame.dng", &dng(1, true));
     let harness = Harness::new();
-    // A rectangle that takes in the masked border, as the person drew it on the sensor.
-    let window = json!({ "x": 0, "y": 0, "width": 12, "height": 10 });
+    // The top-left corner of the picture, which is (6, 4) on the sensor.
     let opened = harness.ok(
         "open_raw_image",
-        json!({ "path": path, "requestId": 5, "region": window }),
+        json!({
+            "path": path,
+            "requestId": 5,
+            "region": { "x": 0, "y": 0, "width": 12, "height": 10 },
+        }),
     );
     assert_eq!(opened["metadata"]["width"], 12);
     assert_eq!(opened["metadata"]["height"], 10);
+    // The region is the cut, so the layer records no crop of its own, only where it is.
     assert!(opened["source"].get("crop").is_none());
-    assert_eq!(opened["source"]["view"], window);
+    assert_eq!(
+        opened["source"]["view"],
+        json!({ "x": 6, "y": 4, "width": 12, "height": 10 })
+    );
+
+    // The picture is 20 x 12, so this rectangle (as chosen on a sensor 32 wide) is not on it.
+    let outside = harness.call(
+        "open_raw_image",
+        json!({
+            "path": path,
+            "requestId": 6,
+            "region": { "x": 10, "y": 0, "width": 12, "height": 10 },
+        }),
+    );
+    assert!(outside.is_err(), "{outside:?}");
 }
 
 #[test]

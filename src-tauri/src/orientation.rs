@@ -53,6 +53,22 @@ pub const fn place(orientation: u8, width: u32, height: u32, x: u32, y: u32) -> 
     }
 }
 
+/// Where, in a `width` × `height` picture stored sideways, the pixel that lands at (`x`, `y`) of
+/// the upright picture came from: the inverse of [`place`]. `x` is below the upright picture's
+/// width and `y` below its height (see [`oriented_size`]).
+pub const fn unplace(orientation: u8, width: u32, height: u32, x: u32, y: u32) -> (u32, u32) {
+    match orientation {
+        2 => (width - 1 - x, y),
+        3 => (width - 1 - x, height - 1 - y),
+        4 => (x, height - 1 - y),
+        5 => (y, x),
+        6 => (y, height - 1 - x),
+        7 => (width - 1 - y, height - 1 - x),
+        8 => (width - 1 - y, x),
+        _ => (x, y),
+    }
+}
+
 /// Turns row-major `pixels` of a `width` × `height` picture upright. The mirrors and the half
 /// turn are made in place; the four that exchange the axes need a second buffer (the first is
 /// dropped as soon as it has been read), so a caller that must stay inside a memory budget
@@ -179,6 +195,30 @@ mod tests {
             vec![1, 2, 3, 4]
         );
         assert!(turn(Vec::<u8>::new(), 6, 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unplace_is_the_inverse_of_place_for_every_orientation_and_shape() {
+        for orientation in 1..=8_u8 {
+            for (width, height) in [(1_u32, 1_u32), (1, 5), (5, 1), (3, 2), (2, 3), (7, 4)] {
+                let (turned_width, turned_height) = oriented_size(orientation, width, height);
+                let mut seen = vec![false; (width * height) as usize];
+                for y in 0..height {
+                    for x in 0..width {
+                        let (tx, ty) = place(orientation, width, height, x, y);
+                        assert!(tx < turned_width && ty < turned_height);
+                        assert_eq!(
+                            unplace(orientation, width, height, tx, ty),
+                            (x, y),
+                            "orientation {orientation} {width}x{height} ({x}, {y})"
+                        );
+                        seen[(ty * turned_width + tx) as usize] = true;
+                    }
+                }
+                // Every pixel of the upright picture is somebody's destination.
+                assert!(seen.iter().all(|hit| *hit));
+            }
+        }
     }
 
     #[test]

@@ -298,9 +298,15 @@ pub async fn develop_raw_layer(
             }
             // A region layer is re-developed as the same rectangle of the sensor,
             // at full resolution: it was admitted because that fits, and a
-            // decimated preview would not line up with the rectangle.
-            Some(rect) => crate::raw::develop::develop_region_described(&bytes, rect, &for_worker)
-                .map(|(developed, summary)| (summary, developed)),
+            // decimated preview would not line up with the rectangle. It is turned the way it
+            // was when it was made; one saved before regions were turned records no turn and is
+            // developed as it was.
+            Some(rect) => {
+                let (developed, summary) =
+                    crate::raw::develop::develop_region_described(&bytes, rect, &for_worker)?;
+                let developed = developed.turned_upright(applied)?;
+                Ok((summary, developed))
+            }
         }
     })
     .await
@@ -430,9 +436,9 @@ pub async fn export_raw_layer_png16(
                     .and_then(|developed| developed.turned_upright(applied))
                     .map_err(map)?
             }
-            Some(rect) => {
-                crate::raw::develop::develop_region(&bytes, rect, &parameters).map_err(map)?
-            }
+            Some(rect) => crate::raw::develop::develop_region(&bytes, rect, &parameters)
+                .and_then(|developed| developed.turned_upright(applied))
+                .map_err(map)?,
         };
         let dimensions = (developed.image.width(), developed.image.height());
         let saved =
@@ -451,6 +457,27 @@ pub async fn export_raw_layer_png16(
     })
 }
 
+/// Where a region of the sensor lies on the picture a person chooses a region on (cut to the
+/// camera's picture and turned upright), or `None` when any part of it is outside that picture
+/// or the file is not a camera RAW.
+///
+/// A region layer records its rectangle in sensor coordinates; the chooser works on the picture.
+/// "Change Source Region" asks this so it can start from where the layer is.
+#[tauri::command]
+pub async fn raw_region_on_picture(
+    path: String,
+    view: crate::source::Rect,
+) -> Result<Option<crate::source::Rect>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let probed = crate::source::probe::probe_path(Path::new(&path))?;
+        Ok(probed
+            .picture
+            .and_then(|geometry| geometry.from_sensor(&view)))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("the RAW worker stopped".into()))?
+}
+
 /// Registers every RAW command on a Tauri builder, so integration tests can
 /// drive them through the real IPC boundary.
 #[doc(hidden)]
@@ -461,7 +488,8 @@ pub fn register_raw_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> t
         develop_raw_layer,
         verify_raw_source,
         relink_raw_source,
-        export_raw_layer_png16
+        export_raw_layer_png16,
+        raw_region_on_picture
     ])
 }
 

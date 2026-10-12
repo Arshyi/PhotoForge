@@ -540,8 +540,9 @@ pub struct RawLayerSource {
     ///
     /// A layer opened whole is turned upright when it is developed, and re-developing it turns it
     /// the same way, so its size, its masks and its transform keep meaning what they meant. A
-    /// layer saved before this field existed has 1, and re-developing it is unchanged. A region
-    /// is never turned: its rectangle is in sensor coordinates.
+    /// region is turned the same way (its `view` is still in sensor coordinates; the turn is of
+    /// those photosites once developed). A layer saved before this field existed has 1, and
+    /// re-developing it is unchanged.
     #[serde(default = "no_orientation", skip_serializing_if = "is_no_orientation")]
     pub orientation_applied: u8,
     /// The part of the sensor the raster is cut to, in sensor coordinates: the default crop the
@@ -549,8 +550,9 @@ pub struct RawLayerSource {
     /// the masked border around the image). Re-developing cuts the same rectangle, so the raster
     /// keeps the size its masks and transform were made for. A layer saved before this field
     /// existed has none, and is the whole sensor as it always was. It is never present with a
-    /// `view`: a region is in sensor coordinates and is not cut. The record of a turn
-    /// (`orientation_applied`) is applied after it.
+    /// `view`: a region is a rectangle of the sensor (chosen on the picture, and recorded as the
+    /// photosites it is), so it is already the cut. The record of a turn (`orientation_applied`)
+    /// is applied after it, for a region too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<crate::source::Rect>,
 }
@@ -569,11 +571,6 @@ impl RawLayerSource {
         if !crate::orientation::is_valid(self.orientation_applied) {
             return Err(RawError::InvalidMetadata(
                 "the applied orientation must be between 1 and 8".into(),
-            ));
-        }
-        if self.view.is_some() && self.orientation_applied != 1 {
-            return Err(RawError::InvalidMetadata(
-                "a region of a sensor is in the sensor's own orientation and is not turned".into(),
             ));
         }
         if let Some(crop) = &self.crop {
@@ -890,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_must_be_a_real_orientation_and_a_region_is_never_turned() {
+    fn a_turn_must_be_a_real_orientation_and_a_region_may_be_turned_like_the_whole() {
         assert!(turned_source(6, None).validate().is_ok());
         for bad in [0_u8, 9, 200] {
             assert!(turned_source(bad, None).validate().is_err(), "{bad}");
@@ -902,8 +899,9 @@ mod tests {
             height: 16,
         };
         assert!(turned_source(1, Some(region)).validate().is_ok());
-        let error = turned_source(6, Some(region)).validate().unwrap_err();
-        assert!(error.to_string().contains("not turned"), "{error}");
+        // A region is chosen on the upright picture, so it carries the turn it was given.
+        assert!(turned_source(6, Some(region)).validate().is_ok());
+        assert!(turned_source(9, Some(region)).validate().is_err());
     }
 
     #[test]
