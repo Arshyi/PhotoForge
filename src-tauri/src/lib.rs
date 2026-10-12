@@ -92,6 +92,8 @@ pub fn register_raw_flow_commands<R: tauri::Runtime>(
         relink_raw_source,
         export_raw_layer_png16,
         open_raw_image,
+        export_image,
+        export_layer_composite,
         probe_image_source,
         source_preview_image,
         cancel_source_preview

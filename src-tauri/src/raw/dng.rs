@@ -1064,6 +1064,10 @@ fn read_packed(row: &[u8], index: usize, bits: u8) -> u16 {
 pub mod fixtures {
     use super::*;
 
+    /// The Exif and GPS directory pointers of the first directory.
+    const EXIF_POINTER: u16 = 34665;
+    const GPS_POINTER: u16 = 34853;
+
     pub struct DngBuilder {
         pub width: u32,
         pub height: u32,
@@ -1082,6 +1086,49 @@ pub mod fixtures {
         pub iso: Option<u32>,
         pub photometric: u32,
         pub tile_size: Option<(u32, u32)>,
+        /// Extra entries of the first directory (tag, field type, bytes): XMP, IPTC, the
+        /// copyright, anything the sensor reader does not use.
+        pub extra_entries: Vec<(u16, u16, Vec<u8>)>,
+        /// Entries of an Exif directory written after the pixels; none means no directory.
+        pub exif_entries: Vec<(u16, u16, Vec<u8>)>,
+        /// Entries of a GPS directory written after the pixels; none means no directory.
+        pub gps_entries: Vec<(u16, u16, Vec<u8>)>,
+    }
+
+    /// Bytes of one directory whose first byte will be at `base`, with the values it points at
+    /// laid down after it. Entries are written in tag order, as TIFF requires.
+    fn trailing_directory(entries: &[(u16, u16, Vec<u8>)], base: usize) -> Vec<u8> {
+        let mut sorted: Vec<&(u16, u16, Vec<u8>)> = entries.iter().collect();
+        sorted.sort_by_key(|(tag, _, _)| *tag);
+        let directory_len = 2 + sorted.len() * 12 + 4;
+        let mut directory = Vec::new();
+        directory.extend((sorted.len() as u16).to_le_bytes());
+        let mut values: Vec<u8> = Vec::new();
+        for (tag, kind, payload) in sorted {
+            let width = match kind {
+                3 | 8 => 2,
+                4 | 9 | 11 | 13 => 4,
+                5 | 10 | 12 => 8,
+                _ => 1,
+            };
+            directory.extend(tag.to_le_bytes());
+            directory.extend(kind.to_le_bytes());
+            directory.extend(((payload.len() / width) as u32).to_le_bytes());
+            if payload.len() <= 4 {
+                let mut inline = payload.clone();
+                inline.resize(4, 0);
+                directory.extend(inline);
+            } else {
+                directory.extend(((base + directory_len + values.len()) as u32).to_le_bytes());
+                values.extend(payload.iter().copied());
+                if values.len() % 2 == 1 {
+                    values.push(0);
+                }
+            }
+        }
+        directory.extend(0u32.to_le_bytes());
+        directory.extend(values);
+        directory
     }
 
     impl DngBuilder {
@@ -1104,7 +1151,28 @@ pub mod fixtures {
                 iso: None,
                 photometric: PHOTOMETRIC_CFA,
                 tile_size: None,
+                extra_entries: Vec::new(),
+                exif_entries: Vec::new(),
+                gps_entries: Vec::new(),
             }
+        }
+
+        /// Adds an entry to the first directory.
+        pub fn entry(mut self, tag: u16, field_type: u16, bytes: Vec<u8>) -> Self {
+            self.extra_entries.push((tag, field_type, bytes));
+            self
+        }
+
+        /// Adds an entry to the Exif directory (which is written when it has any).
+        pub fn exif_entry(mut self, tag: u16, field_type: u16, bytes: Vec<u8>) -> Self {
+            self.exif_entries.push((tag, field_type, bytes));
+            self
+        }
+
+        /// Adds an entry to the GPS directory (which is written when it has any).
+        pub fn gps_entry(mut self, tag: u16, field_type: u16, bytes: Vec<u8>) -> Self {
+            self.gps_entries.push((tag, field_type, bytes));
+            self
         }
 
         pub fn bits(mut self, bits: u8) -> Self {
@@ -1247,6 +1315,15 @@ pub mod fixtures {
                 ));
             }
 
+            entries.extend(self.extra_entries.iter().cloned());
+            // Placeholders: the offsets are known once the first directory's size is.
+            if !self.exif_entries.is_empty() {
+                push_long(&mut entries, EXIF_POINTER, 0);
+            }
+            if !self.gps_entries.is_empty() {
+                push_long(&mut entries, GPS_POINTER, 0);
+            }
+
             let mut tile_offsets = Vec::new();
             let pixels = if let Some((tw, th)) = self.tile_size {
                 assert_eq!(
@@ -1310,6 +1387,19 @@ pub mod fixtures {
                 }
             }
             let pixel_offset = overflow_base + overflow_size;
+            // The Exif and GPS directories follow the pixels.
+            let exif_at = pixel_offset + pixels.len();
+            let exif_bytes = if self.exif_entries.is_empty() {
+                Vec::new()
+            } else {
+                trailing_directory(&self.exif_entries, exif_at)
+            };
+            let gps_at = exif_at + exif_bytes.len();
+            let gps_bytes = if self.gps_entries.is_empty() {
+                Vec::new()
+            } else {
+                trailing_directory(&self.gps_entries, gps_at)
+            };
 
             for (tag, field_type, payload) in &entries {
                 directory.extend(tag.to_le_bytes());
@@ -1324,6 +1414,10 @@ pub mod fixtures {
                 directory.extend(((payload.len() / width) as u32).to_le_bytes());
                 let payload = if *tag == TAG_STRIP_OFFSETS {
                     (pixel_offset as u32).to_le_bytes().to_vec()
+                } else if *tag == EXIF_POINTER && !self.exif_entries.is_empty() {
+                    (exif_at as u32).to_le_bytes().to_vec()
+                } else if *tag == GPS_POINTER && !self.gps_entries.is_empty() {
+                    (gps_at as u32).to_le_bytes().to_vec()
                 } else if *tag == TAG_TILE_OFFSETS {
                     tile_offsets
                         .iter()
@@ -1347,6 +1441,8 @@ pub mod fixtures {
             out.extend(directory);
             out.extend(overflow);
             out.extend(pixels);
+            out.extend(exif_bytes);
+            out.extend(gps_bytes);
             out
         }
     }

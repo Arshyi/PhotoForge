@@ -134,9 +134,10 @@ pub fn attach_source_metadata(
     extra.push((
         ENTRY_SOURCE,
         format!(
-            "orientation={}\napplied={}\n",
+            "orientation={}\napplied={}\nleft_behind={}\n",
             metadata.source_orientation,
-            u8::from(metadata.orientation_applied)
+            u8::from(metadata.orientation_applied),
+            metadata.left_behind
         )
         .into_bytes(),
     ));
@@ -232,6 +233,14 @@ fn read_source_metadata(entries: &[ReadEntry<'_>]) -> Option<SourceMetadata> {
                 }
                 Some(("applied", value)) => {
                     metadata.orientation_applied = value.trim() == "1";
+                }
+                Some(("left_behind", value)) => {
+                    // Only the bits this build knows; a later build's are ignored, not guessed.
+                    let known = crate::metadata::left_behind::MAKER_NOTE
+                        | crate::metadata::left_behind::OVERSIZE;
+                    if let Ok(value) = value.trim().parse::<u8>() {
+                        metadata.left_behind = value & known;
+                    }
                 }
                 _ => {}
             }
@@ -1324,6 +1333,7 @@ mod tests {
             iptc: Some(std::sync::Arc::new(vec![0x1C, 2, 25, 0, 1, b'a'])),
             source_orientation: 6,
             orientation_applied: true,
+            left_behind: crate::metadata::left_behind::MAKER_NOTE,
         };
         let with = attach_source_metadata(plain.clone(), &source).unwrap();
         let loaded = decode_project(&with).unwrap();

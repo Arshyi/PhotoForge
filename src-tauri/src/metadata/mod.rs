@@ -23,10 +23,22 @@ pub mod container;
 pub mod exif;
 pub mod iptc;
 pub mod scan;
+pub mod tiff;
 pub mod xmp;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Bits of [`SourceMetadata::left_behind`]: parts of a TIFF-structured source's EXIF that were
+/// not copied out of the file, because they cannot be moved without breaking them or are more
+/// than this code carries.
+pub mod left_behind {
+    /// The vendor's maker note, or a DNG's private data (where a converter keeps it). Its
+    /// offsets are into the file it came from, so it cannot be carried as a block of its own.
+    pub const MAKER_NOTE: u8 = 1;
+    /// A field larger than one is carried, or one that did not fit the block's budget.
+    pub const OVERSIZE: u8 = 2;
+}
 
 /// What an export does with the source's metadata.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +62,9 @@ pub struct SourceMetadata {
     pub source_orientation: u8,
     /// The pixels were turned upright when the file was opened, so the orientation is spent.
     pub orientation_applied: bool,
+    /// What the source held that is not in `exif` (see [`left_behind`]); 0 for a source whose
+    /// EXIF came whole.
+    pub left_behind: u8,
 }
 
 impl Default for SourceMetadata {
@@ -60,6 +75,7 @@ impl Default for SourceMetadata {
             iptc: None,
             source_orientation: 1,
             orientation_applied: false,
+            left_behind: 0,
         }
     }
 }
@@ -94,6 +110,7 @@ impl SourceMetadata {
             iptc: keep(iptc, iptc::MAX_IPTC_BYTES),
             source_orientation,
             orientation_applied: false,
+            left_behind: 0,
         }
     }
 }
@@ -144,7 +161,7 @@ impl SourceMetadata {
             lens: exif.lens,
             taken: exif.taken,
             has_location: exif.has_location || xmp_place || iptc_place,
-            has_maker_note: exif.has_maker_note,
+            has_maker_note: exif.has_maker_note || self.left_behind & left_behind::MAKER_NOTE != 0,
             has_identifiers: exif.has_identifiers,
             has_thumbnail: exif.has_thumbnail,
             orientation: self.source_orientation,
@@ -326,6 +343,18 @@ pub fn prepare(
         }
     } else if carry_orientation {
         prepared.exif = Some(exif::orientation_only(source.source_orientation));
+    }
+
+    // What a TIFF-structured source (a DNG) held that could not be moved out of it. This is
+    // said under every policy that writes EXIF: the person is told it is not in the file, not
+    // left to find that out.
+    if source.left_behind & left_behind::MAKER_NOTE != 0 {
+        report.removed(
+            "the camera maker's private notes (a DNG keeps them where they cannot be moved out of it)",
+        );
+    }
+    if source.left_behind & left_behind::OVERSIZE != 0 {
+        report.removed("EXIF fields too large to carry");
     }
 
     if let Some(packet) = &source.xmp {
