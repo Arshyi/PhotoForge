@@ -250,6 +250,12 @@
     type ExrExportReport,
     type ExrImportReport
   } from './lib/layers/exr';
+  import {
+    importTiffDocument,
+    isTiffPath,
+    tiffImportSentence,
+    type TiffImportReport
+  } from './lib/layers/tiff';
   import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
   import {
     describeSource,
@@ -446,7 +452,8 @@
       | SvgExportReport
       | SvgImportReport
       | ExrImportReport
-      | ExrExportReport;
+      | ExrExportReport
+      | TiffImportReport;
     fileName: string;
     mode: 'import' | 'export';
   } | null = null;
@@ -740,7 +747,8 @@
         directory: false,
         title: 'Open a photo',
         filters: [
-          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
+          { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'tif', 'tiff', 'dng'] },
+          { name: 'TIFF (opened as a document)', extensions: ['tif', 'tiff'] },
           { name: 'Photoshop (PSD, PSB)', extensions: ['psd', 'psb'] },
           { name: 'SVG (opened as shape layers)', extensions: ['svg'] },
           { name: 'OpenEXR (scene-linear, opened as layers)', extensions: ['exr'] },
@@ -1187,6 +1195,12 @@
     // An OpenEXR file likewise: scene-linear float pixels, read in their own convention.
     if (isExrPath(path)) {
       await importExr(path);
+      return;
+    }
+    // A TIFF likewise: its own reader (strips, tiles, 16-bit and floating point, profiles), a
+    // report of what the file held that has no place here, and its metadata kept.
+    if (isTiffPath(path)) {
+      await importTiff(path);
       return;
     }
     // Before anything about the open document is touched, so that choosing Cancel
@@ -3005,6 +3019,32 @@
   }
 
   /**
+   * Opens a TIFF file as a new, unsaved document: 8-bit and sRGB stays 8-bit, deeper or
+   * wider-gamut pictures become high-precision documents converted through their profile.
+   */
+  async function importTiff(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importTiffDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the TIFF.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(tiffImportSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /**
    * Puts the active layer (or, merged, everything visible with the document's edits) on the system
    * clipboard as a picture, limited to the selection if there is one. The document is not changed.
    */
@@ -4248,6 +4288,7 @@
           { name: 'PNG image', extensions: ['png'] },
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
           { name: 'WebP image', extensions: ['webp'] },
+          { name: 'TIFF image (8 or 16 bits, profile and metadata)', extensions: ['tif', 'tiff'] },
           { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] },
           { name: 'SVG (shape layers)', extensions: ['svg'] },
           { name: 'OpenEXR (scene-linear float, composited)', extensions: ['exr'] }

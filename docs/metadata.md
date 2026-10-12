@@ -41,6 +41,7 @@ Under every policy, because they are about being correct and not about privacy:
 | PNG | `eXIf` | `iTXt` "XML:com.adobe.xmp" | no standard place; the report says so |
 | WebP | `EXIF` | `XMP ` | no place; the report says so |
 | PSD / PSB | image resource 1058 | 1060 | 1028 |
+| TIFF | the descriptive tags of the first directory, and the Exif and GPS directories (pointers 34665, 34853) | tag 700 | tag 33723 |
 | OpenEXR | no place; the report says so | no place | no place |
 | `.photoforge` project | entries beside the layers; older versions ignore them | | |
 
@@ -96,7 +97,14 @@ structure and the DNG-specific tags (colour matrices, CFA pattern, linearisation
 DNG's own camera serial number tag, ...). The serial number in the Exif directory *is* carried,
 and removed under the private policy as it is for any file.
 
-**The orientation is read, not applied.** Development leaves the sensor's own way up, so a
+A TIFF *picture* (see [tiff.md](tiff.md)) goes through the same code, from its directories read
+by seeking: its EXIF, XMP and IPTC are built exactly as a DNG's are, and the orientation is
+applied to its pixels (a TIFF is opened upright), so the tag is spent. Written, the same
+structure is taken apart the other way: the cleaned block is split into the directories a TIFF
+keeps them in, every value converted to the file's little-endian order, and the maker note is
+not written (its offsets are into the block it came from; the report says so).
+
+**The orientation of a DNG is read, not applied.** Development leaves the sensor's own way up, so a
 portrait DNG still opens on its side, as a region of a very large JPEG does; the tag travels with
 the pixels (and under *Remove everything* too, for the same reason), so the exported file comes
 out upright in other programs. Turning the developed picture upright is not done.
@@ -154,6 +162,6 @@ A DNG's maker note is not carried at all (above).
 
 ## Not done
 
-TIFF files as pictures (15.6b); turning a developed DNG upright; XMP rewriting (so a packet that
+Turning a developed DNG upright; XMP rewriting (so a packet that
 names a place is dropped whole, including its title and keywords); extended XMP; PNG/WebP IPTC
 in a legacy text chunk; writing a resolution; editing metadata in the interface.

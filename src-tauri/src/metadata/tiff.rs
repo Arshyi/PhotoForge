@@ -1,5 +1,4 @@
-//! What a picture that is itself a TIFF says about itself: a DNG today, a TIFF picture when one is
-//! opened.
+//! What a picture that is itself a TIFF says about itself: a DNG, or a TIFF picture.
 //!
 //! JPEG, PNG and WebP carry an EXIF block, a small TIFF of its own, which [`super::exif`] walks
 //! and cleans in place. A TIFF is the structure EXIF was copied from, so there is no block to cut
@@ -23,6 +22,9 @@
 //!
 //! And silently: the picture's own structure and the DNG-specific tags (they describe the sensor,
 //! not the photograph, and mean nothing to the file the picture is exported to).
+//!
+//! The same structure read the other way, [`split`], is how a TIFF is *written* with EXIF: the
+//! block a policy has cleaned is taken apart into the directories a TIFF holds them in.
 //!
 //! The file is hostile input like any other. Every offset is checked against the buffer by the
 //! reader this borrows from [`super::exif`], directories are visited once, and nothing is
@@ -65,6 +67,55 @@ fn width_of(kind: u16) -> u64 {
     }
 }
 
+/// Whether a tag of IFD0 describes the photograph and is carried.
+pub fn keeps_ifd0(tag: u16) -> bool {
+    DESCRIPTIVE.contains(&tag)
+}
+
+/// Whether a tag of the Exif directory is carried: all but the maker note and the pointers,
+/// which are rebuilt.
+pub fn keeps_exif(tag: u16) -> bool {
+    !matches!(
+        tag,
+        TAG_MAKER_NOTE | TAG_INTEROP_IFD | TAG_EXIF_IFD | TAG_GPS_IFD
+    )
+}
+
+/// A field of a directory as it was found: its type and count, and its value when it could be
+/// read (a value that lies outside the file, or is larger than a field may be, has none).
+#[derive(Debug, Clone)]
+pub struct RawField {
+    pub tag: u16,
+    pub kind: u16,
+    pub count: u32,
+    pub value: Option<Vec<u8>>,
+}
+
+impl RawField {
+    /// What the field says its value takes, in bytes.
+    pub fn declared(&self) -> u64 {
+        width_of(self.kind).saturating_mul(u64::from(self.count))
+    }
+}
+
+/// Everything a reader of a TIFF-structured source found that this module may carry.
+#[derive(Debug, Clone, Default)]
+pub struct Parts {
+    /// The file's byte order, and so that of every value in the fields.
+    pub big_endian: bool,
+    pub ifd0: Vec<RawField>,
+    /// `None` when IFD0 names no such directory, or one that could not be read.
+    pub exif: Option<Vec<RawField>>,
+    pub interop: Option<Vec<RawField>>,
+    pub gps: Option<Vec<RawField>>,
+    /// The Exif directory has a maker note, or IFD0 has a DNG's private data.
+    pub maker_note: bool,
+    pub xmp: Option<Vec<u8>>,
+    /// The IPTC-NAA tag, and the Photoshop resources that may hold the same stream.
+    pub iptc_naa: Option<Vec<u8>>,
+    pub photoshop: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone)]
 struct Field {
     tag: u16,
@@ -87,23 +138,18 @@ struct Budget {
     oversize: bool,
 }
 
-/// The fields of `ifd` that `wanted` names, as they are in the file.
-fn copy_fields(
-    file: &[u8],
-    ifd: &Ifd,
-    wanted: impl Fn(u16) -> bool,
-    budget: &mut Budget,
-) -> Vec<Field> {
+/// The fields of `found` that `wanted` names, as they are in the file.
+fn select(found: &[RawField], wanted: impl Fn(u16) -> bool, budget: &mut Budget) -> Vec<Field> {
     let mut out: Vec<Field> = Vec::new();
-    for entry in &ifd.entries {
-        if !wanted(entry.tag) || !KNOWN_KINDS.contains(&entry.kind) {
+    for field in found {
+        if !wanted(field.tag) || !KNOWN_KINDS.contains(&field.kind) {
             continue;
         }
         // The first of a repeated tag stands, as it does for the reader of the directory.
-        if out.iter().any(|field| field.tag == entry.tag) {
+        if out.iter().any(|kept| kept.tag == field.tag) {
             continue;
         }
-        let declared = width_of(entry.kind).saturating_mul(u64::from(entry.count));
+        let declared = field.declared();
         if declared == 0 {
             continue;
         }
@@ -118,33 +164,26 @@ fn copy_fields(
             continue;
         }
         // The value lies outside the file: there is nothing to copy.
-        let Some((at, len)) = entry.data else {
+        let Some(value) = &field.value else {
             continue;
         };
-        let Some(value) = at.checked_add(len).and_then(|end| file.get(at..end)) else {
+        if value.len() as u64 != declared {
             continue;
-        };
+        }
         budget.left -= cost as usize;
         out.push(Field {
-            tag: entry.tag,
-            kind: entry.kind,
-            count: entry.count,
-            value: value.to_vec(),
+            tag: field.tag,
+            kind: field.kind,
+            count: field.count,
+            value: value.clone(),
         });
     }
     out
 }
 
-/// The follows-a-pointer step: `None` when IFD0 names no directory there, or one that cannot be
-/// read. A damaged place costs the place, not the rest of the block.
-fn follow(file: &[u8], order: Order, from: &Ifd, tag: u16) -> Option<Ifd> {
-    let at = pointer(file, order, from, tag)?;
-    read_ifd(file, order, at)
-}
-
 /// Builds the block, and says what was left out of it. `None` for the block when nothing
 /// descriptive was found.
-fn build_exif(file: &[u8], order: Order, ifd0: &Ifd) -> (Option<Vec<u8>>, u8) {
+fn build_exif(parts: &Parts) -> (Option<Vec<u8>>, u8) {
     let mut left = 0_u8;
     let mut budget = Budget {
         left: MAX_BLOCK_BYTES,
@@ -154,46 +193,30 @@ fn build_exif(file: &[u8], order: Order, ifd0: &Ifd) -> (Option<Vec<u8>>, u8) {
     budget.left = budget.left.saturating_sub(8 + 3 * 12);
 
     let mut directories = vec![Directory {
-        fields: copy_fields(file, ifd0, |tag| DESCRIPTIVE.contains(&tag), &mut budget),
+        fields: select(&parts.ifd0, keeps_ifd0, &mut budget),
         links: Vec::new(),
     }];
 
-    // The Exif directory: everything but the maker note and the pointers, which are rebuilt.
-    if let Some(exif_ifd) = follow(file, order, ifd0, TAG_EXIF_IFD) {
-        if exif_ifd.find(TAG_MAKER_NOTE).is_some() {
-            left |= left_behind::MAKER_NOTE;
-        }
-        let fields = copy_fields(
-            file,
-            &exif_ifd,
-            |tag| {
-                !matches!(
-                    tag,
-                    TAG_MAKER_NOTE | TAG_INTEROP_IFD | TAG_EXIF_IFD | TAG_GPS_IFD
-                )
-            },
-            &mut budget,
-        );
-        let mut directory = Directory {
-            fields,
-            links: Vec::new(),
-        };
-        let mut interop = None;
-        if let Some(interop_ifd) = follow(file, order, &exif_ifd, TAG_INTEROP_IFD) {
-            let fields = copy_fields(file, &interop_ifd, |_| true, &mut budget);
-            if !fields.is_empty() {
-                interop = Some(Directory {
-                    fields,
-                    links: Vec::new(),
-                });
-            }
-        }
-        let exif_index = directories.len();
-        if !directory.fields.is_empty() || interop.is_some() {
+    if let Some(exif_fields) = &parts.exif {
+        let fields = select(exif_fields, keeps_exif, &mut budget);
+        let interop = parts
+            .interop
+            .as_ref()
+            .map(|found| select(found, |_| true, &mut budget))
+            .filter(|fields| !fields.is_empty());
+        if !fields.is_empty() || interop.is_some() {
+            let exif_index = directories.len();
+            let mut directory = Directory {
+                fields,
+                links: Vec::new(),
+            };
             directories.push(Directory::default());
             if let Some(interop) = interop {
                 let interop_index = directories.len();
-                directories.push(interop);
+                directories.push(Directory {
+                    fields: interop,
+                    links: Vec::new(),
+                });
                 directory.links.push((TAG_INTEROP_IFD, interop_index));
             }
             directories[exif_index] = directory;
@@ -201,8 +224,8 @@ fn build_exif(file: &[u8], order: Order, ifd0: &Ifd) -> (Option<Vec<u8>>, u8) {
         }
     }
 
-    if let Some(gps_ifd) = follow(file, order, ifd0, TAG_GPS_IFD) {
-        let fields = copy_fields(file, &gps_ifd, |_| true, &mut budget);
+    if let Some(gps_fields) = &parts.gps {
+        let fields = select(gps_fields, |_| true, &mut budget);
         if !fields.is_empty() {
             let index = directories.len();
             directories.push(Directory {
@@ -213,7 +236,7 @@ fn build_exif(file: &[u8], order: Order, ifd0: &Ifd) -> (Option<Vec<u8>>, u8) {
         }
     }
 
-    if ifd0.find(TAG_DNG_PRIVATE_DATA).is_some() {
+    if parts.maker_note {
         left |= left_behind::MAKER_NOTE;
     }
     if budget.oversize {
@@ -226,6 +249,11 @@ fn build_exif(file: &[u8], order: Order, ifd0: &Ifd) -> (Option<Vec<u8>>, u8) {
     if nothing {
         return (None, left);
     }
+    let order = if parts.big_endian {
+        Order::Big
+    } else {
+        Order::Little
+    };
     let block = serialise(order, &directories).filter(|block| {
         // What was made must itself be a block the cleaner will walk, or it is not offered.
         block.len() <= MAX_EXIF_BYTES && exif::summarize(block).is_some()
@@ -323,7 +351,27 @@ fn serialise(order: Order, directories: &[Directory]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The value of an IFD0 tag of one of these types, as bytes.
+/// Builds the metadata of a source from what a reader of its TIFF structure found.
+pub fn assemble(parts: Parts) -> SourceMetadata {
+    // A packet written as ASCII carries its terminator, and some writers pad with zeros.
+    let xmp = parts.xmp.clone().map(|mut bytes| {
+        while bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        bytes
+    });
+    // The newsroom tag first, then the Photoshop resources that may hold the same stream.
+    let iptc = [&parts.iptc_naa, &parts.photoshop]
+        .into_iter()
+        .flatten()
+        .find_map(|bytes| iptc::extract(bytes));
+    let (block, left) = build_exif(&parts);
+    let mut found = SourceMetadata::from_blocks(block, xmp, iptc);
+    found.left_behind = left;
+    found
+}
+
+/// The value of a field of `ifd`, when it is one of the field types given and lies in `file`.
 fn value_of(file: &[u8], ifd: &Ifd, tag: u16, kinds: &[u16]) -> Option<Vec<u8>> {
     let entry = ifd.find(tag)?;
     if !kinds.contains(&entry.kind) {
@@ -331,6 +379,37 @@ fn value_of(file: &[u8], ifd: &Ifd, tag: u16, kinds: &[u16]) -> Option<Vec<u8>> 
     }
     let (at, len) = entry.data?;
     file.get(at..at.checked_add(len)?).map(<[u8]>::to_vec)
+}
+
+/// The fields of `ifd` that `wanted` names, with their values from `file`.
+fn gather(file: &[u8], ifd: &Ifd, wanted: impl Fn(u16) -> bool) -> Vec<RawField> {
+    ifd.entries
+        .iter()
+        .filter(|entry| wanted(entry.tag))
+        .map(|entry| {
+            let declared = width_of(entry.kind).saturating_mul(u64::from(entry.count));
+            let value = if declared <= MAX_FIELD_BYTES as u64 {
+                entry
+                    .data
+                    .and_then(|(at, len)| file.get(at..at.checked_add(len)?))
+                    .map(<[u8]>::to_vec)
+            } else {
+                None
+            };
+            RawField {
+                tag: entry.tag,
+                kind: entry.kind,
+                count: entry.count,
+                value,
+            }
+        })
+        .collect()
+}
+
+/// The directory a pointer of `from` names, if it names one that can be read.
+fn follow(file: &[u8], order: Order, from: &Ifd, tag: u16) -> Option<Ifd> {
+    let at = pointer(file, order, from, tag)?;
+    read_ifd(file, order, at)
 }
 
 /// The metadata of the TIFF-structured picture in `file` (the whole file, as it is on disk).
@@ -343,27 +422,98 @@ pub fn read(file: &[u8]) -> Option<SourceMetadata> {
     let first = usize::try_from(get_u32(file, order, 4)?).ok()?;
     let ifd0 = read_ifd(file, order, first)?;
 
-    // A packet written as ASCII carries its terminator, and some writers pad with zeros.
-    let xmp = value_of(file, &ifd0, TAG_XMP, &[1, 2, 7]).map(|mut bytes| {
-        while bytes.last() == Some(&0) {
-            bytes.pop();
-        }
-        bytes
-    });
-    // The newsroom tag first, then the Photoshop resources that may hold the same stream.
-    let iptc = [
-        (TAG_IPTC_NAA, [1_u16, 2, 4, 7].as_slice()),
-        (TAG_PHOTOSHOP, &[1, 7][..]),
-    ]
-    .into_iter()
-    .find_map(|(tag, kinds)| {
-        value_of(file, &ifd0, tag, kinds).and_then(|bytes| iptc::extract(&bytes))
-    });
+    let exif_ifd = follow(file, order, &ifd0, TAG_EXIF_IFD);
+    let interop_ifd = exif_ifd
+        .as_ref()
+        .and_then(|exif_ifd| follow(file, order, exif_ifd, TAG_INTEROP_IFD));
+    let gps_ifd = follow(file, order, &ifd0, TAG_GPS_IFD);
+    let maker_note = ifd0.find(TAG_DNG_PRIVATE_DATA).is_some()
+        || exif_ifd
+            .as_ref()
+            .is_some_and(|ifd| ifd.find(TAG_MAKER_NOTE).is_some());
 
-    let (block, left) = build_exif(file, order, &ifd0);
-    let mut found = SourceMetadata::from_blocks(block, xmp, iptc);
-    found.left_behind = left;
-    Some(found)
+    let parts = Parts {
+        big_endian: order == Order::Big,
+        ifd0: gather(file, &ifd0, keeps_ifd0),
+        exif: exif_ifd.as_ref().map(|ifd| gather(file, ifd, keeps_exif)),
+        interop: interop_ifd.as_ref().map(|ifd| gather(file, ifd, |_| true)),
+        gps: gps_ifd.as_ref().map(|ifd| gather(file, ifd, |_| true)),
+        maker_note,
+        xmp: value_of(file, &ifd0, TAG_XMP, &[1, 2, 7]),
+        iptc_naa: value_of(file, &ifd0, TAG_IPTC_NAA, &[1, 2, 4, 7]),
+        photoshop: value_of(file, &ifd0, TAG_PHOTOSHOP, &[1, 7]),
+    };
+    Some(assemble(parts))
+}
+
+/// An EXIF block taken apart into the directories a TIFF holds them in, with every value in
+/// little-endian order whatever the block's own.
+#[derive(Debug, Clone, Default)]
+pub struct Split {
+    pub ifd0: Vec<RawField>,
+    pub exif: Vec<RawField>,
+    pub interop: Vec<RawField>,
+    pub gps: Vec<RawField>,
+    /// The block has a maker note, which cannot be moved out of it.
+    pub maker_note: bool,
+}
+
+/// Swaps the byte order of a value of field type `kind`, element by element.
+fn swap_value(kind: u16, mut value: Vec<u8>) -> Vec<u8> {
+    let unit = match kind {
+        3 | 8 => 2,
+        4 | 9 | 11 | 13 | 5 | 10 => 4,
+        12 => 8,
+        _ => return value,
+    };
+    for chunk in value.chunks_exact_mut(unit) {
+        chunk.reverse();
+    }
+    value
+}
+
+/// Takes the block apart. `None` when it is not a block this reader will walk.
+pub fn split(block: &[u8]) -> Option<Split> {
+    if block.len() > MAX_EXIF_BYTES {
+        return None;
+    }
+    let order = order_of(block)?;
+    let first = usize::try_from(get_u32(block, order, 4)?).ok()?;
+    let ifd0 = read_ifd(block, order, first)?;
+    let exif_ifd = follow(block, order, &ifd0, TAG_EXIF_IFD);
+    let interop_ifd = exif_ifd
+        .as_ref()
+        .and_then(|ifd| follow(block, order, ifd, TAG_INTEROP_IFD));
+    let gps_ifd = follow(block, order, &ifd0, TAG_GPS_IFD);
+    let little = |fields: Vec<RawField>| -> Vec<RawField> {
+        fields
+            .into_iter()
+            .map(|mut field| {
+                if order == Order::Big {
+                    field.value = field.value.map(|value| swap_value(field.kind, value));
+                }
+                field
+            })
+            .collect()
+    };
+    Some(Split {
+        ifd0: little(gather(block, &ifd0, keeps_ifd0)),
+        exif: exif_ifd
+            .as_ref()
+            .map(|ifd| little(gather(block, ifd, keeps_exif)))
+            .unwrap_or_default(),
+        interop: interop_ifd
+            .as_ref()
+            .map(|ifd| little(gather(block, ifd, |_| true)))
+            .unwrap_or_default(),
+        gps: gps_ifd
+            .as_ref()
+            .map(|ifd| little(gather(block, ifd, |_| true)))
+            .unwrap_or_default(),
+        maker_note: exif_ifd
+            .as_ref()
+            .is_some_and(|ifd| ifd.find(TAG_MAKER_NOTE).is_some()),
+    })
 }
 
 #[cfg(test)]

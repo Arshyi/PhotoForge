@@ -195,7 +195,7 @@ impl MetadataReport {
         });
     }
 
-    fn removed(&mut self, detail: impl Into<String>) {
+    pub(crate) fn removed(&mut self, detail: impl Into<String>) {
         self.notes.push(MetadataNote {
             kind: "removed",
             detail: detail.into(),

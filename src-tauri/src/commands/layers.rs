@@ -1563,6 +1563,52 @@ pub async fn export_svg_document(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TiffImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::tiff::TiffImportReport,
+}
+
+/// Opens a TIFF file as a new, unsaved document.
+///
+/// Like opening a Photoshop or OpenEXR file, the replacement is staged before the session
+/// changes and a superseded request never replaces a newer open. The file is admitted from its
+/// directory before any pixel is decoded, and what the picture carries that PhotoForge has no
+/// place for is named in the report.
+#[tauri::command]
+pub async fn import_tiff_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<TiffImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported =
+            crate::tiff::import_tiff(&checked, crate::psd::ImportLimits::from_resources())?;
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is a TIFF, not a project.
+        prepared.source.metadata.format = "TIFF".to_string();
+        prepared.result.metadata.format = "TIFF".to_string();
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("TIFF import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(TiffImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExrImportResult {
     pub project: ProjectLoadResult,
     pub report: crate::openexr::ExrImportReport,
@@ -1931,6 +1977,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         super::mask::export_mask_png,
         import_svg_document,
         import_exr_document,
+        import_tiff_document,
         open_clipboard_image,
         super::clipboard::copy_to_clipboard,
         super::clipboard::paste_clipboard_image,

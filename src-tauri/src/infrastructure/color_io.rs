@@ -96,8 +96,12 @@ pub fn save_color_image_with_metadata(
     image.validate()?;
     let path = super::image_io::validate_output_path(original, output)?;
     let format = super::image_io::output_format(&path)?;
-    if options.bit_depth == 16 && format != image::ImageFormat::Png {
-        return Err(AppError::ColorPipeline("16-bit export requires PNG".into()));
+    if options.bit_depth == 16
+        && !matches!(format, image::ImageFormat::Png | image::ImageFormat::Tiff)
+    {
+        return Err(AppError::ColorPipeline(
+            "16-bit export requires PNG or TIFF".into(),
+        ));
     }
     let parent = path.parent().ok_or(AppError::InvalidOutputPath)?;
     let temporary = tempfile::Builder::new()
@@ -139,6 +143,51 @@ pub fn save_color_image_with_metadata(
             }
             stream.finish().map_err(|_| AppError::ExportFailure)?;
             writer.finish().map_err(|_| AppError::ExportFailure)?;
+        } else if format == image::ImageFormat::Tiff {
+            // One picture, RGB when nothing in it is see-through, with the profile of the chosen
+            // colour space and the metadata of the plan written as tags.
+            let width = image.width() as usize;
+            let opaque = image.pixels().iter().all(|pixel| pixel.alpha >= 1.0);
+            let sixteen = options.bit_depth == 16;
+            let spec = crate::tiff::Spec {
+                width: image.width(),
+                height: image.height(),
+                bits: if sixteen { 16 } else { 8 },
+                alpha: !opaque,
+                compression: crate::tiff::Compression::Deflate,
+                icc: Some(&icc),
+                metadata: plan.as_deref().map(|plan| &plan.prepared),
+            };
+            let mut writer = writer;
+            let written = crate::tiff::write(&mut writer, &spec, |y, row| {
+                crate::image_processing::high_precision::check_cancel(cancel)?;
+                let start = y as usize * width;
+                for (x, p) in image.pixels()[start..start + width].iter().enumerate() {
+                    let rgb = options.color_space.from_working([p.red, p.green, p.blue]);
+                    if sixteen {
+                        for channel in rgb {
+                            let value = (channel.clamp(0.0, 1.0) * 65535.0).round() as u16;
+                            row.extend_from_slice(&value.to_le_bytes());
+                        }
+                        if !opaque {
+                            let value = (p.alpha.clamp(0.0, 1.0) * 65535.0).round() as u16;
+                            row.extend_from_slice(&value.to_le_bytes());
+                        }
+                    } else {
+                        for channel in rgb {
+                            row.push(quantize8(channel, x as u32, y, options.dither));
+                        }
+                        if !opaque {
+                            row.push(quantize8(p.alpha, 0, 0, false));
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            writer.flush().map_err(|_| AppError::ExportFailure)?;
+            if let Some(plan) = plan.as_deref_mut() {
+                crate::tiff::account(plan, &written);
+            }
         } else {
             let jpeg = format == image::ImageFormat::Jpeg;
             let channels = if jpeg { 3 } else { 4 };
