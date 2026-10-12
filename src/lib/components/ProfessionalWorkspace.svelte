@@ -12,12 +12,12 @@
     DevelopmentParameters,
     EditOperation,
     ExportProfile,
+    ExportResult,
     HistogramChannels,
     HistogramResult,
     HslAdjustment,
     HslSettings,
     ImageMetadata,
-    MetadataPolicy,
     PerspectiveCorners,
     PixelInspection,
     RawInspectionResult,
@@ -25,7 +25,7 @@
     WorkflowDocument
   } from '../types/editor';
   import { errorMessage, formatBytes } from '../utils/format';
-  import { loadMetadataPolicy, METADATA_POLICIES, saveMetadataPolicy } from '../metadata';
+  import { metadataPolicy, metadataSentence, METADATA_POLICIES, policyHint } from '../metadata';
   import { inspectRaw } from '../utils/raw';
   import { baseOperation, operationLabels, operationType, replaceOperation } from '../utils/operations';
   import { describeLayerSteps } from '../layers/workflow';
@@ -140,8 +140,6 @@
   let overwrite = false;
   let workers = 2;
   let exportProfile: ExportProfile = 'lossless';
-  /** What each batch output does with its source's EXIF, XMP and IPTC; the choice the editor remembers. */
-  let metadataPolicy: MetadataPolicy = loadMetadataPolicy();
   let batchColorSpace: 'srgb' | 'display_p3' | 'adobe_rgb' = 'srgb';
   let batchBitDepth: 8 | 16 = 16;
   let batchPreview: BatchPreview | null = null;
@@ -436,11 +434,12 @@
     });
     if (!path) return;
     try {
-      const result = await invoke<{ outputPath: string; width: number; height: number }>('export_developed_png16', {
+      const result = await invoke<ExportResult>('export_developed_png16', {
         outputPath: path,
-        operations
+        operations,
+        metadataPolicy: $metadataPolicy
       });
-      onmessage(`Exported ${result.width} × ${result.height} true 16-bit PNG`);
+      onmessage([`Exported ${result.width} × ${result.height} true 16-bit PNG.`, metadataSentence(result.metadata)].filter(Boolean).join(' '));
     } catch (error) {
       onmessage(errorMessage(error), 'error');
     }
@@ -623,7 +622,7 @@
   }
 
   function batchOptions(dryRun: boolean): BatchOptions {
-    return { inputFolder, outputFolder, filenameTemplate, recursive, overwrite, workers, exportProfile, dryRun, metadataPolicy,
+    return { inputFolder, outputFolder, filenameTemplate, recursive, overwrite, workers, exportProfile, dryRun, metadataPolicy: $metadataPolicy,
       color: { colorSpace: batchColorSpace, bitDepth: ['lossless', 'archive'].includes(exportProfile) ? batchBitDepth : 8, dither: false } };
   }
 
@@ -818,11 +817,12 @@
       <label class="path-field">Output folder<span><input readonly value={outputFolder} placeholder="Choose output folder" /><button on:click={() => chooseBatchFolder('output')}>Browse</button></span></label>
       <label class="field">Workflow<select bind:value={batchWorkflowId}><option value="">Choose workflow</option>{#each workflows as workflow}<option value={workflow.id}>{workflow.name}</option>{/each}</select></label>
       <label class="field">Filename template<input bind:value={filenameTemplate} /></label>
-      <label class="field">Metadata<select aria-label="Batch metadata" bind:value={metadataPolicy} on:change={() => saveMetadataPolicy(metadataPolicy)}>{#each METADATA_POLICIES as policy}<option value={policy.value}>{policy.label}</option>{/each}</select></label>
+      <label class="field">Metadata<select aria-label="Batch metadata" bind:value={$metadataPolicy}>{#each METADATA_POLICIES as policy}<option value={policy.value}>{policy.label}</option>{/each}</select></label>
+      <p class="hint">{policyHint($metadataPolicy)}</p>
       <label class="field">Export profile<select bind:value={exportProfile}>{#each ['web', 'print', 'archive', 'lossless', 'high_jpeg', 'maximum_compression'] as profile}<option value={profile}>{profile.replaceAll('_', ' ')}</option>{/each}</select></label>
       <label class="field">Batch output color space<select bind:value={batchColorSpace}><option value="srgb">sRGB</option><option value="display_p3">Display P3</option><option value="adobe_rgb">Adobe RGB (1998)</option></select></label>
       <label class="field">Batch PNG bit depth<select bind:value={batchBitDepth}><option value={16}>16-bit</option><option value={8}>8-bit</option></select></label>
-      <p class="hint">DNG files develop at full resolution. One image is decoded at a time within a checked memory budget. ICC profiles are embedded; camera EXIF/GPS is stripped. Cancellation stops between decode/development stages and during float processing/export.</p>
+      <p class="hint">DNG files develop at full resolution. One image is decoded at a time within a checked memory budget. ICC profiles are embedded. Cancellation stops between decode/development stages and during float processing/export.</p>
       <SliderControl label="Bounded workers" value={workers} min={1} max={8} step={1} defaultValue={2} format={(value) => `${value}`} onchange={(value) => (workers = value)} />
       <div class="check-grid"><label><input type="checkbox" bind:checked={recursive} /> Recursive</label><label><input type="checkbox" bind:checked={overwrite} /> Allow overwrite</label></div>
       <div class="button-row"><button disabled={batchRunning} on:click={previewBatch}>Batch preview</button><button class="primary" disabled={batchRunning} on:click={startBatch}>Start batch</button><button disabled={!batchRunning} on:click={cancelBatch}>Cancel</button></div>

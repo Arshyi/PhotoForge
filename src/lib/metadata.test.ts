@@ -1,8 +1,10 @@
+import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_METADATA_POLICY,
   describeSource,
   loadMetadataPolicy,
+  metadataPolicy,
   METADATA_POLICIES,
   metadataSentence,
   policyHint,
@@ -47,6 +49,25 @@ describe('the metadata policy', () => {
     expect(loadMetadataPolicy()).toBe('keep_all');
     localStorage.setItem('photoforge.metadataPolicy', 'something_else');
     expect(loadMetadataPolicy()).toBe('remove_private');
+  });
+
+  it('shares the current choice, so a change made in one place reaches every watcher', () => {
+    const seen: string[] = [];
+    const stop = metadataPolicy.subscribe((value) => seen.push(value));
+    saveMetadataPolicy('remove_all');
+    metadataPolicy.set('keep_all');
+    expect(seen).toEqual(['remove_private', 'remove_all', 'keep_all']);
+    expect(get(metadataPolicy)).toBe('keep_all');
+    expect(loadMetadataPolicy()).toBe('keep_all');
+    stop();
+  });
+
+  it('starts from the remembered choice each time the first watcher arrives', () => {
+    saveMetadataPolicy('remove_all');
+    localStorage.setItem('photoforge.metadataPolicy', 'keep_all');
+    expect(get(metadataPolicy)).toBe('keep_all');
+    localStorage.clear();
+    expect(get(metadataPolicy)).toBe('remove_private');
   });
 
   it('works when storage is blocked', () => {

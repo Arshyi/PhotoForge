@@ -1,3 +1,4 @@
+import { writable } from 'svelte/store';
 import type { MetadataPolicy, MetadataReport, SourceMetadataSummary } from './types/editor';
 
 /**
@@ -41,13 +42,26 @@ export function loadMetadataPolicy(): MetadataPolicy {
   }
 }
 
+const current = writable<MetadataPolicy>(DEFAULT_METADATA_POLICY, (set) => {
+  // Re-read the remembered choice whenever the first component starts watching.
+  set(loadMetadataPolicy());
+});
+
 export function saveMetadataPolicy(policy: MetadataPolicy): void {
+  current.set(policy);
   try {
     localStorage.setItem(STORAGE_KEY, policy);
   } catch {
     // A per-viewer convenience; nothing depends on it.
   }
 }
+
+/**
+ * The person's current choice, shared by every place that exports. Components read it as
+ * `$metadataPolicy` and bind a select to it; setting it saves the choice, so the Metadata card,
+ * the batch panel and every export see the same value and a change in one reaches the others.
+ */
+export const metadataPolicy = { subscribe: current.subscribe, set: saveMetadataPolicy };
 
 export function policyHint(policy: MetadataPolicy): string {
   return METADATA_POLICIES.find((entry) => entry.value === policy)?.hint ?? '';

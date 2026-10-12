@@ -7,6 +7,7 @@ import type { EditOperation, HistogramChannels, ImageMetadata, Workflow } from '
 import { createWorkflow, saveWorkflows } from '../utils/workflows';
 import { createDocument, createPixelLayer } from '../layers/tree';
 import { tick } from 'svelte';
+import { saveMetadataPolicy } from '../metadata';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -368,6 +369,66 @@ describe('ProfessionalWorkspace', () => {
   it.each(['Dimensions', 'Color space', 'Bit depth', 'Alpha', 'Camera', 'EXIF', 'Created', 'Modified'])('shows metadata %s', async (label) => {
     setup(); await fireEvent.click(screen.getByRole('tab', { name: 'Inspect' }));
     expect(screen.getByText(label)).toBeTruthy();
+  });
+
+  describe('the metadata choice', () => {
+    const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) => name === command);
+
+    async function exportPng16(): Promise<Record<string, unknown>> {
+      vi.mocked(save).mockResolvedValueOnce('C:\\out\\photo-16bit.png');
+      await fireEvent.click(screen.getByRole('button', { name: 'Export true 16-bit PNG' }));
+      await waitFor(() => expect(calls('export_developed_png16')).toHaveLength(1));
+      return calls('export_developed_png16')[0][1] as Record<string, unknown>;
+    }
+
+    it.each(['keep_all', 'remove_all'] as const)('sends %s with the 16-bit PNG export', async (policy) => {
+      saveMetadataPolicy(policy);
+      setup();
+      expect((await exportPng16()).metadataPolicy).toBe(policy);
+    });
+
+    it('sends the policy changed after the workspace opened, and says what the export removed', async () => {
+      const message = vi.fn();
+      setup(vi.fn(), message);
+      vi.mocked(invoke).mockImplementation(async (command) => command === 'export_developed_png16'
+        ? { outputPath: 'C:\\out\\photo-16bit.png', width: 100, height: 80, processingTimeMs: 1,
+            metadata: { policy: 'remove_all', notes: [{ kind: 'removed', detail: 'camera make and model' }] } }
+        : {});
+      saveMetadataPolicy('remove_all');
+      expect((await exportPng16()).metadataPolicy).toBe('remove_all');
+      await waitFor(() => expect(message).toHaveBeenCalledWith(expect.stringContaining('Metadata removed: camera make and model.')));
+    });
+
+    it('lets the batch follow a choice made in the Metadata card, and the card follow the batch', async () => {
+      saveWorkflows([createWorkflow('Batch Flow', [{ type: 'brightness', amount: 0.2 }])]);
+      setup();
+      await fireEvent.click(screen.getByRole('tab', { name: 'Batch' }));
+      const select = screen.getByLabelText('Batch metadata') as HTMLSelectElement;
+      expect(select.value).toBe('remove_private');
+      saveMetadataPolicy('keep_all');
+      await waitFor(() => expect(select.value).toBe('keep_all'));
+      vi.mocked(invoke).mockImplementation(async (command) => command === 'preview_batch_workflow'
+        ? { discovered: 0, estimatedTimeMs: 0, skippedExisting: 0, sampleOutputs: [] }
+        : {});
+      const flow = screen.getByLabelText('Workflow') as HTMLSelectElement;
+      await fireEvent.change(flow, { target: { value: flow.options[1].value } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Batch preview' }));
+      await waitFor(() => expect(calls('preview_batch_workflow')).toHaveLength(1));
+      expect((calls('preview_batch_workflow')[0][1] as { options: { metadataPolicy: string } }).options.metadataPolicy).toBe('keep_all');
+      await fireEvent.change(select, { target: { value: 'remove_all' } });
+      expect(localStorage.getItem('photoforge.metadataPolicy')).toBe('remove_all');
+    });
+
+    it('describes the chosen policy beside the batch settings, never a stripping it does not do', async () => {
+      saveMetadataPolicy('keep_all');
+      setup();
+      await fireEvent.click(screen.getByRole('tab', { name: 'Batch' }));
+      expect(screen.queryByText(/EXIF\/GPS is stripped/)).toBeNull();
+      expect(screen.getByText(/Writes what the source file carried, including where it was taken/)).toBeTruthy();
+      saveMetadataPolicy('remove_all');
+      await waitFor(() => expect(screen.getByText('Writes no EXIF, XMP or IPTC at all.')).toBeTruthy());
+      expect(screen.queryByText(/including where it was taken/)).toBeNull();
+    });
   });
 
   it('supports pixel inspection and measurement', async () => {
