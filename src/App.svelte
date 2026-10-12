@@ -3038,7 +3038,13 @@
     } finally {
       layerBusy = false;
     }
-    await runPanelPlan(() => panel.placeImage(pasted));
+    const placed = await runPanelPlan(() => panel.placeImage(pasted));
+    if (!placed) {
+      // Nothing was committed and the reason, if there is one, is already on screen; saying the
+      // picture was pasted would overwrite it. No layer shows the buffer, so let it go.
+      void releaseUnreferencedPixels();
+      return;
+    }
     notify(pasteSentence(pasted));
   }
 

@@ -4,12 +4,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import App from './App.svelte';
 import registry from '../src-tauri/tests/fixtures/operation_registry.json';
 import { createDocument, createPixelLayer } from './lib/layers/tree';
-import type { OperationSpec } from './lib/operations/types';
+import type { LayerDocument } from './lib/layers/types';
+import type { OperationSpec, TransactionRequest } from './lib/operations/types';
 import { statusFixture } from './lib/plugins/testing';
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -25,9 +27,11 @@ vi.mock('@tauri-apps/api/window', () => ({
 const EXR = String.raw`C:\renders\shot.exr`;
 const previewUrl = 'data:image/png;base64,b3JpZ2luYWw=';
 const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) => name === command);
+const requests = () => calls('apply_transaction').map(([, args]) => (args as { request: TransactionRequest }).request);
 
 let failCopy: string | null = null;
 let failPaste: string | null = null;
+let refuseTransaction: string | null = null;
 let clippedHighlights = false;
 
 function project(name: string, width: number, height: number) {
@@ -58,6 +62,7 @@ beforeEach(() => {
   localStorage.clear();
   failCopy = null;
   failPaste = null;
+  refuseTransaction = null;
   clippedHighlights = false;
   vi.mocked(open).mockReset();
   vi.mocked(save).mockReset();
@@ -86,6 +91,20 @@ beforeEach(() => {
           width: 16, height: 12, scope: args.layerId ? 'layer' : 'merged', selection: Boolean(args.selection),
           formats: ['PNG', 'CF_DIBV5'], pngBytes: 900, clippedHighlights, processingTimeMs: 3
         };
+      case 'apply_transaction': {
+        // The engine refuses a whole transaction by rejecting; nothing it did is kept.
+        if (refuseTransaction) throw new Error(refuseTransaction);
+        const request = args.request as TransactionRequest;
+        const document = structuredClone(request.document) as LayerDocument;
+        for (const step of request.steps) {
+          if (step.op !== 'core.layer.place_pixels') continue;
+          const place = (step.params ?? {}) as Record<string, any>;
+          const placed = createPixelLayer(place.name, place.pixelId, place.width, place.height);
+          document.layers.push(placed);
+          document.activeLayerId = placed.id;
+        }
+        return { document, revision: 'r'.repeat(64), label: request.label, steps: [], createdPixelIds: [], lastCreated: null };
+      }
       case 'paste_clipboard_image':
         if (failPaste) throw new Error(failPaste);
         return { pixelId: 'px-pasted', width: 8, height: 6, filename: 'Pasted image', format: 'png' };
@@ -116,6 +135,22 @@ async function openDocument() {
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: /shot\.exr/ })).toBeNull());
   await screen.findByRole('button', { name: 'Select Image' });
+}
+
+/** Lets everything already promised to happen after the engine's answer happen. */
+async function settle() {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await tick();
+}
+
+/** The buffers the app said to keep, each time it said so after the picture came off the clipboard. */
+function keptAfterPaste(): string[][] {
+  const all = vi.mocked(invoke).mock.calls;
+  const pasted = all.findIndex(([name]) => name === 'paste_clipboard_image');
+  return all
+    .slice(pasted + 1)
+    .filter(([name]) => name === 'retain_layer_pixels')
+    .map(([, args]) => (args as { pixelIds: string[] }).pixelIds);
 }
 
 async function palette(query: string) {
@@ -179,6 +214,30 @@ describe('pasting', () => {
     // It went through the engine as a placed image, not as a file import.
     expect(calls('import_layer_image')).toHaveLength(0);
     expect(calls('open_clipboard_image')).toHaveLength(0);
+    expect(requests()).toHaveLength(1);
+    expect(requests()[0]).toMatchObject({
+      origin: 'user',
+      steps: [{ op: 'core.layer.place_pixels', params: { pixelId: 'px-pasted', width: 8, height: 6, name: 'Pasted image' } }]
+    });
+    // The layer is in the document by the time it is announced, and its buffer is kept.
+    expect(screen.getByRole('button', { name: 'Select Pasted image' })).toBeTruthy();
+    await waitFor(() => expect(keptAfterPaste().slice(-1)[0]).toEqual(expect.arrayContaining(['px1', 'px-pasted'])));
+  });
+
+  it('says why, and not that it pasted, when the engine refuses to place the picture', async () => {
+    refuseTransaction =
+      'Step 1 (core.layer.place_pixels) failed: This document contains 513 layers; the limit is 512. Nothing was changed.';
+    await openDocument();
+    await fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+    await waitFor(() => expect(requests()).toHaveLength(1));
+    await waitFor(() => expect(keptAfterPaste().length).toBeGreaterThan(0));
+    // A success announcement made after the refusal would replace its reason at once.
+    await settle();
+    expect(screen.getByText(/the limit is 512/)).toBeTruthy();
+    expect(screen.queryByText(/Pasted a/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Select Pasted image' })).toBeNull();
+    // Nothing shows the pasted picture, so the session keeps only what the document uses.
+    expect(keptAfterPaste().slice(-1)[0]).toEqual(['px1']);
   });
 
   it('opens the picture as a new document when none is open', async () => {
