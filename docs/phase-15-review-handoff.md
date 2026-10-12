@@ -4,8 +4,8 @@ Written 12 October 2026 at the end of a cloud session. This note says what was r
 
 ## Where the work is
 
-- Branch: `claude/compassionate-cray-15t8v8`, tip `8386b4b`.
-- It is `phase-15-3e-clipboard` (`327454e`, your ten Phase 15 commits) plus eight fix commits on top. Nothing was rebased or rewritten, so it is a plain fast-forward of `phase-15-3e-clipboard`:
+- Branch: `claude/compassionate-cray-15t8v8`. The last code commit is `8386b4b`; the commit that adds this note sits on top of it.
+- It is `phase-15-3e-clipboard` (`327454e`, your ten Phase 15 commits) plus eight fix commits on top (then this note). Nothing was rebased or rewritten, so it is a plain fast-forward of `phase-15-3e-clipboard`:
   `git fetch origin && git checkout phase-15-3e-clipboard && git merge --ff-only origin/claude/compassionate-cray-15t8v8`
 - `main` and the `phase-15-*` branches were not touched. No pull request was opened.
 
