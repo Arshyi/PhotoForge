@@ -11,6 +11,15 @@ pub enum AppError {
     ImageTooLarge { pixels: u64, limit: u64 },
     #[error("PhotoForge could not decode this image.")]
     DecodeFailure,
+    #[error("{0}")]
+    PsdFile(String),
+    /// A file of a kind PhotoForge reads but cannot use as it is (an SVG that is not an SVG, an
+    /// OpenEXR file with only deep data): the message says what is wrong with the file, whole.
+    #[error("{0}")]
+    ForeignFile(String),
+    /// The system clipboard could not be used. The message says why, whole.
+    #[error("{0}")]
+    Clipboard(String),
     #[error("PhotoForge could not process this edit pipeline: {0}")]
     ProcessingFailure(String),
     #[error("PhotoForge could not analyze this image. Try reopening it.")]
@@ -175,12 +184,26 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// A problem with the content of a file the person chose, said to them whole: the first letter
+    /// is capitalised so that a message composed as a clause reads as a sentence.
+    pub fn foreign_file(message: String) -> Self {
+        let mut characters = message.chars();
+        let text = match characters.next() {
+            Some(first) => first.to_uppercase().chain(characters).collect(),
+            None => message,
+        };
+        Self::ForeignFile(text)
+    }
+
     fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedImageFormat => "unsupported_image_format",
             Self::CorruptImage => "corrupt_image",
             Self::ImageTooLarge { .. } => "image_too_large",
             Self::DecodeFailure => "decode_failure",
+            Self::PsdFile(_) => "psd_file",
+            Self::ForeignFile(_) => "foreign_file",
+            Self::Clipboard(_) => "clipboard",
             Self::ProcessingFailure(_) => "processing_failure",
             Self::AnalysisFailure => "analysis_failure",
             Self::AnalysisUnavailable => "analysis_unavailable",

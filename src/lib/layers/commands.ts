@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ColorExportOptions, EditOperation, ExportProfile, ExportResult, PreviewResult } from '../types/editor';
+import type { ColorExportOptions, EditOperation, ExportProfile, ExportResult, MetadataPolicy, PreviewResult } from '../types/editor';
 import type { MaskSnapshot } from '../selections/types';
 import type {
   LayerDocument,
@@ -32,14 +32,16 @@ export function exportLayerComposite(
   document: LayerDocument,
   operations: EditOperation[],
   profile: ExportProfile,
-  color?: ColorExportOptions
+  color?: ColorExportOptions,
+  metadataPolicy?: MetadataPolicy
 ): Promise<ExportResult> {
   return invoke<ExportResult>('export_layer_composite', {
     outputPath,
     document,
     operations,
     profile,
-    ...(color ? { color } : {})
+    ...(color ? { color } : {}),
+    ...(metadataPolicy ? { metadataPolicy } : {})
   });
 }
 

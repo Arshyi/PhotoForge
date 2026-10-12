@@ -1,4 +1,5 @@
 //! High-precision implementation of the same layer tree as the legacy renderer.
+use super::clip::{can_hold_clipped, clip_groups, paints, ClipGroup, Paint};
 use super::composite::{decoded_mask, mask_coverage, mask_inverted, render_transform};
 use super::{
     BlendMode, Layer, LayerContent, LayerDocument, LayerInterpolation, PixelSource, RenderOptions,
@@ -110,55 +111,124 @@ fn composite_onto(
             limit: MAX_GROUP_DEPTH,
         });
     }
-    for layer in layers {
+    for group in clip_groups(layers) {
         high_precision::check_cancel(context.options.cancel)?;
-        if !layer.visible || layer.opacity <= 0.0 {
+        if group.needs_buffer() {
+            paint_clip_group(canvas, &group, context, depth)?;
             continue;
         }
-        match &layer.content {
-            LayerContent::SmartObject { .. } => {
-                return Err(AppError::InvalidLayerDocument(
-                    "smart content was not prepared for rendering".into(),
-                ));
-            }
-            LayerContent::Pixel { pixel_id, .. } => {
-                let pixels = context.source.resolve_linear(pixel_id)?;
-                draw(canvas, &pixels, layer, context)?;
-            }
-            LayerContent::Shape { shape } => {
-                // Delegated to the tiled renderer's routine over a region
-                // covering the whole canvas. Two implementations of shape
-                // drawing would be two things to keep identical, and this
-                // module is the oracle the other one is checked against.
-                super::tiled::draw_shape_full_frame(canvas, shape, layer, context.options)?;
-            }
-            LayerContent::Text { text } => {
-                // Delegated for the same reason as a shape: one implementation
-                // of glyph drawing, exercised from both renderers.
-                super::tiled::draw_text_full_frame(canvas, text, layer, context.options)?;
-            }
-            LayerContent::Group { children, isolated } => {
-                if children.is_empty() {
-                    continue;
-                }
-                if *isolated {
-                    let mut group =
-                        FloatImage::blank(context.width, context.height, FloatRgba::TRANSPARENT)?;
-                    composite_onto(&mut group, children, context, depth + 1)?;
-                    draw(canvas, &group, layer, context)?;
-                } else {
-                    let mut reworked = canvas.clone();
-                    composite_onto(&mut reworked, children, context, depth + 1)?;
-                    cross_fade(canvas, &reworked, layer, context)?;
-                }
-            }
-            LayerContent::Adjustment { operation } => {
-                let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
-                mix_adjustment(canvas, &adjusted, layer, context)?;
+        paint_layer(canvas, group.base, Paint::of(group.base), context, depth)?;
+        // A base with no coverage of its own lets the layers above it paint as
+        // ordinary ones; any other base with nothing visible clipped to it has
+        // nothing more to draw.
+        if !can_hold_clipped(group.base) {
+            for layer in group.clipped {
+                paint_layer(canvas, layer, Paint::of(layer), context, depth)?;
             }
         }
     }
     high_precision::check_cancel(context.options.cancel)
+}
+
+/// Composites one layer onto `canvas` with the given paint.
+fn paint_layer(
+    canvas: &mut FloatImage,
+    layer: &Layer,
+    paint: Paint,
+    context: &Context<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    if !paints(layer) {
+        return Ok(());
+    }
+    match &layer.content {
+        LayerContent::SmartObject { .. } => {
+            return Err(AppError::InvalidLayerDocument(
+                "smart content was not prepared for rendering".into(),
+            ));
+        }
+        LayerContent::Pixel { pixel_id, .. } => {
+            let pixels = context.source.resolve_linear(pixel_id)?;
+            draw(canvas, &pixels, layer, paint, context)?;
+        }
+        LayerContent::Shape { shape } => {
+            // Delegated to the tiled renderer's routine over a region
+            // covering the whole canvas. Two implementations of shape
+            // drawing would be two things to keep identical, and this
+            // module is the oracle the other one is checked against.
+            super::tiled::draw_shape_full_frame(canvas, shape, layer, paint, context.options)?;
+        }
+        LayerContent::Text { text } => {
+            // Delegated for the same reason as a shape: one implementation
+            // of glyph drawing, exercised from both renderers.
+            super::tiled::draw_text_full_frame(canvas, text, layer, paint, context.options)?;
+        }
+        LayerContent::Group { children, isolated } => {
+            if children.is_empty() {
+                return Ok(());
+            }
+            if *isolated || paint.in_clip_group {
+                let mut group =
+                    FloatImage::blank(context.width, context.height, FloatRgba::TRANSPARENT)?;
+                composite_onto(&mut group, children, context, depth + 1)?;
+                draw(canvas, &group, layer, paint, context)?;
+            } else {
+                let mut reworked = canvas.clone();
+                composite_onto(&mut reworked, children, context, depth + 1)?;
+                cross_fade(canvas, &reworked, layer, context)?;
+            }
+        }
+        LayerContent::Adjustment { operation } => {
+            let adjusted = high_precision::apply(canvas, operation, context.options.cancel)?;
+            mix_adjustment(canvas, &adjusted, layer, context)?;
+        }
+    }
+    Ok(())
+}
+
+/// Composites a base and the layers clipped to it as one unit; see `clip.rs`.
+fn paint_clip_group(
+    canvas: &mut FloatImage,
+    group: &ClipGroup<'_>,
+    context: &Context<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    let mut buffer = FloatImage::blank(context.width, context.height, FloatRgba::TRANSPARENT)?;
+    paint_layer(&mut buffer, group.base, Paint::base(), context, depth)?;
+    for layer in group.clipped {
+        paint_layer(&mut buffer, layer, Paint::clipped(layer), context, depth)?;
+    }
+    lay_over(
+        canvas,
+        &buffer,
+        group.base.opacity,
+        group.base.blend_mode,
+        context,
+    )
+}
+
+/// Composites a canvas-sized buffer onto `canvas`, in place, at an opacity and
+/// in a blend mode. The buffer's own placement has already been applied.
+fn lay_over(
+    canvas: &mut FloatImage,
+    buffer: &FloatImage,
+    opacity: f32,
+    blend: BlendMode,
+    context: &Context<'_>,
+) -> Result<(), AppError> {
+    for y in 0..context.height {
+        high_precision::check_cancel(context.options.cancel)?;
+        for x in 0..context.width {
+            let i = (y * context.width + x) as usize;
+            let mut p = buffer.pixels()[i];
+            p.alpha *= opacity;
+            if p.alpha <= 0.0 {
+                continue;
+            }
+            canvas.pixels_mut()[i] = source_over(canvas.pixels()[i], p, blend);
+        }
+    }
+    Ok(())
 }
 
 fn channels(p: FloatRgba) -> [f32; 3] {
@@ -202,10 +272,28 @@ pub fn source_over(back: FloatRgba, source: FloatRgba, mode: BlendMode) -> Float
     FloatRgba::new(rgb[0], rgb[1], rgb[2], ao.clamp(0.0, 1.0))
 }
 
+/// `source` composited atop `back`: the backdrop keeps its own coverage and only
+/// its colour moves, by the source's coverage and through the blend mode.
+///
+/// What a clipped layer does to the buffer of its clipping group; see `clip.rs`.
+pub fn source_atop(back: FloatRgba, source: FloatRgba, mode: BlendMode) -> FloatRgba {
+    if back.alpha <= 0.0 {
+        return back;
+    }
+    let a = source.alpha.clamp(0.0, 1.0);
+    let b = channels(back);
+    let blended = blend_linear(mode, b, channels(source));
+    let rgb: [f32; 3] = std::array::from_fn(|i| b[i] + a * (blended[i] - b[i]));
+    FloatRgba::new(rgb[0], rgb[1], rgb[2], back.alpha)
+}
+
+/// Draws a pixel buffer through its transform and mask, with the opacity, blend
+/// mode and mode of coverage in `paint`.
 fn draw(
     canvas: &mut FloatImage,
     source: &FloatImage,
     layer: &Layer,
+    paint: Paint,
     context: &Context<'_>,
 ) -> Result<(), AppError> {
     let (sw, sh) = source.dimensions();
@@ -227,7 +315,7 @@ fn draw(
                 sy,
                 layer.transform.interpolation == LayerInterpolation::Nearest,
             );
-            p.alpha *= layer.opacity
+            p.alpha *= paint.opacity
                 * mask_coverage(
                     mask.as_ref(),
                     mask_inverted(layer),
@@ -241,7 +329,11 @@ fn draw(
                 continue;
             }
             let i = (y * context.width + x) as usize;
-            canvas.pixels_mut()[i] = source_over(canvas.pixels()[i], p, layer.blend_mode);
+            canvas.pixels_mut()[i] = if paint.atop {
+                source_atop(canvas.pixels()[i], p, paint.blend)
+            } else {
+                source_over(canvas.pixels()[i], p, paint.blend)
+            };
         }
     }
     Ok(())

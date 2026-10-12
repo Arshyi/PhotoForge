@@ -7,7 +7,7 @@ use crate::error::AppError;
 use crate::image_processing::{
     analyze_image_quality, apply_pipeline_float, prepare_preview_operations,
 };
-use crate::infrastructure::{encode_preview, load_image, save_float_png16, save_image};
+use crate::infrastructure::{encode_preview, load_image};
 use crate::layers::LayerPixelStore;
 use image::GenericImageView;
 use std::path::PathBuf;
@@ -481,6 +481,7 @@ pub async fn render_preview(
 pub async fn export_image(
     output_path: String,
     operations: Vec<EditOperation>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     let _export_permit = state.export_gate.lock().await;
@@ -489,13 +490,17 @@ pub async fn export_image(
     let validated_operations = pipeline.operations().to_vec();
     let output_path = PathBuf::from(output_path);
 
-    let (source, original_path) = {
+    let (source, original_path, source_metadata) = {
         let session = state
             .session
             .lock()
             .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
         let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
-        (source.original.clone(), source.path.clone())
+        (
+            source.original.clone(),
+            source.path.clone(),
+            source.source_metadata.clone(),
+        )
     };
     let engine = {
         let registry = state.components.lock().map_err(|_| {
@@ -505,11 +510,27 @@ pub async fn export_image(
     };
 
     let started = Instant::now();
-    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+    let policy = metadata_policy.unwrap_or_default();
+    let (saved_path, width, height, report) = tauri::async_runtime::spawn_blocking(move || {
         let processed = engine.process(source.as_ref(), &validated_operations)?;
         let (width, height) = processed.dimensions();
-        let saved_path = save_image(&processed, &original_path, &output_path)?;
-        Ok::<_, AppError>((saved_path, width, height))
+        let mut plan = crate::metadata::Plan::new(
+            source_metadata.as_deref(),
+            policy,
+            crate::metadata::OutputFacts {
+                width,
+                height,
+                wide_gamut_profile: false,
+            },
+        );
+        let saved_path = crate::infrastructure::save_image_with_metadata(
+            &processed,
+            &original_path,
+            &output_path,
+            crate::domain::ExportProfile::Lossless,
+            Some(&mut plan),
+        )?;
+        Ok::<_, AppError>((saved_path, width, height, plan.report))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("export worker stopped".into()))??;
@@ -519,6 +540,7 @@ pub async fn export_image(
         width,
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        metadata: Some(report),
     })
 }
 
@@ -529,28 +551,48 @@ pub async fn export_image(
 pub async fn export_developed_png16(
     output_path: String,
     operations: Vec<EditOperation>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     let mut pipeline = EditPipeline::default();
     pipeline.replace(operations)?;
     let validated_operations = pipeline.operations().to_vec();
     let output_path = PathBuf::from(output_path);
-    let (source, original_path) = {
+    let (source, original_path, source_metadata) = {
         let session = state
             .session
             .lock()
             .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
         let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
-        (source.original.clone(), source.path.clone())
+        (
+            source.original.clone(),
+            source.path.clone(),
+            source.source_metadata.clone(),
+        )
     };
 
     let _export_permit = state.export_gate.lock().await;
     let started = Instant::now();
-    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+    let policy = metadata_policy.unwrap_or_default();
+    let (saved_path, width, height, report) = tauri::async_runtime::spawn_blocking(move || {
         let developed = apply_pipeline_float(source.as_ref(), &validated_operations)?;
         let dimensions = developed.dimensions();
-        let saved_path = save_float_png16(&developed, &original_path, &output_path)?;
-        Ok::<_, AppError>((saved_path, dimensions.0, dimensions.1))
+        let mut plan = crate::metadata::Plan::new(
+            source_metadata.as_deref(),
+            policy,
+            crate::metadata::OutputFacts {
+                width: dimensions.0,
+                height: dimensions.1,
+                wide_gamut_profile: false,
+            },
+        );
+        let saved_path = crate::infrastructure::save_float_png16_with_metadata(
+            &developed,
+            &original_path,
+            &output_path,
+            Some(&mut plan),
+        )?;
+        Ok::<_, AppError>((saved_path, dimensions.0, dimensions.1, plan.report))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("16-bit export worker stopped".into()))??;
@@ -560,6 +602,7 @@ pub async fn export_developed_png16(
         width,
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        metadata: Some(report),
     })
 }
 
@@ -698,6 +741,7 @@ async fn open_raw_image_inner(
         exif_available: sensor.metadata.manufacturer.is_some(),
         raw: Some(sensor.metadata.clone()),
         origin: None,
+        source_metadata: None,
     };
 
     if !request.is_current() {
@@ -761,6 +805,7 @@ async fn open_raw_image_inner(
         preview: std::sync::Arc::new(preview),
         metadata: metadata.clone(),
         working: Some(working),
+        source_metadata: None,
     };
 
     let result = OpenRawImageResult {

@@ -434,6 +434,7 @@ fn a_region_backed_project_survives_a_save_and_reload() {
             transform: LayerTransform::default(),
             mask: None,
             collapsed: false,
+            clipped: false,
             metadata: LayerMetadata::default(),
             raw: Some(source),
             origin: None,

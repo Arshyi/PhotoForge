@@ -188,8 +188,9 @@ registry when the manifest is read.
 Two further rules keep a command from spending authority it was not given:
 
 * A command may not issue **`core.layer.delete`, `core.document.flatten`,
-  `core.layer.merge_down` or `core.layer.set_locked`**. They destroy work or change
-  what protects it; a person can still do any of them by hand.
+  `core.layer.merge_down`, `core.layer.set_locked` or `core.layer.place_pixels`**. The
+  first four destroy work or change what protects it, and the last names a pixel buffer
+  the session holds; a person can still do any of them by hand.
 * `core.plugin.apply_filter` in a command must say `"plugin": "$self"` and name a
   filter the plugin declares. A plugin runs its own filters and no one else's.
 

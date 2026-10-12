@@ -1,6 +1,14 @@
 <script lang="ts">
   import MaskThumbnail from './MaskThumbnail.svelte';
-  import { activeLayer, childrenOf, countLayers, displayRows, isPassThrough, isSemanticLayer } from '../layers/tree';
+  import {
+    activeLayer,
+    childrenOf,
+    clippedRunOf,
+    countLayers,
+    displayRows,
+    isPassThrough,
+    isSemanticLayer
+  } from '../layers/tree';
   import {
     blendModes,
     layerKindIcons,
@@ -32,7 +40,10 @@
   export let onselect: (id: string, additive: boolean) => void;
   export let ontoggle: (id: string, field: 'visible' | 'locked' | 'collapsed') => void;
   export let onrename: (id: string, name: string) => void;
+  /** Called on every step of the slider, so the change can be drawn as it is dragged. */
   export let onopacity: (id: string, value: number) => void;
+  /** Called when the slider is released, so the change can be made for good. */
+  export let onopacityend: ((id: string) => void) | undefined = undefined;
   export let onblend: (id: string, mode: BlendMode) => void;
   export let onreorder: (id: string, parentId: string | null, index: number) => void;
   export let oncreate: (kind: 'pixel' | 'group' | 'adjustment' | 'import') => void;
@@ -52,6 +63,10 @@
   $: selectedIsAdjustment = selected?.content.type === 'adjustment';
   $: selectedIsSemantic = Boolean(selected && isSemanticLayer(selected));
   $: selectedHasMask = Boolean(selected?.mask);
+  /** The bottom layer of a stack has nothing beneath it to be clipped to. */
+  $: selectedRow = rows.find((row) => row.layer.id === selected?.id) ?? null;
+  $: selectedCanClip = Boolean(selectedRow && selectedRow.index > 0);
+  $: selectedIsClipped = Boolean(selected?.clipped && selectedCanClip);
   $: totalLayers = countLayers(document);
   $: locked = Boolean(selected?.locked);
   $: multiSelection = selectedIds.length > 1;
@@ -153,12 +168,26 @@
   function applyDrop(id: string, row: LayerRow, position: 'above' | 'below' | 'inside') {
     if (id === row.layer.id) return;
     if (position === 'inside' && row.layer.content.type === 'group') {
-      onreorder(id, row.layer.id, childrenOf(row.layer).length);
+      onreorder(id, row.layer.id, withoutDragged(id, row.layer.id, childrenOf(row.layer).length));
       return;
     }
     const parentId = row.parentId;
-    const index = position === 'above' ? row.index + 1 : row.index;
-    onreorder(id, parentId, index);
+    const gap = position === 'above' ? row.index + 1 : row.index;
+    onreorder(id, parentId, withoutDragged(id, parentId, gap));
+  }
+
+  /**
+   * A move's index counts the siblings that are left once the layer — and any layers
+   * clipped to it, which travel with it — have been taken out. A drop is described
+   * against the stack as it stands, so the ones that sit below the drop position are
+   * taken off it; without that, dropping a layer onto a row above it lands one place
+   * too high.
+   */
+  function withoutDragged(id: string, parentId: string | null, gap: number): number {
+    const dragged = rows.find((entry) => entry.layer.id === id);
+    if (!dragged || dragged.parentId !== parentId) return gap;
+    const leaving = 1 + clippedRunOf(document, id).length;
+    return gap - Math.min(Math.max(gap - dragged.index, 0), leaving);
   }
 
   function moveBy(id: string, delta: number) {
@@ -295,6 +324,25 @@
           </small>
         </div>
       {/if}
+      <div class="property-row checkbox">
+        <label for="layer-clipped">Clip to layer below</label>
+        <input
+          id="layer-clipped"
+          type="checkbox"
+          checked={selectedIsClipped}
+          disabled={disabled || locked || !selectedCanClip}
+          on:change={() => onaction('toggle_clipped', selected?.id)}
+        />
+        <small>
+          {#if !selectedCanClip}
+            There is no layer beneath this one to clip it to.
+          {:else if selectedIsClipped}
+            Shows only where the layer beneath it does, and takes that layer's blend mode and opacity as one.
+          {:else}
+            Off: this layer paints wherever it has pixels.
+          {/if}
+        </small>
+      </div>
       <div class="property-row">
         <label for="layer-blend-select">Blend</label>
         <select
@@ -327,6 +375,7 @@
           disabled={disabled || locked}
           on:input={(event) =>
             onopacity(selected?.id ?? '', Number((event.currentTarget as HTMLInputElement).value) / 100)}
+          on:change={() => onopacityend?.(selected?.id ?? '')}
         />
         <output>{opacityPercent(selected)}%</output>
       </div>
@@ -344,6 +393,7 @@
         class:active={document.activeLayerId === row.layer.id}
         class:dimmed={!row.layer.visible || row.hiddenByAncestor}
         class:locked={row.layer.locked}
+        class:clipped={Boolean(row.layer.clipped) && row.index > 0}
         class:dragging={draggingId === row.layer.id}
         class:drop-above={dropHint?.id === row.layer.id && dropHint.position === 'above'}
         class:drop-below={dropHint?.id === row.layer.id && dropHint.position === 'below'}
@@ -428,6 +478,9 @@
                 {/if}
                 {#if missingPlugins[row.layer.id]}
                   <span class="plugin-missing" title={missingPlugins[row.layer.id]}>· Plugin unavailable — left out of the preview</span>
+                {/if}
+                {#if row.layer.clipped && row.index > 0}
+                  · Clipped
                 {/if}
                 {#if row.layer.blendMode !== 'normal'}
                   · {blendModes.find((mode) => mode.id === row.layer.blendMode)?.label}
@@ -651,6 +704,8 @@
   .property-row input[type='range'] { width: 100%; }
   .layer-list { display: grid; gap: 3px; max-height: 340px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
   .layer-list li { position: relative; padding: 4px; border: 1px solid transparent; border-radius: 7px; background: rgba(255,255,255,.015); }
+  /* A clipped layer paints only where the layer beneath it does; the bar says it hangs from that layer. */
+  .layer-list li.clipped { border-left: 3px solid rgba(192,231,126,.4); }
   .layer-list li.selected { border-color: rgba(192,231,126,.5); background: rgba(192,231,126,.05); }
   .layer-list li.active { border-color: var(--accent); background: rgba(192,231,126,.08); }
   .layer-list li.dimmed .row-main { opacity: .45; }

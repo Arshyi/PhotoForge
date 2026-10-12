@@ -25,15 +25,20 @@ anywhere in it.
 ## The operation registry
 
 `list_operations` returns every operation that may edit a document, as the backend
-publishes them. There are 22:
+publishes them. There are 30:
 
 | Category | Operations |
 | --- | --- |
-| Layer (15) | `core.layer.select`, `set_visible`, `set_locked`, `set_opacity`, `set_blend_mode`, `rename`, `set_collapsed`, `move`, `delete`, `duplicate`, `group`, `ungroup`, `reset_transform`, `add_group`, `mask_from_selection` |
-| Adjustment (1) | `core.layer.add_adjustment` |
-| Pixels (3) | `core.layer.add_pixel`, `apply_edit`, `merge_down` |
+| Layer (21) | `core.layer.select`, `set_visible`, `set_locked`, `set_opacity`, `set_blend_mode`, `set_clipped`, `rename`, `set_collapsed`, `move`, `delete`, `duplicate`, `group`, `ungroup`, `reset_transform`, `add_group`, `mask_from_selection`, `set_pass_through`, `mask_add`, `mask_set_enabled`, `mask_set_inverted`, `mask_remove` |
+| Adjustment (2) | `core.layer.add_adjustment`, `update_adjustment` |
+| Pixels (4) | `core.layer.add_pixel`, `apply_edit`, `merge_down`, `place_pixels` |
 | Document (1) | `core.document.flatten` |
 | Plugin (2) | `core.plugin.apply_filter`, `core.plugin.add_adjustment` |
+
+One of them, `core.layer.place_pixels`, is **user-only**: it names a pixel buffer the
+session already holds (a placed image), which a macro, a plugin or a planner has no
+business doing. The engine refuses it for any other origin, a plugin manifest that
+names it is refused when it is installed, and the macro editor does not offer it.
 
 Each has an id in the `core.` namespace, a version, a title, a summary, **typed
 parameters**, whether it changes pixels, how it treats locked layers, whether a planner
@@ -77,9 +82,11 @@ and only operations its manifest named; an operation that destroys or protects w
 respects locked layers for every origin but a person. `expected_revision` makes a
 request fail if the document moved on since it was planned.
 
-The interface's layer-tree functions are TypeScript, for instant feedback; a set of
-**parity vectors** (`src-tauri/tests/fixtures/operations_parity.json`) pins them to the
-engine, so the two cannot quietly disagree.
+The Layers panel makes its edits by asking this engine (see [What goes through the
+engine](#what-goes-through-the-engine-today-and-what-does-not)). The TypeScript tree
+functions that used to make them are kept for building and previewing documents locally,
+and a set of **parity vectors** (`src-tauri/tests/fixtures/operations_parity.json`) still
+holds them to the engine.
 
 ## Conditions
 
@@ -168,16 +175,23 @@ Stated plainly, because "one path" is a claim that should be checkable.
 | --- | --- |
 | Macros, workflow and planner **layer steps**, plugin filters, plugin commands | The transaction engine, at commit time |
 | Merge down, flatten | The transaction engine (`core.layer.merge_down`, `core.document.flatten`) |
-| Show/hide, lock, collapse, select, opacity, blend mode, rename, move, new group, duplicate, delete, group, ungroup, reset transform, new adjustment layer | The interface's own tree functions, so a drag of the opacity slider is instant, **pinned to the engine** by 25 shared parity vectors over these 15 operations (`tests/fixtures/operations_parity.json`, run against both implementations), and checked by the same document validator the engine uses on save and load. Each has a registered operation that does the same thing, which is what a macro runs |
-| New pixel layer | The backend registers the buffer (`create_layer_pixels`) and the interface inserts the layer. `core.layer.add_pixel` does both inside the engine. **Not covered by a parity vector** |
-| Text, shape and smart-object editing, RAW development, transforms, painting a mask | The interface and their own commands. **No registered operation exists for them**, so a macro cannot contain them and the recorder says so |
-| The single-image edit stack (sliders on a photo that is not a layered document) | The interface; unchanged by this phase |
+| Show/hide, lock, collapse, opacity, blend mode, rename, move (including drag and drop), new group, new pixel layer, place image, duplicate, delete, group, ungroup, reset transform, pass-through, add / enable / invert / delete a layer mask, new adjustment layer, change an adjustment | **The transaction engine**, as origin `user`, one transaction per action: the panel sends the calls (`src/lib/layers/panelOps.ts`), the engine validates after every step, and the document that comes back is what is shown and what becomes the Undo entry. A drag (opacity, an adjustment slider) is drawn at once as a proposal that never enters history and is committed through the engine when it pauses or ends |
+| Selecting a layer | The interface. It changes which layer is active, not the document's content, and is not an Undo entry |
+| Mask from selection, load a mask as the selection, apply a mask, rasterize, convert to a smart object, flip, the transform box, text / shape / smart-object editing, RAW development, painting a mask | The interface and their own commands. `core.layer.mask_from_selection` exists as an operation (a macro can use it), but the panel's own **From selection** button does not use it yet; the rest have no registered operation, so a macro cannot contain them and the recorder says so |
+| The single-image edit stack (sliders on a photo that is not a layered document) | The interface; unchanged |
 
-The middle row is the one that matters. It is two implementations of the same operations,
-agreed by test and not by construction. If they disagree on a case the vectors do not
-cover, a macro would do something different from the panel. Moving those actions onto the
-engine (one round trip per commit, with a local preview for gestures) is the way to make
-the claim true by construction; it was not done in this phase.
+Two things follow from the panel going through the engine, and are worth knowing:
+
+* **An edit is a round trip.** The whole layer tree (not its pixels) goes to the engine and
+  comes back. Edits from the panel queue behind one another in order, each built from the
+  document the one before returned, so a quick second click is applied, not refused. While
+  an edit is with the engine, other kinds of change (opening a file, undo, a macro) wait.
+* **A refusal is the engine's.** A move into the group's own subtree, grouping layers that
+  do not share a parent, deleting a locked layer: the message is the engine's, and nothing
+  changed.
+
+What is still two implementations: the rows marked "the interface" above. The *Layers
+panel's structural and property edits* are no longer among them.
 
 ## Workflows, the planner and batch
 

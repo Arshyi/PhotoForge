@@ -320,8 +320,13 @@ describe('recording a macro in the application', () => {
       ['core.layer.set_visible', { selector: { type: 'name', name: 'Background' }, visible: false }]
     ]);
     expect(within(dialog).queryByRole('alert', { name: 'Problems with this macro' })).toBeNull();
-    // Recording does not touch the backend: nothing was run to make it.
-    expect(calls('apply_transaction')).toHaveLength(0);
+    // Recording runs nothing of its own. The two edits themselves were made by the engine, as the
+    // person, one transaction each; the panel did not change the document by itself.
+    const made = calls('apply_transaction').map(([, args]) => (args as { request: TransactionRequest }).request);
+    expect(made.map((request) => [request.origin, request.steps.map((step) => step.op)])).toEqual([
+      ['user', ['core.layer.set_visible']],
+      ['user', ['core.layer.set_visible']]
+    ]);
   });
 
   it('records an adjustment layer as the registered operation that makes it', async () => {

@@ -5,12 +5,25 @@
 Float compositing, RAW batch development and ICC transformations run locally.
 No Phase 10 feature sends images, EXIF, GPS, camera serials, source hashes or
 ICC profiles to a service. Embedded RGB profiles are read only to transform
-local pixels. Output strips source EXIF/GPS and embeds the selected RGB ICC;
-there is no hidden metadata-copy option. Linked RAW paths and hashes are stored
-inside local editable projects/recovery, so sharing a project can disclose them.
+local pixels. Output embeds the selected RGB ICC and writes the source's EXIF,
+XMP and IPTC under a policy chosen on export: by default without the place, the
+owner and serial numbers, the maker note and any embedded preview; on request
+all of it, or none (see [metadata.md](metadata.md)). Each export says what it
+removed. Linked RAW paths and hashes are stored inside local editable
+projects/recovery, so sharing a project can disclose them. **A project also
+holds the photograph's own EXIF, XMP and IPTC, including where it was taken**,
+because it is the editable document and an export from it needs them: export an
+image, not the project, to share a picture.
 Batch logs include local input/output paths and errors in the chosen folder.
 No native CMS library, external executable or runtime download is added.
 WebView2's independent runtime-network boundary described below still applies.
+
+## Phase 15 clipboard
+
+The clipboard is touched only when the person copies or pastes: PhotoForge does not watch it, read
+it in the background, or keep what it read. A copy replaces the clipboard with one picture; a
+paste reads the picture on it and nothing else (text, file lists and other formats are not read).
+Nothing is sent anywhere. See [clipboard.md](clipboard.md).
 
 ## Phase 9 RAW development
 

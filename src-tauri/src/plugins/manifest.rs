@@ -622,11 +622,13 @@ pub struct PluginManifest {
 
 /// Operations a plugin's command may not issue: those that destroy work or change
 /// what protects it. A person can still do any of them by hand.
-pub const PLUGIN_DENIED_OPERATIONS: [OperationKind; 4] = [
+pub const PLUGIN_DENIED_OPERATIONS: [OperationKind; 5] = [
     OperationKind::Delete,
     OperationKind::Flatten,
     OperationKind::MergeDown,
     OperationKind::SetLocked,
+    // Names a buffer the session already holds; only a person placing a file may.
+    OperationKind::PlacePixels,
 ];
 
 impl PluginManifest {

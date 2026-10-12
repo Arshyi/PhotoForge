@@ -102,8 +102,10 @@ the test suite rather than hidden.
 
 ## Blend modes
 
-Sixteen modes are implemented. The twelve separable modes evaluate one channel
-at a time; the four non-separable modes mix all three channels.
+Twenty-six modes are implemented: the sixteen of the W3C compositing model and ten
+that Photoshop has and the W3C set does not (the last ten rows). Twenty-two evaluate
+one channel at a time; Hue, Saturation, Color, Luminosity, Darker Color and Lighter
+Color work on all three channels together.
 
 | Mode | `B(Cb, Cs)` |
 | --- | --- |
@@ -123,10 +125,30 @@ at a time; the four non-separable modes mix all three channels.
 | Saturation | `SetLum(SetSat(Cb, Sat(Cs)), Lum(Cb))` |
 | Color | `SetLum(Cs, Lum(Cb))` |
 | Luminosity | `SetLum(Cb, Lum(Cs))` |
+| Linear Burn | `max(0, Cb + Cs − 1)` |
+| Linear Dodge (Add) | `min(1, Cb + Cs)` |
+| Darker Color | whichever of `Cb`, `Cs` has the smaller `Lum` (`Cb` on a tie) |
+| Lighter Color | whichever of `Cb`, `Cs` has the larger `Lum` (`Cb` on a tie) |
+| Vivid Light | `ColorBurn(Cb, 2·Cs)` for `Cs ≤ 0.5`; else `ColorDodge(Cb, 2·(Cs − 0.5))` |
+| Linear Light | `clamp(Cb + 2·Cs − 1, 0, 1)` |
+| Pin Light | `min(Cb, 2·Cs)` for `Cs ≤ 0.5`; else `max(Cb, 2·(Cs − 0.5))` |
+| Hard Mix | `1` if `Cb + Cs ≥ 1`, else `0` |
+| Subtract | `max(0, Cb − Cs)` |
+| Divide | `0` if `Cs = 0` and `Cb = 0`; `1` if `Cs = 0`; else `min(1, Cb / Cs)` |
 
 `D(Cb) = ((16·Cb − 12)·Cb + 4)·Cb` for `Cb ≤ 0.25`, otherwise `√Cb`.
 `Lum(C) = 0.3R + 0.59G + 0.11B`, and `SetLum` clips back into gamut using the
 W3C `ClipColor` procedure.
+
+The last ten are the ones Photoshop writes as `lbrn`, `lddg`, `dkCl`, `lgCl`, `vLit`, `lLit`,
+`pLit`, `hMix`, `fsub` and `fdiv`. The formulas are the ones Photoshop is documented to use and
+were checked against Photoshop's own flattened pictures of a blend-mode chart (see
+[phase-15-1c-results.md](phase-15-1c-results.md)); where that check could not settle a corner
+(Divide by zero, ties in Darker Color) the choice made is the one listed. **Dissolve** is not
+implemented: it is a random dither whose pattern is not reproducible.
+
+A project that uses one of these modes cannot be opened by a PhotoForge from before they existed,
+which rejects an unknown mode rather than treating it as Normal.
 
 ### Numerical guarantees
 
@@ -180,6 +202,53 @@ changes appearance.
 
 PhotoForge does not claim full Photoshop-compatible group semantics — only that
 these two models behave as documented here.
+
+## Clipping
+
+A layer can be **clipped to the layer beneath it**. It then paints only where that layer does,
+and the two are composited as one unit. The *base* of a clipped layer is the nearest unclipped
+sibling below it in the same stack; every layer clipped to the same base is part of its group.
+
+```text
+T  = base, through its own transform and mask, at full opacity in Normal mode
+T  = T atop each clipped layer, bottom to top, through its own transform, mask,
+     opacity and blend mode          (an adjustment layer is applied to T)
+out = T over the backdrop, with the base's opacity and blend mode
+```
+
+*Atop* means the clipped layer changes the colour of what is there and leaves its coverage alone:
+
+```text
+ao = ab
+Co = (1 - as) * Cb + as * B(Cb, Cs)
+```
+
+so nothing a clipped layer paints can reach past the base, and a half-transparent base stays
+half transparent however opaque the layer clipped to it is. This is Photoshop's "Blend Clipped
+Layers as Group", which is its default; PhotoForge does not have the switched-off form, and
+the Photoshop importer reports a base that has it off.
+
+Consequences worth stating:
+
+* The **base's blend mode and opacity belong to the whole group.** A Multiply base with a Normal
+  layer clipped to it multiplies the clipped layer's result, not the base alone.
+* An **adjustment layer clipped to a layer** changes that layer, and whatever is clipped
+  beneath it, and nothing else. It cannot see the layers below the base.
+* A **hidden base hides everything clipped to it.** A hidden clipped layer paints nothing and
+  does not re-attach the layers above it to another base.
+* The **first layer of a stack has nothing to clip to** and paints as an ordinary layer;
+  the engine clears its flag, so the stored document says so as well.
+* A **group can be a base** and a group can be clipped. A pass-through group that is a base
+  paints as an isolated one: inside a clipping group there is no backdrop to pass through to.
+* An **adjustment layer cannot be a base**: it has no coverage of its own. Layers clipped to
+  one paint as ordinary layers.
+* A group with nothing visible clipped to it renders exactly as it would unclipped.
+
+The three renderers (8-bit, float full-frame, tiled) implement this separately and are checked
+against each other: the tiled renderer is bit-identical to the float one on 60 random trees
+that mix every layer kind, with clipped layers at every level, at two tile sizes. A tile in
+the cache is keyed by the bases it is rendered through, so adding or removing a clip cannot
+serve a stale tile.
 
 ## Adjustment layers
 

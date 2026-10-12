@@ -259,7 +259,7 @@ fn join_outline(
     };
     match style.join {
         LineJoin::Round => vec![disc(current, half)],
-        LineJoin::Bevel => vec![bevel(current, n0, n1, half)],
+        LineJoin::Bevel => bevels(current, n0, n1, half),
         LineJoin::Miter => {
             // The half-angle between the segments decides how far the point
             // reaches. Past the limit a miter becomes a spike, so it degrades
@@ -267,13 +267,13 @@ fn join_outline(
             let cos_theta = (n0.0 * n1.0 + n0.1 * n1.1).clamp(-1.0, 1.0);
             let half_angle_cos = ((1.0 + cos_theta) * 0.5).max(0.0).sqrt();
             if half_angle_cos <= 1e-4 || 1.0 / half_angle_cos > style.miter_limit {
-                return vec![bevel(current, n0, n1, half)];
+                return bevels(current, n0, n1, half);
             }
             // Bisector of the two outward normals, extended to the miter point.
             let (bx, by) = (n0.0 + n1.0, n0.1 + n1.1);
             let length = (bx * bx + by * by).sqrt();
             if length <= 1e-6 {
-                return vec![bevel(current, n0, n1, half)];
+                return bevels(current, n0, n1, half);
             }
             let scale = half / half_angle_cos;
             let (ux, uy) = (bx / length, by / length);
@@ -298,12 +298,30 @@ fn join_outline(
     }
 }
 
-fn bevel(current: (f32, f32), n0: (f32, f32), n1: (f32, f32), half: f32) -> Vec<(f32, f32)> {
-    vec![
-        current,
-        (current.0 + n0.0 * half, current.1 + n0.1 * half),
-        (current.0 + n1.0 * half, current.1 + n1.1 * half),
-    ]
+/// The triangle across a joint, on both sides of the path.
+///
+/// Which side is the outside depends on which way the path turns, and a path may turn either
+/// way at any vertex, so a bevel is built on both sides and the one that is not outside lies
+/// within the segments' own quads, where it changes nothing. Built on one side only, every turn
+/// the other way left its corner notched (found by drawing a bevelled rectangle beside an SVG
+/// renderer's).
+fn bevels(current: (f32, f32), n0: (f32, f32), n1: (f32, f32), half: f32) -> Vec<Vec<(f32, f32)>> {
+    [1.0_f32, -1.0]
+        .into_iter()
+        .map(|sign| {
+            vec![
+                current,
+                (
+                    current.0 + n0.0 * half * sign,
+                    current.1 + n0.1 * half * sign,
+                ),
+                (
+                    current.0 + n1.0 * half * sign,
+                    current.1 + n1.1 * half * sign,
+                ),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -414,6 +432,37 @@ mod tests {
             (butt - 1440.0).abs() < 120.0,
             "a closed square stroke covered {butt}"
         );
+    }
+
+    /// A bevel cuts the outside of the corner, whichever way the path goes round.
+    #[test]
+    fn a_bevel_fills_the_outer_corner_in_both_windings() {
+        // A square of side 40 stroked 8 wide: the outer boundary is a square of 48 with each
+        // corner cut across by a triangle of legs 4, the hole is a square of 32.
+        let clockwise = vec![vec![
+            (20.0f32, 20.0f32),
+            (60.0, 20.0),
+            (60.0, 60.0),
+            (20.0, 60.0),
+            (20.0, 20.0),
+        ]];
+        let mut counter = clockwise[0].clone();
+        counter.reverse();
+        let counter = vec![counter];
+        let style = StrokeStyle {
+            width: 8.0,
+            cap: LineCap::Butt,
+            join: LineJoin::Bevel,
+            ..StrokeStyle::default()
+        };
+        let expected = 48.0 * 48.0 - 4.0 * 0.5 * 4.0 * 4.0 - 32.0 * 32.0;
+        for (name, path) in [("clockwise", clockwise), ("counter-clockwise", counter)] {
+            let covered = coverage_of(&stroke_outlines(&path, &style), 96);
+            assert!(
+                (covered - expected).abs() < 3.0,
+                "{name}: covered {covered}, expected {expected}"
+            );
+        }
     }
 
     /// The miter limit exists to stop a spike. A nearly doubled-back joint must

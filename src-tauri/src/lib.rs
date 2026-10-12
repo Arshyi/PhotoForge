@@ -2,6 +2,7 @@
 // dispatch, argument deserialization, and managed state — instead of calling the
 // underlying Rust functions directly. Nothing outside the app consumes them.
 pub mod application;
+pub mod clipboard;
 pub mod color;
 pub mod color_management;
 pub mod commands;
@@ -25,18 +26,23 @@ pub use image_processing::{fixtures, kernels as image_processing_kernels, metric
 pub mod infrastructure;
 pub mod layers;
 pub mod mask;
+pub mod metadata;
 mod network_policy;
 /// The operation registry and transaction engine: the one path by which a plugin, a
 /// macro, a workflow, a planner or a batch run edits a document.
+pub mod openexr;
 pub mod operations;
 pub mod pixel;
 /// Plugins: filters in a WebAssembly sandbox, declarative commands and panels, and the
 /// package format that carries them.
 pub mod plugins;
+/// Reading Photoshop (PSD / PSB) documents, bounded and structural.
+pub mod psd;
 pub mod raw;
 pub mod resources;
 /// Bounded reads of image sources, and the provenance of what was read.
 pub mod source;
+pub mod svg;
 
 use application::AppState;
 use commands::{
@@ -138,14 +144,22 @@ pub fn register_plugin_commands<R: tauri::Runtime>(
         merge_layer_pixels,
         save_layer_project,
         load_layer_project,
-        create_blank_layer_document
+        create_blank_layer_document,
+        import_psd_document,
+        import_svg_document,
+        import_exr_document,
+        export_psd_document,
+        export_svg_document,
+        export_exr_document
     ])
 }
 
 use commands::{
-    convert_layers_to_smart_object, create_blank_layer_document, import_smart_object,
-    inspect_smart_links, relink_smart_source, resource_status, set_memory_budget,
-    update_smart_source,
+    clipboard_has_image, convert_layers_to_smart_object, copy_to_clipboard,
+    create_blank_layer_document, export_exr_document, export_psd_document, export_svg_document,
+    import_exr_document, import_psd_document, import_smart_object, import_svg_document,
+    inspect_smart_links, open_clipboard_image, paste_clipboard_image, relink_smart_source,
+    resource_status, set_memory_budget, update_smart_source,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,6 +195,16 @@ pub fn run() {
             remember_plugin_values,
             run_plugin_command,
             create_blank_layer_document,
+            import_psd_document,
+            import_svg_document,
+            import_exr_document,
+            export_psd_document,
+            export_svg_document,
+            export_exr_document,
+            copy_to_clipboard,
+            paste_clipboard_image,
+            open_clipboard_image,
+            clipboard_has_image,
             render_preview,
             analyze_image,
             get_component_snapshot,

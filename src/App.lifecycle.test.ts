@@ -99,7 +99,7 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
   let failSave: boolean;
   let failPixelWorker: boolean;
   let importedWorkflow: Workflow | null;
-  let pendingCreate: Promise<unknown> | null;
+  let pendingTransaction: Promise<unknown> | null;
   let loadedProject: ProjectLoadResult | null;
 
   beforeEach(() => {
@@ -108,7 +108,7 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     failSave = false;
     failPixelWorker = false;
     importedWorkflow = null;
-    pendingCreate = null;
+    pendingTransaction = null;
     loadedProject = null;
     nativeEvents.drop = undefined;
     vi.mocked(open).mockReset();
@@ -140,9 +140,6 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
         case 'render_layer_thumbnail': return {
           layerId: args.layerId, previewDataUrl: originalUrl, width: 16, height: 12
         };
-        case 'create_layer_pixels': return pendingCreate ?? {
-          pixelId: 'pxcreated', width: 16, height: 12, bytes: 768
-        };
         case 'apply_operations_to_layer':
           if (failPixelWorker) throw new Error('Pixel worker failed');
           return { pixelId: 'pxedited', width: 16, height: 12, bytes: 768 };
@@ -151,6 +148,8 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
         // these tests replay on a copy and, like the engine, hands back a document
         // without touching the one it was given.
         case 'apply_transaction': {
+          // A test can hold the engine to see what the application does while it is busy.
+          if (pendingTransaction) await pendingTransaction;
           const request = args.request as TransactionRequest;
           let next = structuredClone(request.document) as LayerDocument;
           let lastCreated: string | null = null;
@@ -160,6 +159,10 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
               next = updateLayer(next, next.activeLayerId!, (layer) => ({ ...layer, opacity: params.opacity }));
             } else if (step.op === 'core.layer.add_adjustment') {
               const layer = createAdjustmentLayer(params.name ?? 'Adjustment', params.operation);
+              next = insertLayer(next, layer, null, next.layers.length);
+              lastCreated = layer.id;
+            } else if (step.op === 'core.layer.add_pixel') {
+              const layer = createPixelLayer(params.name ?? 'Layer', 'pxcreated', 16, 12);
               next = insertLayer(next, layer, null, next.layers.length);
               lastCreated = layer.id;
             } else if (step.op === 'core.document.flatten') {
@@ -363,13 +366,15 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     expect(screen.getByAltText('Edited preview of fixture.png').getAttribute('src')).toBe(originalUrl);
   });
 
-  it('blocks Open and native drag-drop while an asynchronous layer creation owns the document', async () => {
+  it('blocks Open and native drag-drop while the engine is making a layer', async () => {
     render(App);
     await openImage();
     let finishCreate!: (value: unknown) => void;
-    pendingCreate = new Promise((resolve) => { finishCreate = resolve; });
+    pendingTransaction = new Promise((resolve) => { finishCreate = resolve; });
     await fireEvent.click(screen.getByRole('button', { name: 'New pixel layer' }));
-    await waitFor(() => expect(calls('create_layer_pixels')).toHaveLength(1));
+    await waitFor(() => expect(calls('apply_transaction')).toHaveLength(1));
+    // The panel asked the engine to make the layer; it did not draw one itself.
+    expect(argsFor('apply_transaction').request).toMatchObject({ origin: 'user', steps: [{ op: 'core.layer.add_pixel' }] });
     await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     expect(nativeEvents.drop).toBeTypeOf('function');
     nativeEvents.drop?.({ payload: { type: 'drop', paths: ['C:\\fixtures\\other.png'] } });
@@ -378,7 +383,7 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     expect(calls('open_image')).toHaveLength(1);
     expect(calls('load_layer_project')).toHaveLength(0);
 
-    finishCreate({ pixelId: 'pxcreated', width: 16, height: 12, bytes: 768 });
+    finishCreate(undefined);
     await screen.findByRole('button', { name: 'Select Layer' });
     await waitFor(() => expect(calls('render_layer_composite')).toHaveLength(1));
     const rendered = argsFor('render_layer_composite');

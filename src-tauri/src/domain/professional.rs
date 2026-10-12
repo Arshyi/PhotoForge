@@ -164,6 +164,9 @@ pub struct BatchOptions {
     pub color: Option<crate::color_management::ColorExportOptions>,
     #[serde(default)]
     pub dry_run: bool,
+    /// What each file's output does with its source's EXIF, XMP and IPTC.
+    #[serde(default)]
+    pub metadata_policy: crate::metadata::MetadataPolicy,
 }
 
 impl BatchOptions {
@@ -467,6 +470,7 @@ mod tests {
                 export_profile: ExportProfile::Lossless,
                 color: None,
                 dry_run: false,
+                metadata_policy: crate::metadata::MetadataPolicy::default(),
             };
             assert!(options.validate().is_err());
         }
@@ -485,6 +489,7 @@ mod tests {
                 export_profile: ExportProfile::Web,
                 color: None,
                 dry_run: true,
+                metadata_policy: crate::metadata::MetadataPolicy::default(),
             };
             options.validate().unwrap();
         }

@@ -188,7 +188,7 @@
   import { LayerHistory } from './lib/layers/history';
   import { executeLayerWorkflow } from './lib/layers/workflowExecution';
   import { applyTransaction, exportMacroFile, importMacroFile, planTransaction } from './lib/operations/client';
-  import type { Origin as OperationOrigin, StepReport, TransactionRequest } from './lib/operations/types';
+  import type { Origin as OperationOrigin, StepReport, TransactionRequest, TransactionResult } from './lib/operations/types';
   import AutomationDialog from './lib/components/AutomationDialog.svelte';
   import { loadMacros, macroDocument, newMacro, parseMacroDocument, saveMacros, toCalls, type Macro } from './lib/automation/macros';
   import { recorder, selectorFor, type RecorderState } from './lib/automation/recorder';
@@ -196,33 +196,71 @@
   import type { LayerWorkflowStep } from './lib/layers/workflow';
   import { ThumbnailCache, thumbnailKey } from './lib/layers/thumbnails';
   import { adjustmentDefinitions, definitionFor } from './lib/layers/adjustments';
+  // The tree functions that remain here build or preview a document locally (a new document, a
+  // text or shape being drawn, a gesture in progress). The Layers panel's own edits — move, group,
+  // delete, duplicate, flags, masks, adjustments — are made by the engine; see `runPanelPlan`.
   import {
     activeLayer as activeLayerOf,
     childrenOf,
-    createAdjustmentLayer,
     createDocument,
-    createGroupLayer,
     createPixelLayer,
     duplicateSmartObjectIndependent,
-    duplicateLayer,
     eachLayer,
     findLayer,
-    groupLayers,
     insertLayer,
     isSimpleDocument,
-    moveLayer,
     parentOf,
     pathTo,
-    removeLayer,
     timestamp,
-    ungroupLayer,
     updateLayer,
     validateDocument
   } from './lib/layers/tree';
+  import * as panel from './lib/layers/panelOps';
+  import {
+    exportPsdDocument,
+    exportSentence,
+    importPsdDocument,
+    importSentence,
+    isPhotoshopPath,
+    type PsdExportReport,
+    type PsdImportReport
+  } from './lib/layers/psd';
+  import {
+    exportSvgDocument,
+    importSvgDocument,
+    isSvgPath,
+    svgExportSentence,
+    svgImportSentence,
+    type SvgExportReport,
+    type SvgImportReport
+  } from './lib/layers/svg';
+  import {
+    copySentence,
+    copyToClipboard,
+    openClipboardImage,
+    pasteClipboardImage,
+    pasteSentence
+  } from './lib/layers/clipboard';
+  import {
+    exportExrDocument,
+    exrExportSentence,
+    exrImportSentence,
+    importExrDocument,
+    isExrPath,
+    type ExrExportReport,
+    type ExrImportReport
+  } from './lib/layers/exr';
+  import PsdImportReportDialog from './lib/components/PsdImportReport.svelte';
+  import {
+    describeSource,
+    metadataSentence,
+    METADATA_POLICIES,
+    metadataPolicy,
+    policyHint
+  } from './lib/metadata';
+  import { shareUnchanged } from './lib/layers/sharing';
   import {
     applyOperationsToLayer,
-    createLayerMask,
-    createLayerPixels,
     discardRecoverySnapshot,
     exportLayerComposite,
     listRecoverySnapshots,
@@ -395,6 +433,34 @@
   let editTarget: EditTarget = 'layer';
   let adjustmentTarget: AdjustmentTarget = 'document';
   let layerBusy = false;
+  /**
+   * How many Layers-panel edits are with the engine right now. Panel edits queue behind one another
+   * (a quick second click is applied after the first, not refused); every other kind of change
+   * waits until they have finished.
+   */
+  /** The report of the Photoshop document just opened, while it is being read. */
+  let psdReport: {
+    report:
+      | PsdImportReport
+      | PsdExportReport
+      | SvgExportReport
+      | SvgImportReport
+      | ExrImportReport
+      | ExrExportReport;
+    fileName: string;
+    mode: 'import' | 'export';
+  } | null = null;
+  let engineInFlight = 0;
+  let engineChain: Promise<unknown> = Promise.resolve();
+  /**
+   * A gesture's proposed change to one layer (an opacity drag, an adjustment slider). It is drawn
+   * while the gesture lasts and never enters history; the engine's answer replaces it.
+   */
+  let layerPreview: { layerId: string; apply: (layer: Layer) => Layer } | null = null;
+  let gestureTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingGesture: (() => Promise<unknown>) | null = null;
+  /** How long a gesture may pause before what it proposed is committed. */
+  const GESTURE_SETTLE_MS = 400;
   let thumbnailGeneration = 0;
   let projectPath: string | null = null;
   let projectDirty = false;
@@ -431,7 +497,7 @@
   $: selectionCanvasHeight = selectionState.canvasHeight || metadata?.height || 0;
   $: selectionPanelHistory = selectionPanelHistoryAvailability(historyEvents, redoEvents);
   $: geometryMutationBusy = geometryTransactionRunning || Boolean(pendingGeometryCommit);
-  $: fileMutationBusy = opening || exporting || layerBusy || recoveryBusy;
+  $: fileMutationBusy = opening || exporting || layerBusy || recoveryBusy || engineInFlight > 0;
   // Once nothing is busy, a later close request deserves its own warning
   // rather than inheriting permission from an operation that has since ended.
   $: if (!fileMutationBusy && closeWarned) closeWarned = false;
@@ -473,7 +539,7 @@
     let unlistenClose: (() => void) | undefined;
     const persistBeforeClose = (event: BeforeUnloadEvent) => {
       persistSelectionState();
-      if (projectDirty || layerBusy || recoveryBusy || exporting) {
+      if (projectDirty || layerBusy || recoveryBusy || exporting || engineInFlight > 0) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -487,7 +553,7 @@
       let decision = closeOnFailure;
       try {
         decision = decideClose({
-          busy: layerBusy || recoveryBusy || exporting || opening,
+          busy: layerBusy || recoveryBusy || exporting || opening || engineInFlight > 0,
           dirty: projectDirty,
           alreadyWarned: closeWarned
         });
@@ -530,11 +596,14 @@
           selectionTool: selectionState.tool,
           settingsOpen,
           // The Refine Selection dialog owns the keyboard while it is open.
-          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog || pluginModalOpen),
+          modalOpen: Boolean(refineOriginalMask || textEdit || smartEditing || newDocumentOpen || sourceDialog || pluginModalOpen || psdReport),
           bindings: shortcuts
         }
       );
       if (!intent) return;
+      // Ctrl+C with some text selected on the page copies that text, as the person expects; only
+      // with nothing selected is it a copy of the picture.
+      if (intent.type === 'clipboard' && intent.action !== 'paste' && pageTextIsSelected()) return;
       event.preventDefault();
       runShortcut(intent);
     };
@@ -601,6 +670,10 @@
       case 'transform_commit':
         transformActive = false;
         return;
+      case 'clipboard':
+        if (intent.action === 'paste') void pasteFromClipboard();
+        else void copyPicture(intent.action === 'copy_merged');
+        return;
       case 'mask':
         void applyMaskOperation(
           intent.action === 'select_all'
@@ -625,6 +698,15 @@
       case 'binding':
         runBinding(intent.action);
         return;
+    }
+  }
+
+  /** Whether some text is selected on the page (a toast, a report line, a field's content). */
+  function pageTextIsSelected(): boolean {
+    try {
+      return (window.getSelection()?.toString() ?? '').length > 0;
+    } catch {
+      return false;
     }
   }
 
@@ -659,6 +741,9 @@
         title: 'Open a photo',
         filters: [
           { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] },
+          { name: 'Photoshop (PSD, PSB)', extensions: ['psd', 'psb'] },
+          { name: 'SVG (opened as shape layers)', extensions: ['svg'] },
+          { name: 'OpenEXR (scene-linear, opened as layers)', extensions: ['exr'] },
           { name: 'Camera RAW (DNG)', extensions: ['dng'] }
         ]
       });
@@ -773,7 +858,8 @@
     if (operationSpecs.length) return;
     try {
       const specs = await listOperations();
-      operationSpecs = Array.isArray(specs) ? specs : [];
+      // A macro, a plugin or a planner may not issue what only a person placing a file may.
+      operationSpecs = Array.isArray(specs) ? specs.filter((spec) => !spec.userOnly) : [];
     } catch {
       operationSpecs = [];
     }
@@ -987,7 +1073,11 @@
       changeSourceRegion: () => void changeSourceRegion(),
       openAutomation: () => void openAutomationEditor(),
       startRecording: () => startRecording(),
-      stopRecording: () => stopRecording()
+      stopRecording: () => stopRecording(),
+      copyLayer: () => void copyPicture(false),
+      copyMerged: () => void copyPicture(true),
+      paste: () => void pasteFromClipboard(),
+      newFromClipboard: () => void newFromClipboard()
     }
   };
   $: paletteCommands = [
@@ -1083,6 +1173,22 @@
   }
 
   async function loadPath(path: string, selection?: OpenSelection) {
+    // A Photoshop document opens as a layered document, with a report of what did not
+    // survive; it has its own command and never goes through image admission.
+    if (isPhotoshopPath(path)) {
+      await importPhotoshop(path);
+      return;
+    }
+    // An SVG likewise: shapes, not pixels, with a report of what the subset left out.
+    if (isSvgPath(path)) {
+      await importSvg(path);
+      return;
+    }
+    // An OpenEXR file likewise: scene-linear float pixels, read in their own convention.
+    if (isExrPath(path)) {
+      await importExr(path);
+      return;
+    }
     // Before anything about the open document is touched, so that choosing Cancel
     // in the dialog leaves it exactly as it was.
     if (!selection) {
@@ -1648,9 +1754,13 @@
     redoEvents = [];
   }
 
-  function allowWorkspaceMutation(allowGeometryCoalescing = false): boolean {
+  /**
+   * `queuedPanelEdit` is for the Layers panel's own edits, which wait their turn behind one another
+   * instead of being refused while an earlier one is still with the engine.
+   */
+  function allowWorkspaceMutation(allowGeometryCoalescing = false, queuedPanelEdit = false): boolean {
     if (smartEditing) { notify('Save or cancel smart contents before editing the parent document.', 'error'); return false; }
-    if (opening || exporting || layerBusy || recoveryBusy) {
+    if (opening || exporting || layerBusy || recoveryBusy || (engineInFlight > 0 && !queuedPanelEdit)) {
       notify('Wait for the current file or layer operation to finish.', 'error');
       return false;
     }
@@ -1680,6 +1790,7 @@
     smartEditing = null;
     smartLinkStatuses = [];
     layerRevision += 1;
+    abandonGesture();
     recoveryPaths = new Set();
     transformPreview = null;
     transformActive = false;
@@ -1703,9 +1814,16 @@
    * `coalesceKey` folds a continuous gesture — an opacity drag, a drag-and-drop
    * reorder — into a single logical undo entry.
    */
-  function commitLayers(next: LayerDocument, label: string, coalesceKey?: string, recorded?: () => void): boolean {
+  function commitLayers(
+    next: LayerDocument,
+    label: string,
+    coalesceKey?: string,
+    recorded?: () => void,
+    /** The document came from the engine, whose validator has already run after every step. */
+    fromEngine = false
+  ): boolean {
     if (!layerDocument || next === layerDocument) return false;
-    const problems = validateDocument(next);
+    const problems = fromEngine ? [] : validateDocument(next);
     if (problems.length) {
       notify(problems[0], 'error');
       return false;
@@ -1918,8 +2036,8 @@
     }
   }
 
-  function requireLayerDocument(): LayerDocument | null {
-    if (!allowWorkspaceMutation()) return null;
+  function requireLayerDocument(queuedPanelEdit = false): LayerDocument | null {
+    if (!allowWorkspaceMutation(false, queuedPanelEdit)) return null;
     if (!layerDocument) {
       notify('Open an image before editing layers.', 'error');
       return null;
@@ -1927,22 +2045,179 @@
     return layerDocument;
   }
 
+  /** The document as a gesture in progress proposes it. For drawing and display only. */
+  function withLayerPreview(document: LayerDocument): LayerDocument {
+    return layerPreview ? updateLayer(document, layerPreview.layerId, layerPreview.apply) : document;
+  }
+
+  $: panelDocument = layerDocument ? (layerPreview ? withLayerPreview(layerDocument) : layerDocument) : null;
+
+  // ---- Layers-panel edits: every change they commit is the engine's -------------------------------
+
+  /** What a panel edit may ask for besides its plan. */
+  interface PanelRunOptions {
+    /** A selection mapped to the canvas, for an operation that needs one. */
+    selection?: TransactionRequest['selection'];
+    /** Writes the edit down for a macro being recorded; sees the document as it was before. */
+    recorded?: (before: LayerDocument, result: TransactionResult) => void;
+    /** Runs after the result has been committed. */
+    after?: (result: TransactionResult) => void;
+  }
+
+  /**
+   * Makes a Layers-panel edit by asking the engine to, and commits what comes back.
+   *
+   * `build` is called when this edit's turn comes, with the document as it is then, so an edit
+   * queued behind another sees the other's result. The engine runs the plan as one transaction on
+   * a private copy, validates after every step, and returns the whole document; that document —
+   * not anything computed here — is the next undo entry. Resolves to the result, or null if
+   * nothing was committed (the reason has already been shown).
+   */
+  function runPanelPlan(
+    build: (document: LayerDocument) => panel.PanelPlan | null,
+    options: PanelRunOptions = {}
+  ): Promise<TransactionResult | null> {
+    if (!allowWorkspaceMutation(false, true)) return Promise.resolve(null);
+    if (!layerDocument) {
+      notify('Open an image before editing layers.', 'error');
+      return Promise.resolve(null);
+    }
+    // A gesture still settling belongs before this edit, not after it.
+    if (pendingGesture) void flushGesture();
+    // Busy from the moment it is queued, so nothing else slips in between two queued edits.
+    engineInFlight += 1;
+    const turn = async () => {
+      try {
+        return await executePanelPlan(build, options);
+      } finally {
+        engineInFlight -= 1;
+      }
+    };
+    const result = engineChain.then(turn, turn);
+    engineChain = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Runs a view change (selecting a layer) after the edits already queued, without refusing it. */
+  function afterQueuedEdits(change: () => void) {
+    engineInFlight += 1;
+    const turn = () => {
+      try {
+        change();
+      } finally {
+        engineInFlight -= 1;
+      }
+    };
+    engineChain = engineChain.then(turn, turn);
+  }
+
+  async function executePanelPlan(
+    build: (document: LayerDocument) => panel.PanelPlan | null,
+    options: PanelRunOptions
+  ): Promise<TransactionResult | null> {
+    const before = layerDocument;
+    if (!before) return null;
+    const plan = build(before);
+    if (!plan) return null;
+    const revision = layerRevision;
+    try {
+      const result = await applyTransaction({
+        document: before,
+        label: plan.label,
+        steps: plan.steps,
+        selection: options.selection ?? null,
+        origin: 'user'
+      });
+      if (revision !== layerRevision) {
+        notify('The document changed while that was being applied, so it was not applied.', 'error');
+        void releaseUnreferencedPixels();
+        return null;
+      }
+      // The engine's document is new all the way down; restore the sharing history relies on.
+      const next = { ...result, document: shareUnchanged(before, result.document) };
+      const recorded = options.recorded ? () => options.recorded?.(before, next) : undefined;
+      if (!commitLayers(next.document, plan.label, plan.coalesceKey, recorded, true)) return null;
+      options.after?.(next);
+      return next;
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+      void releaseUnreferencedPixels();
+      return null;
+    }
+  }
+
+  /**
+   * Shows a gesture's proposed change straight away and commits it through the engine once the
+   * gesture pauses or ends, so a drag is drawn live but is one undo step, made by the engine.
+   */
+  function proposeLayerGesture(
+    layerId: string,
+    apply: (layer: Layer) => Layer,
+    commit: () => Promise<unknown>
+  ) {
+    if (!allowWorkspaceMutation(false, true) || !layerDocument) return;
+    if (pendingGesture && layerPreview && layerPreview.layerId !== layerId) void flushGesture();
+    layerPreview = { layerId, apply };
+    schedulePreview();
+    pendingGesture = commit;
+    if (gestureTimer) clearTimeout(gestureTimer);
+    gestureTimer = setTimeout(() => void flushGesture(), GESTURE_SETTLE_MS);
+  }
+
+  /** Commits what the gesture in progress has proposed, now. */
+  async function flushGesture() {
+    if (gestureTimer) {
+      clearTimeout(gestureTimer);
+      gestureTimer = null;
+    }
+    const commit = pendingGesture;
+    pendingGesture = null;
+    if (!commit) return;
+    try {
+      await commit();
+    } finally {
+      if (!pendingGesture) {
+        layerPreview = null;
+        schedulePreview();
+      }
+    }
+  }
+
+  /** Drops a gesture's proposal without committing it, as when another document is opened. */
+  function abandonGesture() {
+    if (gestureTimer) clearTimeout(gestureTimer);
+    gestureTimer = null;
+    pendingGesture = null;
+    layerPreview = null;
+  }
+
   // A replacement pixel buffer (flatten, rasterize, direct edit or project
   // load) is not the image session's original even when its tree is simple.
   function compositeDocument(): LayerDocument | null {
     if (!layerDocument) return null;
+    const proposed = withLayerPreview(layerDocument);
     const document = transformPreview
-      ? updateLayer(layerDocument, transformPreview.layerId, (layer) => ({
+      ? updateLayer(proposed, transformPreview.layerId, (layer) => ({
           ...layer, transform: transformPreview!.transform
         }))
-      : layerDocument;
+      : proposed;
     const first = document.layers[0];
     return isSimpleDocument(document) && first?.content.type === 'pixel' &&
       first.content.pixelId === originalPixelId ? null : document;
   }
 
   function selectLayer(id: string, additive = false) {
-    const document = requireLayerDocument();
+    // Choosing a layer is a view change; behind queued edits it waits for their results instead of
+    // being refused, and so cannot be overwritten by one of them.
+    if (engineInFlight > 0) {
+      afterQueuedEdits(() => selectLayerNow(id, additive));
+      return;
+    }
+    selectLayerNow(id, additive);
+  }
+
+  function selectLayerNow(id: string, additive: boolean) {
+    const document = requireLayerDocument(true);
     if (!document) return;
 
     if (additive) {
@@ -1972,122 +2247,116 @@
     else if (editTarget === 'mask' && !layer?.mask) editTarget = 'layer';
   }
 
+  const TOGGLE_OPERATIONS = { visible: 'core.layer.set_visible', locked: 'core.layer.set_locked', collapsed: 'core.layer.set_collapsed' };
+
   function toggleLayerField(id: string, field: 'visible' | 'locked' | 'collapsed') {
-    const document = requireLayerDocument();
-    if (!document) return;
-    const labels = { visible: 'Layer visibility', locked: 'Lock layer', collapsed: 'Collapse group' };
-    const ops = { visible: 'core.layer.set_visible', locked: 'core.layer.set_locked', collapsed: 'core.layer.set_collapsed' };
-    const now = !findLayer(document, id)?.[field];
-    commitLayers(
-      updateLayer(document, id, (layer) => ({ ...layer, [field]: !layer[field] })),
-      labels[field],
-      undefined,
-      () => recorder.recordOnLayer(document, id, ops[field], { [field]: now })
+    void runPanelPlan(
+      (document) => {
+        const layer = findLayer(document, id);
+        return layer ? panel.toggleLayerField(layer, field) : null;
+      },
+      {
+        recorded: (before) =>
+          recorder.recordOnLayer(before, id, TOGGLE_OPERATIONS[field], { [field]: !findLayer(before, id)?.[field] })
+      }
     );
   }
 
   function renameLayer(id: string, name: string) {
-    const document = requireLayerDocument();
-    if (!document) return;
-    commitLayers(updateLayer(document, id, (layer) => ({ ...layer, name })), 'Rename layer', undefined,
-      () => recorder.recordOnLayer(document, id, 'core.layer.rename', { name }));
+    void runPanelPlan(() => panel.renameLayer(id, name), {
+      recorded: (before) => recorder.recordOnLayer(before, id, 'core.layer.rename', { name })
+    });
   }
 
+  /**
+   * The opacity slider fires on every step of a drag. The step is drawn at once as a proposal and
+   * the engine makes the change when the drag pauses or ends (`endLayerOpacity`).
+   */
   function setLayerOpacity(id: string, value: number) {
-    const document = requireLayerDocument();
-    if (!document) return;
     const opacity = Math.min(1, Math.max(0, value));
-    commitLayers(
-      updateLayer(document, id, (layer) => ({ ...layer, opacity })),
-      'Layer opacity',
-      `layer-opacity:${id}`,
-      () => recorder.recordOnLayer(document, id, 'core.layer.set_opacity', { opacity }, { gestureKey: `layer-opacity:${id}` })
+    proposeLayerGesture(
+      id,
+      (layer) => ({ ...layer, opacity }),
+      () =>
+        runPanelPlan(() => panel.setOpacity(id, opacity), {
+          recorded: (before) =>
+            recorder.recordOnLayer(before, id, 'core.layer.set_opacity', { opacity }, { gestureKey: `layer-opacity:${id}` })
+        })
     );
+  }
+
+  function endLayerOpacity() {
+    void flushGesture();
   }
 
   function setLayerBlendMode(id: string, mode: BlendMode) {
-    const document = requireLayerDocument();
-    if (!document) return;
-    commitLayers(
-      updateLayer(document, id, (layer) => ({ ...layer, blendMode: mode })),
-      'Blend mode',
-      undefined,
-      () => recorder.recordOnLayer(document, id, 'core.layer.set_blend_mode', { blendMode: mode })
-    );
+    void runPanelPlan(() => panel.setBlendMode(id, mode), {
+      recorded: (before) => recorder.recordOnLayer(before, id, 'core.layer.set_blend_mode', { blendMode: mode })
+    });
   }
 
   function reorderLayer(id: string, parentId: string | null, index: number) {
-    const document = requireLayerDocument();
-    if (!document) return;
-    const next = moveLayer(document, id, parentId, index);
-    if (next === document) {
-      notify('That move is not allowed: a group cannot contain itself.', 'error');
-      return;
-    }
-    commitLayers(next, 'Reorder layer', `layer-move:${id}`, () =>
-      recorder.recordOnLayer(
-        document,
-        id,
-        'core.layer.move',
-        { parent: parentId ? selectorFor(document, parentId).selector : null, index },
-        { gestureKey: `layer-move:${id}` }
-      )
-    );
+    void runPanelPlan(() => panel.moveLayer(id, parentId, index), {
+      recorded: (before) =>
+        recorder.recordOnLayer(
+          before,
+          id,
+          'core.layer.move',
+          { parent: parentId ? selectorFor(before, parentId).selector : null, index },
+          { gestureKey: `layer-move:${id}` }
+        )
+    });
   }
 
   async function createLayer(kind: 'pixel' | 'group' | 'adjustment' | 'import') {
-    const document = requireLayerDocument();
+    // A new group or pixel layer is the engine's, so it queues behind edits already with the engine.
+    const document = requireLayerDocument(kind === 'group' || kind === 'pixel');
     if (!document || layerBusy) return;
     if (kind === 'adjustment') {
       openAdjustmentEditor(null, adjustmentDefinitions[0].build());
       return;
     }
     if (kind === 'group') {
-      const group = createGroupLayer('Group');
-      commitLayers(
-        insertLayer(document, group, null, document.layers.length),
-        'New group',
-        undefined,
-        () => recorder.record('core.layer.add_group', {})
-      );
+      await runPanelPlan(() => panel.addGroup(), { recorded: () => recorder.record('core.layer.add_group', {}) });
+      return;
+    }
+    if (kind === 'pixel') {
+      // The engine registers the empty buffer and puts the layer over it in one transaction, and
+      // discards the buffer if anything fails.
+      await runPanelPlan(() => panel.addPixelLayer(), { recorded: () => recorder.record('core.layer.add_pixel', {}) });
       return;
     }
 
+    // Placing a file: the backend decodes it into a session buffer (which can take a while, so
+    // nothing else may change the document meanwhile); the engine then shows that buffer as a layer.
+    let imported: Awaited<ReturnType<typeof importLayerImage>>;
     layerBusy = true;
     try {
-      if (kind === 'pixel') {
-        const created = await createLayerPixels(document.canvasWidth, document.canvasHeight);
-        const layer = createPixelLayer('Layer', created.pixelId, created.width, created.height);
-        commitLayers(insertLayer(document, layer, null, document.layers.length), 'New layer', undefined,
-          () => recorder.record('core.layer.add_pixel', {}));
-      } else {
-        const path = await open({
-          multiple: false,
-          filters: [{ name: 'Images and camera RAW', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] }]
-        });
-        if (typeof path !== 'string') return;
-        const imported = await importLayerImage(path);
-        const layer = createPixelLayer(
-          imported.filename ?? 'Placed image',
-          imported.pixelId,
-          imported.width,
-          imported.height
-        );
-        if (imported.raw) layer.raw = imported.raw;
-        commitLayers(
-          insertLayer(document, layer, null, document.layers.length),
-          'Place image as layer'
-        );
-      }
+      const path = await open({
+        multiple: false,
+        filters: [{ name: 'Images and camera RAW', extensions: ['png', 'jpg', 'jpeg', 'webp', 'dng'] }]
+      });
+      if (typeof path !== 'string') return;
+      imported = await importLayerImage(path);
     } catch (error) {
       notify(errorMessage(error), 'error');
+      return;
     } finally {
       layerBusy = false;
     }
+    const placed = await runPanelPlan(() => panel.placeImage(imported));
+    // Refused or dropped: no layer shows the decoded buffer, so it must not stay in the session.
+    if (!placed) void releaseUnreferencedPixels();
   }
 
+  /** Panel actions the engine makes; they queue behind each other instead of being refused. */
+  const ENGINE_ACTIONS: LayerPanelAction[] = [
+    'duplicate', 'delete', 'group', 'ungroup', 'reset_transform', 'toggle_pass_through', 'toggle_clipped',
+    'mask_white', 'mask_black', 'mask_invert', 'mask_toggle', 'mask_delete'
+  ];
+
   async function handleLayerAction(action: LayerPanelAction, id?: string) {
-    const document = requireLayerDocument();
+    const document = requireLayerDocument(ENGINE_ACTIONS.includes(action));
     if (!document) return;
     const layerId = id ?? document.activeLayerId;
     if (!layerId && action !== 'flatten') return;
@@ -2111,41 +2380,38 @@
         }
         return;
       }
-      case 'duplicate': {
-        const { document: next } = duplicateLayer(document, layerId as string);
-        commitLayers(next, 'Duplicate layer', undefined,
-          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.duplicate', {}));
+      case 'duplicate':
+        await runPanelPlan(() => panel.duplicateLayer(layerId as string), {
+          recorded: (before) => recorder.recordOnLayer(before, layerId as string, 'core.layer.duplicate', {})
+        });
         return;
-      }
       case 'delete': {
         if (layer?.locked) {
           notify('Unlock this layer before deleting it.', 'error');
           return;
         }
-        commitLayers(removeLayer(document, layerId as string), 'Delete layer', undefined,
-          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.delete', {}));
+        await runPanelPlan(() => panel.deleteLayer(layerId as string), {
+          recorded: (before) => recorder.recordOnLayer(before, layerId as string, 'core.layer.delete', {})
+        });
         return;
       }
       case 'group': {
         const targets = selectedLayerIds.length > 1
           ? selectedLayerIds.filter((id) => findLayer(document, id))
           : [layerId as string];
-        const { document: next, group } = groupLayers(document, targets, 'Group');
-        if (!group) {
-          notify('Only layers that share a parent can be grouped together.', 'error');
-          return;
-        }
-        if (commitLayers(next, targets.length > 1 ? 'Group layers' : 'Group layer', undefined,
-          () => recorder.recordOnLayers(document, targets, 'core.layer.group', { name: 'Group' }))) {
-          selectedLayerIds = [group.id];
-        }
+        await runPanelPlan(() => panel.groupLayers(targets), {
+          recorded: (before) => recorder.recordOnLayers(before, targets, 'core.layer.group', { name: 'Group' }),
+          after: (result) => {
+            if (result.lastCreated) selectedLayerIds = [result.lastCreated];
+          }
+        });
         return;
       }
-      case 'ungroup': {
-        commitLayers(ungroupLayer(document, layerId as string), 'Ungroup', undefined,
-          () => recorder.recordOnLayer(document, layerId as string, 'core.layer.ungroup', {}));
+      case 'ungroup':
+        await runPanelPlan(() => panel.ungroupLayer(layerId as string), {
+          recorded: (before) => recorder.recordOnLayer(before, layerId as string, 'core.layer.ungroup', {})
+        });
         return;
-      }
       case 'merge_down':
         await mergeDown(document, layerId as string);
         return;
@@ -2155,16 +2421,9 @@
       case 'rasterize_transform':
         await rasterizeTransform(document, layerId as string);
         return;
-      case 'reset_transform': {
-        commitLayers(
-          updateLayer(document, layerId as string, (entry) => ({
-            ...entry,
-            transform: resetTransform(entry.transform.interpolation)
-          })),
-          'Reset transform'
-        );
+      case 'reset_transform':
+        await runPanelPlan(() => panel.resetTransform(layerId as string));
         return;
-      }
       case 'flip_horizontal':
       case 'flip_vertical':
         flipActiveLayer(
@@ -2175,25 +2434,27 @@
       case 'transform_mode':
         toggleTransformMode();
         return;
-      case 'toggle_pass_through': {
-        if (layer?.content.type !== 'group') return;
-        const nextIsolated = !layer.content.isolated;
-        commitLayers(
-          updateLayer(document, layerId as string, (entry) =>
-            entry.content.type === 'group'
-              ? {
-                  ...entry,
-                  // A pass-through group has no blend mode of its own, so
-                  // switching to it also returns the mode to Normal.
-                  blendMode: nextIsolated ? entry.blendMode : 'normal',
-                  content: { ...entry.content, isolated: nextIsolated }
-                }
-              : entry
-          ),
-          nextIsolated ? 'Isolate group' : 'Pass-through group'
+      case 'toggle_pass_through':
+        // A pass-through group has no blend mode of its own, so the engine also returns the mode to Normal.
+        await runPanelPlan((current) => {
+          const group = findLayer(current, layerId as string);
+          return group?.content.type === 'group' ? panel.togglePassThrough(group) : null;
+        });
+        return;
+      case 'toggle_clipped':
+        await runPanelPlan(
+          (current) => {
+            const target = findLayer(current, layerId as string);
+            return target ? panel.toggleClipped(target) : null;
+          },
+          {
+            recorded: (before) =>
+              recorder.recordOnLayer(before, layerId as string, 'core.layer.set_clipped', {
+                clipped: !(findLayer(before, layerId as string)?.clipped ?? false)
+              })
+          }
         );
         return;
-      }
       case 'edit_adjustment': {
         if (layer?.content.type !== 'adjustment') return;
         openAdjustmentEditor(layer.id, layer.content.operation);
@@ -2210,23 +2471,44 @@
     layerId: string
   ) {
     const layer = findLayer(document, layerId);
-    if (!layer || !allowWorkspaceMutation()) return;
+    if (!layer) return;
+    // Switching, inverting, adding and removing a mask are the engine's.
+    switch (action) {
+      case 'mask_white':
+      case 'mask_black':
+        await runPanelPlan(() => panel.addMask(layerId, action === 'mask_white'), {
+          after: () => {
+            editTarget = 'mask';
+          }
+        });
+        return;
+      case 'mask_invert':
+      case 'mask_toggle':
+      case 'mask_delete': {
+        if (!layer.mask) return;
+        await runPanelPlan(
+          (current) => {
+            const now = findLayer(current, layerId);
+            if (!now?.mask) return null;
+            if (action === 'mask_invert') return panel.invertMask(now);
+            return action === 'mask_toggle' ? panel.toggleMask(now) : panel.removeMask(layerId);
+          },
+          {
+            after: () => {
+              if (action === 'mask_delete' && editTarget === 'mask') editTarget = 'layer';
+            }
+          }
+        );
+        return;
+      }
+      default:
+        break;
+    }
+    // What is left reads or bakes pixels or the selection, which have their own commands.
+    if (!allowWorkspaceMutation()) return;
     layerBusy = true;
     try {
       switch (action) {
-        case 'mask_white':
-        case 'mask_black': {
-          const created = await createLayerMask(document, layerId, action === 'mask_white');
-          commitLayers(
-            updateLayer(document, layerId, (entry) => ({
-              ...entry,
-              mask: { snapshot: created.snapshot, enabled: true, inverted: false }
-            })),
-            action === 'mask_white' ? 'Add mask' : 'Add hiding mask'
-          );
-          editTarget = 'mask';
-          return;
-        }
         case 'mask_from_selection': {
           if (!selectionState.activeMask) {
             notify('Make a selection first.', 'error');
@@ -2262,36 +2544,6 @@
             canvasHeight: snapshot.height
           }, undefined, true);
           notify('The layer mask is now the active selection.');
-          return;
-        }
-        case 'mask_invert': {
-          if (!layer.mask) return;
-          commitLayers(
-            updateLayer(document, layerId, (entry) => ({
-              ...entry,
-              mask: entry.mask ? { ...entry.mask, inverted: !entry.mask.inverted } : null
-            })),
-            'Invert mask'
-          );
-          return;
-        }
-        case 'mask_toggle': {
-          if (!layer.mask) return;
-          commitLayers(
-            updateLayer(document, layerId, (entry) => ({
-              ...entry,
-              mask: entry.mask ? { ...entry.mask, enabled: !entry.mask.enabled } : null
-            })),
-            layer.mask.enabled ? 'Disable mask' : 'Enable mask'
-          );
-          return;
-        }
-        case 'mask_delete': {
-          commitLayers(
-            updateLayer(document, layerId, (entry) => ({ ...entry, mask: null })),
-            'Delete mask'
-          );
-          if (editTarget === 'mask') editTarget = 'layer';
           return;
         }
         case 'mask_apply': {
@@ -2538,43 +2790,43 @@
     operation: import('./lib/types/editor').BaseEditOperation,
     coalesceKey?: string
   ) {
-    if (!allowWorkspaceMutation()) return;
+    if (!allowWorkspaceMutation(false, true)) return;
     adjustmentDraft = operation;
     const document = layerDocument;
-    if (!document || !adjustmentLayerId) return;
-    commitLayers(
-      updateLayer(document, adjustmentLayerId, (layer) =>
-        layer.content.type === 'adjustment'
-          ? { ...layer, content: { type: 'adjustment', operation } }
-          : layer
-      ),
-      'Adjustment settings',
-      coalesceKey
+    const layerId = adjustmentLayerId;
+    if (!document || !layerId) return;
+    // The new setting is drawn at once; the engine makes the change when the slider pauses or the dialog closes.
+    proposeLayerGesture(
+      layerId,
+      (layer) => (layer.content.type === 'adjustment' ? { ...layer, content: { type: 'adjustment', operation } } : layer),
+      () => runPanelPlan(() => panel.updateAdjustment(layerId, operation, coalesceKey))
     );
   }
 
-  function confirmAdjustment(operation: import('./lib/types/editor').BaseEditOperation) {
-    if (!allowWorkspaceMutation()) return;
+  async function confirmAdjustment(operation: import('./lib/types/editor').BaseEditOperation) {
+    if (!allowWorkspaceMutation(false, true)) return;
     const document = layerDocument;
     if (!document) {
       closeAdjustmentEditor();
       return;
     }
     if (adjustmentLayerId) {
+      await flushGesture();
       layerHistory.endCoalescing();
       closeAdjustmentEditor();
       return;
     }
-    const layer = createAdjustmentLayer(
-      definitionFor(operation.type)?.label ?? 'Adjustment',
-      operation
-    );
-    commitLayers(
-      insertLayer(document, layer, null, document.layers.length),
-      'New adjustment layer',
-      undefined,
-      () => recorder.record('core.layer.add_adjustment', { operation, name: layer.name })
-    );
+    const name = definitionFor(operation.type)?.label ?? 'Adjustment';
+    closeAdjustmentEditor();
+    await runPanelPlan(() => panel.addAdjustment(operation, name), {
+      recorded: () => recorder.record('core.layer.add_adjustment', { operation, name })
+    });
+  }
+
+  /** Closing the dialog keeps what was already changed, as it always has; it only waits for the last slider move. */
+  async function cancelAdjustment() {
+    await flushGesture();
+    layerHistory.endCoalescing();
     closeAdjustmentEditor();
   }
 
@@ -2591,13 +2843,12 @@
         notify('That adjustment cannot become an adjustment layer yet.', 'error');
         return applyToDocument();
       }
-      const layer = createAdjustmentLayer(definitionFor(base.type)?.label ?? base.type, base);
-      return commitLayers(
-        insertLayer(layerDocument, layer, null, layerDocument.layers.length),
-        'New adjustment layer',
-        undefined,
-        () => recorder.record('core.layer.add_adjustment', { operation: base, name: layer.name })
-      );
+      const name = definitionFor(base.type)?.label ?? base.type;
+      // Made by the engine; the caller does not wait for the outcome, which is reported either way.
+      void runPanelPlan(() => panel.addAdjustment(base, name), {
+        recorded: () => recorder.record('core.layer.add_adjustment', { operation: base, name })
+      });
+      return true;
     }
     void applyOperationsDestructively(base);
     return true;
@@ -2675,6 +2926,160 @@
       notify(errorMessage(error), 'error');
     } finally {
       layerBusy = false;
+    }
+  }
+
+  /**
+   * Opens a Photoshop document (PSD or PSB) as a new, unsaved layered document and shows
+   * what was approximated or left out. The file itself is never changed.
+   */
+  async function importPhotoshop(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importPsdDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the PSD.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(importSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /** Opens an SVG as a document of shape layers, with a report of what was left out. */
+  async function importSvg(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importSvgDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the SVG.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(svgImportSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /**
+   * Opens an OpenEXR file as a new, unsaved high-precision document: scene-linear light, with
+   * premultiplied alpha made straight and the file's primaries converted to sRGB's.
+   */
+  async function importExr(path: string) {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await importExrDocument(path, ownRequest);
+      if (!result.project.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project, not over the EXR.
+      installProject(result.project, null);
+      const fileName = result.project.metadata.filename;
+      psdReport = { report: result.report, fileName, mode: 'import' };
+      notify(exrImportSentence(fileName, result.report));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
+    }
+  }
+
+  /**
+   * Puts the active layer (or, merged, everything visible with the document's edits) on the system
+   * clipboard as a picture, limited to the selection if there is one. The document is not changed.
+   */
+  async function copyPicture(merged: boolean) {
+    const document = layerDocument;
+    if (!document || !metadata || layerBusy || opening) return;
+    const layerId = merged ? null : (document.activeLayerId ?? null);
+    if (!merged && !layerId) {
+      notify('Select a layer first, or copy the merged picture.', 'error');
+      return;
+    }
+    layerBusy = true;
+    try {
+      let selection = selectionState.activeMask;
+      if (selection && !merged) {
+        // A layer is copied as it sits on the canvas, so the selection is taken to canvas space,
+        // as for a mask made from it.
+        selection = (await stageWorkflowGeometry([], operations, selectionState)).selection.activeMask ?? null;
+      }
+      const result = await copyToClipboard(document, cloneOperations(operations), layerId, selection);
+      notify(copySentence(result));
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      layerBusy = false;
+    }
+  }
+
+  /**
+   * Places the picture on the clipboard as a new layer; with no document open, opens it as one.
+   */
+  async function pasteFromClipboard() {
+    if (!layerDocument || !metadata) {
+      await newFromClipboard();
+      return;
+    }
+    if (!allowWorkspaceMutation()) return;
+    let pasted: Awaited<ReturnType<typeof pasteClipboardImage>>;
+    layerBusy = true;
+    try {
+      pasted = await pasteClipboardImage();
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+      return;
+    } finally {
+      layerBusy = false;
+    }
+    const placed = await runPanelPlan(() => panel.placeImage(pasted));
+    if (!placed) {
+      // Nothing was committed and the reason, if there is one, is already on screen; saying the
+      // picture was pasted would overwrite it. No layer shows the buffer, so let it go.
+      void releaseUnreferencedPixels();
+      return;
+    }
+    notify(pasteSentence(pasted));
+  }
+
+  /** Opens the picture on the clipboard as a new, unsaved document. */
+  async function newFromClipboard() {
+    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    cancelTransformGesture();
+    opening = true;
+    try {
+      const ownRequest = ++requestId;
+      activeOpenRequest = ownRequest;
+      const result = await openClipboardImage(ownRequest);
+      if (!result.isCurrent || activeOpenRequest !== ownRequest) return;
+      // No project path: Save asks where to put the PhotoForge project.
+      installProject(result, null);
+      notify(`Opened the ${result.canvasWidth} × ${result.canvasHeight} picture from the clipboard as a new document.`);
+    } catch (error) {
+      notify(errorMessage(error), 'error');
+    } finally {
+      opening = false;
+      if (previewQueued) void drainPreviewQueue();
     }
   }
 
@@ -2910,6 +3315,7 @@
 
   function undo() {
     if (!allowWorkspaceMutation()) return;
+    abandonGesture();
     const kind = historyEvents.at(-1);
     if (!kind) return;
     recorder.skip('Undo');
@@ -2936,6 +3342,7 @@
 
   function redo() {
     if (!allowWorkspaceMutation()) return;
+    abandonGesture();
     const kind = redoEvents.at(-1);
     if (!kind) return;
     recorder.skip('Redo');
@@ -3052,7 +3459,7 @@
       const staged = await stageWorkflowGeometry(nextOperations, operationsBefore, selectionBefore);
       const next = await executeLayerWorkflow(document, steps, layerSelection, {
         transact: applyTransaction,
-        export: (current) => exportLayerComposite(outputPath!, current, staged.operations, profile)
+        export: (current) => exportLayerComposite(outputPath!, current, staged.operations, profile, undefined, $metadataPolicy)
       }, origin);
       if (documentId !== ownDocument || layerRevision !== revision ||
         JSON.stringify(selectionState) !== JSON.stringify(selectionBefore) ||
@@ -3840,7 +4247,10 @@
         filters: [
           { name: 'PNG image', extensions: ['png'] },
           { name: 'JPEG image', extensions: ['jpg', 'jpeg'] },
-          { name: 'WebP image', extensions: ['webp'] }
+          { name: 'WebP image', extensions: ['webp'] },
+          { name: 'Photoshop document (layers kept)', extensions: ['psd', 'psb'] },
+          { name: 'SVG (shape layers)', extensions: ['svg'] },
+          { name: 'OpenEXR (scene-linear float, composited)', extensions: ['exr'] }
         ]
       });
       if (!outputPath) return;
@@ -3852,19 +4262,53 @@
       }
       const exportOperations = cloneOperations(operations);
       exporting = true;
+      if (isPhotoshopPath(outputPath)) {
+        // A Photoshop file holds the layers, not a flattened picture, so the profile and colour
+        // choices above do not apply to it.
+        if (!layerDocument) throw new Error('Photoshop export needs a layered document.');
+        const written = await exportPsdDocument(outputPath, layerDocument, exportOperations, null, $metadataPolicy);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify([exportSentence(fileName, written.report), metadataSentence(written.metadata)].filter(Boolean).join(' '));
+        return;
+      }
+      if (isSvgPath(outputPath)) {
+        // An SVG holds shapes, not a picture: the profile, colour and metadata choices do not
+        // apply, and what it cannot hold is named in the report.
+        if (!layerDocument) throw new Error('SVG export needs a layered document.');
+        const written = await exportSvgDocument(outputPath, layerDocument, exportOperations);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify(svgExportSentence(fileName, written.report));
+        return;
+      }
+      if (isExrPath(outputPath)) {
+        // An OpenEXR file holds one picture of scene-linear light: the profile, colour space and
+        // dither choices above do not apply, and nothing is tone-mapped or clipped.
+        if (!layerDocument) throw new Error('OpenEXR export needs a layered document.');
+        const written = await exportExrDocument(outputPath, layerDocument, exportOperations, null, $metadataPolicy);
+        processingTime = written.processingTimeMs;
+        const fileName = written.outputPath.split(/[\\/]/).pop() ?? written.outputPath;
+        psdReport = { report: written.report, fileName, mode: 'export' };
+        notify([exrExportSentence(fileName, written.report), metadataSentence(written.metadata)].filter(Boolean).join(' '));
+        return;
+      }
       localStorage.setItem('photoforge.lastExportProfile', selectedProfile);
       // Exporting renders the visible composite. The editable document is never
       // flattened just because a flattened image was written.
       const composite = layerDocument;
       const result = composite
-        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile, selectedColor)
+        ? await exportLayerComposite(outputPath, composite, exportOperations, selectedProfile, selectedColor, $metadataPolicy)
         : await invoke<ExportResult>('export_with_profile', {
             outputPath,
             operations: exportOperations,
-            profile: selectedProfile
+            profile: selectedProfile,
+            metadataPolicy: $metadataPolicy
           });
       processingTime = result.processingTimeMs;
-      notify(`Exported ${result.width} × ${result.height} image`);
+      notify([`Exported ${result.width} × ${result.height} image.`, metadataSentence(result.metadata)].filter(Boolean).join(' '));
     } catch (error) {
       notify(errorMessage(error), 'error');
     } finally {
@@ -4109,7 +4553,27 @@
           <label>Output color space <select aria-label="Output color space" bind:value={outputColorSpace}><option value="srgb">sRGB</option><option value="display_p3">Display P3</option><option value="adobe_rgb">Adobe RGB (1998)</option></select></label>
           <label>PNG bit depth <select aria-label="PNG bit depth" bind:value={outputBitDepth}><option value={16}>16-bit</option><option value={8}>8-bit</option></select></label>
           <label><input type="checkbox" bind:checked={outputDither} /> Deterministic dither for 8-bit output (16-bit unaffected)</label>
-          <p>ICC profile embedded. JPEG and WebP are 8-bit. Camera EXIF/GPS is not exported.</p>
+          <p>ICC profile embedded. JPEG and WebP are 8-bit.</p>
+        </details>
+        <details class="raw-card">
+          <summary>Metadata</summary>
+          {#each describeSource(metadata.sourceMetadata) as line}
+            <p>{line}</p>
+          {:else}
+            <p>The source file carried no EXIF, XMP or IPTC.</p>
+          {/each}
+          <label>On export
+            <select
+              aria-label="Metadata on export"
+              bind:value={$metadataPolicy}
+            >
+              {#each METADATA_POLICIES as policy}
+                <option value={policy.value}>{policy.label}</option>
+              {/each}
+            </select>
+          </label>
+          <p>{policyHint($metadataPolicy)}</p>
+          <p>Photoshop files keep all three; PNG and WebP have no place for IPTC.</p>
         </details>
         {#if layerDocument && activeLayerOf(layerDocument)?.raw}
           <RawSourcePanel source={activeLayerOf(layerDocument)!.raw!} disabled={fileMutationBusy} onapply={redevelopSelectedRaw} />
@@ -4159,7 +4623,7 @@
             <button on:click={() => placeSmart(true)}>Place linked smart image</button>
           </fieldset>
           <LayersPanel
-            document={layerDocument}
+            document={panelDocument ?? layerDocument}
             thumbnails={layerThumbnails}
             {editTarget}
             {adjustmentTarget}
@@ -4171,6 +4635,7 @@
             ontoggle={toggleLayerField}
             onrename={renameLayer}
             onopacity={setLayerOpacity}
+            onopacityend={endLayerOpacity}
             onblend={setLayerBlendMode}
             onreorder={reorderLayer}
             oncreate={createLayer}
@@ -4462,7 +4927,7 @@
     : ''}
   onchange={updateAdjustmentDraft}
   onconfirm={confirmAdjustment}
-  oncancel={closeAdjustmentEditor}
+  oncancel={cancelAdjustment}
 />
 
 {#if toast}
@@ -4547,6 +5012,15 @@
     remembered={pluginRememberedValues}
     onrun={runPluginFilter}
     oncancel={() => (filterDialogOpen = false)}
+  />
+{/if}
+
+{#if psdReport}
+  <PsdImportReportDialog
+    report={psdReport.report}
+    mode={psdReport.mode}
+    fileName={psdReport.fileName}
+    onclose={() => (psdReport = null)}
   />
 {/if}
 

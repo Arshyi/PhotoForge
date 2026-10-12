@@ -63,6 +63,7 @@ fn pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> Layer {
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

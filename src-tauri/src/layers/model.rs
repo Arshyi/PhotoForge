@@ -212,6 +212,17 @@ pub struct Layer {
     pub mask: Option<LayerMask>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Whether this layer is clipped to the layer beneath it: it paints only
+    /// where that layer does, and takes its transparency from it.
+    ///
+    /// A clipped layer belongs to the nearest unclipped layer below it among its
+    /// siblings (its base), and the base with every layer clipped to it is
+    /// composited as one unit — see `clip.rs`. A clipped layer with nothing
+    /// beneath it in its own stack has no base and paints as an ordinary layer.
+    /// Absent in every project written before clipping existed, and not written
+    /// when false, so a document that uses no clipping serialises as it did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipped: bool,
     #[serde(default)]
     pub metadata: LayerMetadata,
     /// The camera file this layer was developed from, when it came from one.
@@ -745,11 +756,88 @@ impl LayerDocument {
                 )));
             }
         }
+        // A base takes the layers clipped to it along, so that a clipping group
+        // that is moved stays one. They are checked against the destination
+        // before anything is detached, as the layer itself is.
+        let clipped_run = self.clipped_run_ids(id);
+        if let Some(parent_id) = parent {
+            for carried in &clipped_run {
+                if self.is_self_or_descendant(carried, parent_id) {
+                    return Err(AppError::LayerCycle {
+                        layer: carried.clone(),
+                        parent: parent_id.to_string(),
+                    });
+                }
+            }
+        }
         let active = self.active_layer_id.clone();
+        let mut carried = Vec::with_capacity(clipped_run.len());
+        for carried_id in &clipped_run {
+            carried.push(self.remove(carried_id)?);
+        }
         let layer = self.remove(id)?;
-        let result = self.insert(layer, parent, index);
+        let position = index.min(self.siblings_mut(parent)?.len());
+        let mut result = self.insert(layer, parent, position);
+        for (offset, clipped) in carried.into_iter().enumerate() {
+            if result.is_err() {
+                break;
+            }
+            result = self.insert(clipped, parent, position + 1 + offset);
+        }
         self.active_layer_id = active;
         result
+    }
+
+    /// The identifiers of the layers clipped to `id`, bottom to top: the run of
+    /// clipped siblings directly above it. Empty for a layer that is itself
+    /// clipped to another (it is a member of a group, not its base).
+    pub fn clipped_run_ids(&self, id: &str) -> Vec<String> {
+        let Some(path) = self.path_to(id) else {
+            return Vec::new();
+        };
+        let Some((position, parent_path)) = path.split_last() else {
+            return Vec::new();
+        };
+        let siblings = if parent_path.is_empty() {
+            &self.layers[..]
+        } else {
+            match self.layer_at(parent_path) {
+                Some(parent) => parent.children(),
+                None => return Vec::new(),
+            }
+        };
+        let is_base = *position == 0 || !siblings[*position].clipped;
+        if !is_base {
+            return Vec::new();
+        }
+        siblings[position + 1..]
+            .iter()
+            .take_while(|layer| layer.clipped)
+            .map(|layer| layer.id.clone())
+            .collect()
+    }
+
+    /// Clears the clipped flag of the bottom layer of every stack.
+    ///
+    /// There is nothing beneath it to clip to, and a flag left standing would
+    /// attach it to whichever layer is next moved or inserted beneath it. The
+    /// renderers already treat such a layer as unclipped; this makes the stored
+    /// document say so.
+    pub fn normalise_clipping(&mut self) {
+        fn walk(layers: &mut [Layer]) {
+            if let Some(first) = layers.first_mut() {
+                first.clipped = false;
+            }
+            for layer in layers.iter_mut() {
+                if let Some(children) = layer.children_mut() {
+                    walk(children);
+                }
+            }
+        }
+        walk(&mut self.layers);
+        for source in self.smart_sources.values_mut() {
+            walk(&mut source.layers);
+        }
     }
 }
 
@@ -768,6 +856,7 @@ pub(crate) mod fixtures {
             transform: LayerTransform::default(),
             mask: None,
             collapsed: false,
+            clipped: false,
             metadata: LayerMetadata::default(),
             raw: None,
             origin: None,
@@ -799,6 +888,7 @@ pub(crate) mod fixtures {
             transform: LayerTransform::default(),
             mask: None,
             collapsed: false,
+            clipped: false,
             metadata: LayerMetadata::default(),
             raw: None,
             origin: None,
@@ -820,6 +910,7 @@ pub(crate) mod fixtures {
             transform: LayerTransform::default(),
             mask: None,
             collapsed: false,
+            clipped: false,
             metadata: LayerMetadata::default(),
             raw: None,
             origin: None,

@@ -421,6 +421,7 @@ pub async fn export_raw_layer_png16(
     .map_err(|_| AppError::ProcessingFailure("the RAW export worker stopped".into()))??;
 
     Ok(crate::domain::ExportResult {
+        metadata: None,
         output_path: saved.to_string_lossy().into_owned(),
         width,
         height,

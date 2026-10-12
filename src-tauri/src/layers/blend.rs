@@ -26,10 +26,40 @@ pub enum BlendMode {
     Saturation,
     Color,
     Luminosity,
+    // The modes Photoshop has and the W3C set does not. They are what files written by
+    // Photoshop use; see `docs/compositing.md` for the formulas.
+    LinearBurn,
+    LinearDodge,
+    DarkerColor,
+    LighterColor,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Subtract,
+    Divide,
 }
 
 impl BlendMode {
-    pub const ALL: [Self; 16] = [
+    /// Whether this is one of the ten modes Photoshop has and the W3C set (and so every build
+    /// before Phase 15) does not. A project that uses one cannot be read by such a build.
+    pub fn is_photoshop_only(self) -> bool {
+        matches!(
+            self,
+            Self::LinearBurn
+                | Self::LinearDodge
+                | Self::DarkerColor
+                | Self::LighterColor
+                | Self::VividLight
+                | Self::LinearLight
+                | Self::PinLight
+                | Self::HardMix
+                | Self::Subtract
+                | Self::Divide
+        )
+    }
+
+    pub const ALL: [Self; 26] = [
         Self::Normal,
         Self::Multiply,
         Self::Screen,
@@ -46,6 +76,16 @@ impl BlendMode {
         Self::Saturation,
         Self::Color,
         Self::Luminosity,
+        Self::LinearBurn,
+        Self::LinearDodge,
+        Self::DarkerColor,
+        Self::LighterColor,
+        Self::VividLight,
+        Self::LinearLight,
+        Self::PinLight,
+        Self::HardMix,
+        Self::Subtract,
+        Self::Divide,
     ];
 
     pub const fn id(self) -> &'static str {
@@ -66,15 +106,31 @@ impl BlendMode {
             Self::Saturation => "saturation",
             Self::Color => "color",
             Self::Luminosity => "luminosity",
+            Self::LinearBurn => "linear_burn",
+            Self::LinearDodge => "linear_dodge",
+            Self::DarkerColor => "darker_color",
+            Self::LighterColor => "lighter_color",
+            Self::VividLight => "vivid_light",
+            Self::LinearLight => "linear_light",
+            Self::PinLight => "pin_light",
+            Self::HardMix => "hard_mix",
+            Self::Subtract => "subtract",
+            Self::Divide => "divide",
         }
     }
 
     /// Non-separable modes mix all three channels together and cannot be
-    /// evaluated one channel at a time.
+    /// evaluated one channel at a time. Darker and Lighter Color choose between
+    /// whole colours, so they are among them.
     pub const fn is_separable(self) -> bool {
         !matches!(
             self,
-            Self::Hue | Self::Saturation | Self::Color | Self::Luminosity
+            Self::Hue
+                | Self::Saturation
+                | Self::Color
+                | Self::Luminosity
+                | Self::DarkerColor
+                | Self::LighterColor
         )
     }
 
@@ -111,7 +167,45 @@ impl BlendMode {
             Self::HardLight => hard_light(backdrop, source),
             Self::Difference => (backdrop - source).abs(),
             Self::Exclusion => backdrop + source - 2.0 * backdrop * source,
-            Self::Hue | Self::Saturation | Self::Color | Self::Luminosity => source,
+            Self::LinearBurn => (backdrop + source - 1.0).max(0.0),
+            Self::LinearDodge => (backdrop + source).min(1.0),
+            Self::VividLight => vivid_light(backdrop, source),
+            Self::LinearLight => (backdrop + 2.0 * source - 1.0).clamp(0.0, 1.0),
+            Self::PinLight => {
+                if source <= 0.5 {
+                    backdrop.min(2.0 * source)
+                } else {
+                    backdrop.max(2.0 * (source - 0.5))
+                }
+            }
+            // Photoshop's help says: the sum of the two reaches the top. Its pictures say
+            // the same, except that a black backdrop stays black under a white source
+            // (the threshold of a Vivid Light taken with the roles the other way about).
+            Self::HardMix => {
+                if backdrop > 0.0 && backdrop + source >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Subtract => (backdrop - source).max(0.0),
+            Self::Divide => {
+                if source <= 0.0 {
+                    if backdrop <= 0.0 {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    (backdrop / source).min(1.0)
+                }
+            }
+            Self::Hue
+            | Self::Saturation
+            | Self::Color
+            | Self::Luminosity
+            | Self::DarkerColor
+            | Self::LighterColor => source,
         }
     }
 
@@ -127,6 +221,23 @@ impl BlendMode {
             ),
             Self::Color => set_luminosity(source, luminosity(backdrop)),
             Self::Luminosity => set_luminosity(backdrop, luminosity(source)),
+            // Photoshop's help says these compare "the total of all channel values". Its
+            // output says luminosity: against the stored picture of a chart of every mode,
+            // the sum is wrong by 20 levels on the cells that use them and luminosity by 0.2.
+            Self::DarkerColor => {
+                if luminosity(source) < luminosity(backdrop) {
+                    source
+                } else {
+                    backdrop
+                }
+            }
+            Self::LighterColor => {
+                if luminosity(source) > luminosity(backdrop) {
+                    source
+                } else {
+                    backdrop
+                }
+            }
             _ => source,
         }
     }
@@ -177,6 +288,22 @@ fn color_burn(backdrop: f32, source: f32) -> f32 {
         0.0
     } else {
         1.0 - ((1.0 - backdrop) / source).min(1.0)
+    }
+}
+
+/// Burn below a half, dodge above it, with the ends settled the way Photoshop settles them:
+/// a source of exactly black or white decides the result by itself. (Both are 0/0 for a
+/// backdrop of white under black and of black under white, which Color Burn and Color Dodge
+/// resolve the other way.)
+fn vivid_light(backdrop: f32, source: f32) -> f32 {
+    if source <= 0.0 {
+        0.0
+    } else if source >= 1.0 {
+        1.0
+    } else if source <= 0.5 {
+        1.0 - ((1.0 - backdrop) / (2.0 * source)).min(1.0)
+    } else {
+        (backdrop / (2.0 * (1.0 - source))).min(1.0)
     }
 }
 
@@ -288,6 +415,37 @@ pub fn composite_pixel(backdrop: [f32; 4], source: [f32; 4], mode: BlendMode) ->
     output
 }
 
+/// Composites a source pixel onto a backdrop pixel *atop*: the backdrop keeps its
+/// own coverage and only its colour moves.
+///
+/// ```text
+/// ao = ab
+/// Co = (1 - as) * Cb + as * B(Cb, Cs)
+/// ```
+///
+/// This is source-over with the source's coverage limited to where the backdrop
+/// has any, which is what clipping a layer to the one beneath it means. A fully
+/// transparent backdrop is returned unchanged — there is nothing for the source
+/// to be atop of.
+pub fn composite_pixel_atop(backdrop: [f32; 4], source: [f32; 4], mode: BlendMode) -> [f32; 4] {
+    let backdrop_alpha = clamp_unit(backdrop[3]);
+    if backdrop_alpha <= 0.0 {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    let source_alpha = clamp_unit(source[3]);
+    let backdrop_color = sanitize([backdrop[0], backdrop[1], backdrop[2]]);
+    let source_color = sanitize([source[0], source[1], source[2]]);
+    let blended = mode.blend(backdrop_color, source_color);
+    let mut output = [0.0_f32; 4];
+    for channel in 0..3 {
+        output[channel] = clamp_unit(
+            backdrop_color[channel] + source_alpha * (blended[channel] - backdrop_color[channel]),
+        );
+    }
+    output[3] = backdrop_alpha;
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +482,102 @@ mod tests {
         assert_color(
             BlendMode::Exclusion.blend(backdrop, source),
             [0.56, 0.5, 0.74],
+        );
+    }
+
+    #[test]
+    fn the_photoshop_modes_match_hand_computed_values() {
+        let backdrop = [0.2, 0.5, 0.8];
+        let source = [0.6, 0.4, 0.1];
+        let third = 0.2 / 0.6;
+        assert_color(
+            BlendMode::LinearBurn.blend(backdrop, source),
+            [0.0, 0.0, 0.0],
+        );
+        assert_color(
+            BlendMode::LinearDodge.blend(backdrop, source),
+            [0.8, 0.9, 0.9],
+        );
+        assert_color(BlendMode::Subtract.blend(backdrop, source), [0.0, 0.1, 0.7]);
+        assert_color(BlendMode::Divide.blend(backdrop, source), [third, 1.0, 1.0]);
+        assert_color(
+            BlendMode::LinearLight.blend(backdrop, source),
+            [0.4, 0.3, 0.0],
+        );
+        assert_color(BlendMode::PinLight.blend(backdrop, source), [0.2, 0.5, 0.2]);
+        // Dodge on the first channel (source above a half), burn on the others.
+        assert_color(
+            BlendMode::VividLight.blend(backdrop, source),
+            [0.25, 0.375, 0.0],
+        );
+        // The luminosities are 0.443 and 0.427: the source is the darker colour.
+        assert_color(BlendMode::DarkerColor.blend(backdrop, source), source);
+        assert_color(BlendMode::LighterColor.blend(backdrop, source), backdrop);
+        // Hard Mix is a threshold on the sum of the two: 1.1 and 1.0 reach it, 0.3 does not.
+        assert_color(
+            BlendMode::HardMix.blend([0.7, 0.5, 0.2], [0.4, 0.5, 0.1]),
+            [1.0, 1.0, 0.0],
+        );
+    }
+
+    #[test]
+    fn the_photoshop_modes_have_their_neutral_operands() {
+        let backdrop = [0.15, 0.55, 0.9];
+        assert_color(BlendMode::LinearBurn.blend(backdrop, [1.0; 3]), backdrop);
+        assert_color(BlendMode::LinearDodge.blend(backdrop, [0.0; 3]), backdrop);
+        assert_color(BlendMode::Subtract.blend(backdrop, [0.0; 3]), backdrop);
+        assert_color(BlendMode::Divide.blend(backdrop, [1.0; 3]), backdrop);
+        assert_color(BlendMode::LinearLight.blend(backdrop, [0.5; 3]), backdrop);
+        // Darker Color against white and Lighter Color against black change nothing.
+        assert_color(BlendMode::DarkerColor.blend(backdrop, [1.0; 3]), backdrop);
+        assert_color(BlendMode::LighterColor.blend(backdrop, [0.0; 3]), backdrop);
+    }
+
+    #[test]
+    fn the_photoshop_modes_settle_their_singular_corners() {
+        // Divide by black: white unless the backdrop is black too.
+        assert_color(
+            BlendMode::Divide.blend([0.0, 0.3, 1.0], [0.0, 0.0, 0.0]),
+            [0.0, 1.0, 1.0],
+        );
+        // The two Vivid Light branches meet at a half, and the ends are finite.
+        for source in [0.0, 0.5, 1.0] {
+            for backdrop in [0.0, 0.5, 1.0] {
+                let out = BlendMode::VividLight.blend([backdrop; 3], [source; 3]);
+                assert!(out.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)));
+            }
+        }
+        // A black source is black and a white source is white, whatever is beneath,
+        // including the two 0/0 cases (white under black, black under white) where Color
+        // Burn and Color Dodge say the opposite.
+        for backdrop in [0.0, 0.3, 1.0] {
+            assert_color(
+                BlendMode::VividLight.blend([backdrop; 3], [0.0; 3]),
+                [0.0; 3],
+            );
+            assert_color(
+                BlendMode::VividLight.blend([backdrop; 3], [1.0; 3]),
+                [1.0; 3],
+            );
+        }
+        // Hard Mix: a black backdrop stays black even under white, a white one stays white
+        // under black.
+        assert_color(BlendMode::HardMix.blend([0.0; 3], [1.0; 3]), [0.0; 3]);
+        assert_color(BlendMode::HardMix.blend([1.0; 3], [0.0; 3]), [1.0; 3]);
+        // Equal luminosity in Darker and Lighter Color keeps the backdrop. Two colours that
+        // differ in hue but not in luminosity are what a sum would have told apart.
+        let backdrop = [0.5, 0.5, 0.5];
+        let same_light = [0.5, 0.5, 0.5];
+        assert_color(BlendMode::DarkerColor.blend(backdrop, same_light), backdrop);
+        assert_color(
+            BlendMode::LighterColor.blend(backdrop, same_light),
+            backdrop,
+        );
+        // Red and a darker green: the sum would pick the green (0.8 against 1.0); luminosity
+        // picks the red (0.3 against 0.472).
+        assert_color(
+            BlendMode::DarkerColor.blend([0.0, 0.8, 0.0], [1.0, 0.0, 0.0]),
+            [1.0, 0.0, 0.0],
         );
     }
 

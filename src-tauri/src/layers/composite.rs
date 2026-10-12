@@ -1,4 +1,5 @@
-use super::blend::{clamp_unit, composite_pixel, BlendMode};
+use super::blend::{clamp_unit, composite_pixel, composite_pixel_atop, BlendMode};
+use super::clip::{can_hold_clipped, clip_groups, paints, ClipGroup, Paint};
 use super::model::{Layer, LayerContent, LayerDocument, MAX_GROUP_DEPTH};
 use super::transform::{LayerInterpolation, LayerTransform};
 use crate::domain::EditOperation;
@@ -199,53 +200,151 @@ fn composite_onto(
             limit: MAX_GROUP_DEPTH,
         });
     }
-    for layer in layers {
+    for group in clip_groups(layers) {
         context.check_cancelled()?;
-        // A hidden layer and a fully transparent layer contribute nothing in
-        // every blend mode, so both are skipped rather than composited.
-        if !layer.visible || layer.opacity <= 0.0 {
+        if group.needs_buffer() {
+            paint_clip_group(backdrop, &group, context, depth)?;
             continue;
         }
-        match &layer.content {
-            LayerContent::Pixel { pixel_id, .. } => {
-                let buffer = context.source.resolve(pixel_id)?;
-                draw_source(backdrop, buffer.as_ref(), layer, context)?;
-            }
-            LayerContent::Shape { .. }
-            | LayerContent::Text { .. }
-            | LayerContent::SmartObject { .. } => {
-                // The legacy encoded-8-bit renderer predates the linear
-                // pipeline and is kept working for pre-0.10.0 documents rather
-                // than extended. Antialiased glyph and shape coverage is
-                // float, and compositing it through an 8-bit backdrop would
-                // throw that away silently; a document containing either is a
-                // 0.13.0 document and uses the high-precision renderer.
-                return Err(AppError::InvalidLayerDocument(
-                    "semantic layers require a high-precision document".into(),
-                ));
-            }
-            LayerContent::Group { children, isolated } => {
-                if children.is_empty() {
-                    continue;
-                }
-                if *isolated {
-                    let rendered = composite_stack(children, context, depth + 1)?;
-                    draw_source(backdrop, &rendered, layer, context)?;
-                } else {
-                    // Pass-through: the children see the accumulated backdrop,
-                    // so an adjustment inside the group also reaches the layers
-                    // below it. The group's own opacity and mask then decide how
-                    // much of that reworked backdrop replaces the original.
-                    let mut reworked = backdrop.clone();
-                    composite_onto(&mut reworked, children, context, depth + 1)?;
-                    cross_fade(backdrop, &reworked, layer, context)?;
-                }
-            }
-            LayerContent::Adjustment { operation } => {
-                apply_adjustment(backdrop, operation, layer, context)?;
+        paint_layer(backdrop, group.base, Paint::of(group.base), context, depth)?;
+        // Nothing visible is clipped to this base, or it has no coverage for
+        // anything to be clipped to; in the second case the layers above it
+        // are ordinary layers.
+        if !can_hold_clipped(group.base) {
+            for layer in group.clipped {
+                paint_layer(backdrop, layer, Paint::of(layer), context, depth)?;
             }
         }
     }
+    context.check_cancelled()
+}
+
+/// Composites one layer onto a backdrop with the given paint.
+fn paint_layer(
+    backdrop: &mut RgbaImage,
+    layer: &Layer,
+    paint: Paint,
+    context: &RenderContext<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    // A hidden layer and a fully transparent layer contribute nothing in
+    // every blend mode, so both are skipped rather than composited.
+    if !paints(layer) {
+        return Ok(());
+    }
+    match &layer.content {
+        LayerContent::Pixel { pixel_id, .. } => {
+            let buffer = context.source.resolve(pixel_id)?;
+            draw_source(backdrop, buffer.as_ref(), layer, paint, context)?;
+        }
+        LayerContent::Shape { .. }
+        | LayerContent::Text { .. }
+        | LayerContent::SmartObject { .. } => {
+            // The legacy encoded-8-bit renderer predates the linear
+            // pipeline and is kept working for pre-0.10.0 documents rather
+            // than extended. Antialiased glyph and shape coverage is
+            // float, and compositing it through an 8-bit backdrop would
+            // throw that away silently; a document containing either is a
+            // 0.13.0 document and uses the high-precision renderer.
+            return Err(AppError::InvalidLayerDocument(
+                "semantic layers require a high-precision document".into(),
+            ));
+        }
+        LayerContent::Group { children, isolated } => {
+            if children.is_empty() {
+                return Ok(());
+            }
+            if *isolated || paint.in_clip_group {
+                let rendered = composite_stack(children, context, depth + 1)?;
+                draw_source(backdrop, &rendered, layer, paint, context)?;
+            } else {
+                // Pass-through: the children see the accumulated backdrop,
+                // so an adjustment inside the group also reaches the layers
+                // below it. The group's own opacity and mask then decide how
+                // much of that reworked backdrop replaces the original.
+                let mut reworked = backdrop.clone();
+                composite_onto(&mut reworked, children, context, depth + 1)?;
+                cross_fade(backdrop, &reworked, layer, context)?;
+            }
+        }
+        LayerContent::Adjustment { operation } => {
+            apply_adjustment(backdrop, operation, layer, context)?;
+        }
+    }
+    Ok(())
+}
+
+/// Composites a base and the layers clipped to it as one unit.
+///
+/// See `clip.rs` for what that means. The unit is built in a buffer of its own,
+/// so a clipped adjustment layer sees only the base and what is clipped beneath
+/// it, never the layers below the base.
+fn paint_clip_group(
+    backdrop: &mut RgbaImage,
+    group: &ClipGroup<'_>,
+    context: &RenderContext<'_>,
+    depth: usize,
+) -> Result<(), AppError> {
+    let mut buffer = context.blank_canvas();
+    paint_layer(&mut buffer, group.base, Paint::base(), context, depth)?;
+    for layer in group.clipped {
+        paint_layer(&mut buffer, layer, Paint::clipped(layer), context, depth)?;
+    }
+    lay_over(
+        backdrop,
+        &buffer,
+        group.base.opacity,
+        group.base.blend_mode,
+        context,
+    )
+}
+
+/// Composites a canvas-sized buffer onto the backdrop, in place, at an opacity
+/// and in a blend mode. The buffer's own placement has already been applied.
+fn lay_over(
+    backdrop: &mut RgbaImage,
+    buffer: &RgbaImage,
+    opacity: f32,
+    blend: BlendMode,
+    context: &RenderContext<'_>,
+) -> Result<(), AppError> {
+    context.check_cancelled()?;
+    let opacity = clamp_unit(opacity);
+    let width = context.canvas_width;
+    let raw = buffer.as_raw();
+    for_each_row_band(
+        backdrop.as_mut(),
+        width,
+        0,
+        context.canvas_height,
+        context.cancel,
+        |y, row| {
+            let start = y as usize * width as usize * 4;
+            for x in 0..width as usize {
+                let index = x * 4;
+                let alpha = raw[start + index + 3];
+                if alpha == 0 {
+                    continue;
+                }
+                let source = [
+                    f32::from(raw[start + index]) / 255.0,
+                    f32::from(raw[start + index + 1]) / 255.0,
+                    f32::from(raw[start + index + 2]) / 255.0,
+                    f32::from(alpha) / 255.0 * opacity,
+                ];
+                let existing = [
+                    f32::from(row[index]) / 255.0,
+                    f32::from(row[index + 1]) / 255.0,
+                    f32::from(row[index + 2]) / 255.0,
+                    f32::from(row[index + 3]) / 255.0,
+                ];
+                let result = composite_pixel(existing, source, blend);
+                for channel in 0..4 {
+                    row[index + channel] = to_byte(result[channel]);
+                }
+            }
+        },
+    )?;
     context.check_cancelled()
 }
 
@@ -341,7 +440,7 @@ fn cross_fade(
 /// Scales a layer transform into render space. Only the translation depends on
 /// the render scale; scale, rotation, and flips are relative to the layer's own
 /// dimensions and therefore already scale-free.
-pub(super) fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
+pub(crate) fn render_transform(transform: &LayerTransform, scale: f64) -> LayerTransform {
     LayerTransform {
         translate_x: (f64::from(transform.translate_x) * scale) as f32,
         translate_y: (f64::from(transform.translate_y) * scale) as f32,
@@ -362,10 +461,15 @@ pub(super) fn mask_inverted(layer: &Layer) -> bool {
 
 /// Draws a source buffer through a layer's transform, mask, opacity, and blend
 /// mode, clipped to the canvas.
+///
+/// `paint` supplies the opacity, blend mode and whether the source paints atop
+/// the backdrop; the layer supplies its placement and mask. They differ from the
+/// layer's own values only inside a clipping group.
 fn draw_source(
     backdrop: &mut RgbaImage,
     source: &RgbaImage,
     layer: &Layer,
+    paint: Paint,
     context: &RenderContext<'_>,
 ) -> Result<(), AppError> {
     let (source_width, source_height) = source.dimensions();
@@ -383,15 +487,16 @@ fn draw_source(
     let inverse = transform.inverse(source_width, source_height)?;
     let mask = decoded_mask(layer)?;
     let inverted = mask_inverted(layer);
-    let opacity = clamp_unit(layer.opacity);
-    let blend = layer.blend_mode;
+    let opacity = clamp_unit(paint.opacity);
+    let blend = paint.blend;
+    let atop = paint.atop;
     let interpolation = layer.transform.interpolation;
 
     // Fast path for the most common placement: a whole-pixel position with no
     // mask, full opacity, and normal blending. Whole-pixel sampling is already
     // an exact copy and the general formula reduces to plain source-over, so
     // this produces byte-identical output without any resampling arithmetic.
-    if blend == BlendMode::Normal && mask.is_none() && layer.opacity >= 1.0 {
+    if blend == BlendMode::Normal && mask.is_none() && paint.opacity >= 1.0 && !atop {
         if let Some((offset_x, offset_y)) = transform.integer_translation() {
             return draw_source_over(
                 backdrop,
@@ -444,7 +549,11 @@ fn draw_source(
                     f32::from(row[index + 2]) / 255.0,
                     f32::from(row[index + 3]) / 255.0,
                 ];
-                let result = composite_pixel(existing, source_pixel, blend);
+                let result = if atop {
+                    composite_pixel_atop(existing, source_pixel, blend)
+                } else {
+                    composite_pixel(existing, source_pixel, blend)
+                };
                 for channel in 0..4 {
                     row[index + channel] = to_byte(result[channel]);
                 }
@@ -807,7 +916,7 @@ fn sample_rgba(
 /// The mask is stored at the layer's full-resolution dimensions, so a preview
 /// render samples it normalised against the layer's space rather than
 /// resampling the whole coverage bitmap first.
-pub(super) fn mask_coverage(
+pub(crate) fn mask_coverage(
     mask: Option<&MaskBitmap>,
     inverted: bool,
     local_x: f32,

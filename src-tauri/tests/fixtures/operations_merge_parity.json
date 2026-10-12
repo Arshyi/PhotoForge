@@ -1,0 +1,1510 @@
+[
+  {
+    "name": "two plain layers",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-b",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c",
+          "name": "c",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c",
+            "width": 8,
+            "height": 8
+          }
+        }
+      ],
+      "activeLayerId": "c"
+    },
+    "id": "c",
+    "refused": false,
+    "after": [
+      [
+        "a",
+        false
+      ],
+      [
+        "b",
+        false
+      ]
+    ]
+  },
+  {
+    "name": "a clipped layer into its base",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-b",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c",
+          "name": "c",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "c"
+    },
+    "id": "c",
+    "refused": false,
+    "after": [
+      [
+        "a",
+        false
+      ],
+      [
+        "b",
+        false
+      ]
+    ]
+  },
+  {
+    "name": "a base into a layer clipped to the one below",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-b",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "c",
+          "name": "c",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c",
+            "width": 8,
+            "height": 8
+          }
+        }
+      ],
+      "activeLayerId": "c"
+    },
+    "id": "c",
+    "refused": true,
+    "after": null
+  },
+  {
+    "name": "a base that has a clipped layer above it",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-b",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c",
+          "name": "c",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "x",
+          "name": "x",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-x",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "c"
+    },
+    "id": "c",
+    "refused": true,
+    "after": null
+  },
+  {
+    "name": "a base into the ground, with a clipped layer above it",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "ground",
+          "name": "ground",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ground",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "base",
+          "name": "base",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-base",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "ink",
+          "name": "ink",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ink",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "base"
+    },
+    "id": "base",
+    "refused": true,
+    "after": null
+  },
+  {
+    "name": "a clipped layer into its base, others still clipped above",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "ground",
+          "name": "ground",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ground",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "base",
+          "name": "base",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-base",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "ink",
+          "name": "ink",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ink",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "tint",
+          "name": "tint",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-tint",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "ink"
+    },
+    "id": "ink",
+    "refused": false,
+    "after": [
+      [
+        "ground",
+        false
+      ],
+      [
+        "base",
+        false
+      ],
+      [
+        "tint",
+        true
+      ]
+    ]
+  },
+  {
+    "name": "clipped layers into each other",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "ground",
+          "name": "ground",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ground",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "base",
+          "name": "base",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-base",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c1",
+          "name": "c1",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c1",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "d",
+          "name": "d",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-d",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "d"
+    },
+    "id": "d",
+    "refused": false,
+    "after": [
+      [
+        "ground",
+        false
+      ],
+      [
+        "base",
+        false
+      ],
+      [
+        "c1",
+        true
+      ]
+    ]
+  },
+  {
+    "name": "clipped layers into each other, another clipped above",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "ground",
+          "name": "ground",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-ground",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "base",
+          "name": "base",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-base",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c1",
+          "name": "c1",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c1",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "d",
+          "name": "d",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-d",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "e",
+          "name": "e",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-e",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "d"
+    },
+    "id": "d",
+    "refused": false,
+    "after": [
+      [
+        "ground",
+        false
+      ],
+      [
+        "base",
+        false
+      ],
+      [
+        "c1",
+        true
+      ],
+      [
+        "e",
+        true
+      ]
+    ]
+  },
+  {
+    "name": "a base into a base after a clipping group",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "a",
+          "name": "a",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-a",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "b",
+          "name": "b",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-b",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "c",
+          "name": "c",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-c",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "d",
+          "name": "d",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-d",
+            "width": 8,
+            "height": 8
+          }
+        },
+        {
+          "id": "e",
+          "name": "e",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-e",
+            "width": 8,
+            "height": 8
+          }
+        }
+      ],
+      "activeLayerId": "e"
+    },
+    "id": "e",
+    "refused": false,
+    "after": [
+      [
+        "a",
+        false
+      ],
+      [
+        "b",
+        false
+      ],
+      [
+        "c",
+        true
+      ],
+      [
+        "d",
+        false
+      ]
+    ]
+  },
+  {
+    "name": "layers clipped to an adjustment layer",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "adj",
+          "name": "adj",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "adjustment",
+            "operation": {
+              "type": "grayscale"
+            }
+          }
+        },
+        {
+          "id": "x",
+          "name": "x",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-x",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "y",
+          "name": "y",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-y",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "x"
+    },
+    "id": "x",
+    "refused": true,
+    "after": null
+  },
+  {
+    "name": "the last layer clipped to an adjustment layer",
+    "document": {
+      "schemaVersion": 1,
+      "precision": "legacy_srgb8",
+      "canvasWidth": 8,
+      "canvasHeight": 8,
+      "layers": [
+        {
+          "id": "adj",
+          "name": "adj",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "adjustment",
+            "operation": {
+              "type": "grayscale"
+            }
+          }
+        },
+        {
+          "id": "x",
+          "name": "x",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-x",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        },
+        {
+          "id": "y",
+          "name": "y",
+          "visible": true,
+          "locked": false,
+          "opacity": 1,
+          "blendMode": "normal",
+          "transform": {
+            "translateX": 0,
+            "translateY": 0,
+            "scaleX": 1,
+            "scaleY": 1,
+            "rotationDegrees": 0,
+            "flipHorizontal": false,
+            "flipVertical": false,
+            "interpolation": "bilinear"
+          },
+          "mask": null,
+          "collapsed": false,
+          "metadata": {
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "modifiedAt": "2026-01-01T00:00:00.000Z",
+            "custom": {}
+          },
+          "content": {
+            "type": "pixel",
+            "pixelId": "px-y",
+            "width": 8,
+            "height": 8
+          },
+          "clipped": true
+        }
+      ],
+      "activeLayerId": "y"
+    },
+    "id": "y",
+    "refused": false,
+    "after": [
+      [
+        "adj",
+        false
+      ],
+      [
+        "x",
+        true
+      ]
+    ]
+  }
+]

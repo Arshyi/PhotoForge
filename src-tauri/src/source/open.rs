@@ -192,6 +192,7 @@ pub fn open_selection(
                 source: identity_of(&probed, stored_path, sha256),
                 view: SourceView::Region { rect },
             };
+            // A region is in the file's own orientation, so the tag travels with it.
             assemble_loaded(
                 probed.path.clone(),
                 &metadata,
@@ -199,6 +200,7 @@ pub fn open_selection(
                 decoded,
                 icc,
                 Some(origin),
+                crate::metadata::scan::read(&probed.path),
             )?
         }
         OpenSelection::Reduced { width, height } => {
@@ -223,6 +225,7 @@ pub fn open_selection(
                     has_alpha: probed.has_alpha,
                 },
                 origin,
+                crate::metadata::scan::read(&probed.path),
             )?
         }
     };

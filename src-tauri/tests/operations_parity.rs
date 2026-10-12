@@ -21,6 +21,10 @@ const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/operations_parity.json"
 );
+const MERGE_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/operations_merge_parity.json"
+);
 
 fn collect_ids(layers: &[Value], out: &mut Vec<String>) {
     for layer in layers {
@@ -146,6 +150,84 @@ async fn every_vector_the_typescript_functions_produce_is_produced_by_the_engine
                 }
             }
             Err(error) => failures.push(format!("{name}: the engine refused it: {error}")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} vectors differ:\n{}",
+        failures.len(),
+        vectors.len(),
+        failures.join("\n")
+    );
+}
+
+/// Merge Down is checked by the panel first and by the engine when it runs, and the
+/// two must give the same answer, clipping included. The vectors in
+/// `operations_merge_parity.json` say, for a document and a layer, whether the
+/// TypeScript check refuses the merge, and what stack a merge that goes ahead leaves.
+/// The engine is given the same document, with a small buffer behind every pixel
+/// layer so that a merge it allows can actually run.
+#[tokio::test]
+async fn the_engine_refuses_and_allows_the_merges_the_typescript_check_does() {
+    let text = std::fs::read_to_string(MERGE_FIXTURE)
+        .expect("run the parity vitest with UPDATE_FIXTURES=1");
+    let vectors: Vec<Value> = serde_json::from_str(&text).unwrap();
+    assert!(vectors.len() >= 8, "only {} vectors", vectors.len());
+
+    let mut failures = Vec::new();
+    for vector in &vectors {
+        let name = vector["name"].as_str().unwrap();
+        let document: LayerDocument = serde_json::from_value(vector["document"].clone())
+            .unwrap_or_else(|error| panic!("{name}: the fixture document does not load: {error}"));
+        let state = AppState::default();
+        {
+            let mut store = state.layers.lock().unwrap();
+            store.reset(8, 8).unwrap();
+            for pixel_id in document.referenced_pixel_ids() {
+                store
+                    .register_with_id(
+                        &pixel_id,
+                        image::RgbaImage::from_pixel(8, 8, image::Rgba([90, 120, 200, 255])),
+                    )
+                    .unwrap();
+            }
+        }
+        let request = TransactionRequest {
+            document,
+            label: "parity".into(),
+            steps: vec![OperationCall {
+                op: "core.layer.merge_down".into(),
+                params: json!({"selector": {"type": "id", "id": vector["id"]}}),
+                when: None,
+            }],
+            expected_revision: None,
+            selection: None,
+            origin: Origin::User,
+            plugin: None,
+        };
+        let mut ids = SequenceIds::default();
+        let result = execute_with(&state, request, &mut ids, &FixedClock("T".into())).await;
+        let refused = vector["refused"].as_bool().unwrap();
+        match (result, refused) {
+            (Ok(_), true) => failures.push(format!("{name}: the engine allowed a refused merge")),
+            (Err(error), false) => failures.push(format!("{name}: the engine refused it: {error}")),
+            (Err(_), true) => {}
+            (Ok(result), false) => {
+                let actual: Vec<Value> = result
+                    .document
+                    .layers
+                    .iter()
+                    .map(|layer| json!([layer.name, layer.clipped]))
+                    .collect();
+                let expected = vector["after"].as_array().cloned().unwrap_or_default();
+                if actual != expected {
+                    failures.push(format!(
+                        "{name}\n  engine:     {}\n  expected:   {}",
+                        Value::Array(actual),
+                        Value::Array(expected)
+                    ));
+                }
+            }
         }
     }
     assert!(

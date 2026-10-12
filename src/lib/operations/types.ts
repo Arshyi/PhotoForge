@@ -102,5 +102,7 @@ export interface OperationSpec {
   lock: 'ignored' | 'automationOnly' | 'always';
   plannerSafe: boolean;
   needsSelection: boolean;
+  /** Only a person acting directly may issue it: not a macro, a plugin or a planner. */
+  userOnly: boolean;
   params: ParamSpec[];
 }

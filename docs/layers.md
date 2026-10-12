@@ -125,7 +125,8 @@ out of scope.
 ## Layer properties
 
 Every layer carries: a stable identifier, display name, type, visibility, lock,
-opacity, blend mode, transform, optional mask, collapse state, creation and
+opacity, blend mode, transform, optional mask, collapse state, whether it is clipped to
+the layer below (`clipped`; see [compositing.md](compositing.md#clipping)), creation and
 modification timestamps, and bounded custom metadata. Parent and ordering come
 from the layer's position in the tree.
 
@@ -139,6 +140,22 @@ names and missing targets fail closed.
 Supported: reorder, move into and out of groups, move whole groups, duplicate,
 rename, delete, visibility, lock, opacity, blend mode, collapse, and grouping or
 ungrouping siblings.
+
+Clipping follows the tree operations rather than fighting them:
+
+- **Moving a base moves the layers clipped to it**, and they keep their flags. Moving a clipped
+  layer moves only that layer.
+- **Deleting a base promotes** the first layer clipped to it to be the new base, so the group
+  stays together instead of attaching itself to whatever lies beneath.
+- **A copy of a base** is placed above its clipping group; **a copy of a clipped layer** stays in it.
+- **Grouping** releases the lowest layer of the new group, which has nothing beneath it there.
+- **Merge Down and Convert to Smart Object** keep the picture or are refused. Merging a clipped
+  layer into its base, or into another layer clipped to the same base, leaves it in the group and
+  the layers above it clipped as they were. Merging a base that has layers clipped to it, or into
+  a layer that is itself clipped, would change what is drawn, so it is refused with a message:
+  merge from the top of the group down, or release the clipping first. A clipped layer converted
+  to a smart object stays clipped.
+- The bottom layer of any stack is never clipped: the engine clears the flag after every step.
 
 The following are rejected rather than tolerated:
 
@@ -270,8 +287,8 @@ preserves the document's own bottom-to-top order rather than the order
 identifiers were listed in, so a merge can never reorder pixels. Merge Down also
 requires a contiguous sibling range and fails closed when an omitted backdrop
 could affect the result through a non-Normal blend, adjustment layer, or
-pass-through group; the same guard runs in the frontend workflow and Rust IPC
-boundary.
+pass-through group, or when it would split a clipping group; the same guard runs
+in the frontend workflow, the Rust IPC boundary and the operation engine.
 
 ## Undo and redo
 
@@ -380,7 +397,28 @@ not implemented; validation/application support is not generation support.
 - **Many translucent or blended layers have recorded latency.** See
   [phase-8-results.md](phase-8-results.md) for historical measurements; the
   current 0.13.0 source has not yet been benchmarked as a packaged release.
-- **No PSD support.** PhotoForge cannot read or write Photoshop documents.
+- **Photoshop documents are opened and written, with a report each way.** PhotoForge opens PSD and
+  PSB files with a report of what did not come across ([psd-import.md](psd-import.md)) and writes
+  them with a report of what did not go into the file ([psd-export.md](psd-export.md)). The
+  written files have been read back by this program and by an independent parser, and have not
+  been opened in Photoshop.
+- **SVG and OpenEXR files are opened and written, with a report each way.** An SVG opens as shape
+  layers and the shape layers are written as SVG ([svg.md](svg.md)); an OpenEXR file opens as a
+  high-precision document and the composite is written as scene-linear float
+  ([openexr.md](openexr.md)). Neither has been opened in the applications that use them
+  (Inkscape, Illustrator; Nuke, Blender, Photoshop); both were read back by this program and
+  checked against an independent renderer or reader.
+- **The system clipboard carries pictures, not layers.** Copy puts a layer or the merged picture
+  (8-bit sRGB, as PNG and CF_DIBV5) on the Windows clipboard, and paste places a clipboard picture
+  as a new layer or opens it as a document ([clipboard.md](clipboard.md)). Copying a layer *as a
+  layer* between documents (with its text, shape, smart-object or adjustment content) is not done.
+- **High-dynamic-range values are clipped by most blend modes.** In a high-precision document
+  Normal, Multiply, Screen, Darken, Lighten, Difference and Exclusion are evaluated without a
+  ceiling; every other mode (Overlay, Soft Light, Hard Light, Color Dodge, Color Burn, the four
+  non-separable modes and the ten Photoshop ones) evaluates its operands and result clamped to 0
+  to 1. A picture with highlights above white (an OpenEXR file, a 32-bit PSD) loses them under
+  those modes; under Normal it keeps them. Photoshop's own 32-bit mode offers only a subset of
+  the modes for the same reason. The import report does not say so.
 - Procedural and neural layers are not implemented.
 - Multiple selection is limited to siblings: Ctrl-, Cmd-, or Shift-clicking adds
   a layer to the selection, and a selection that would span different parents is

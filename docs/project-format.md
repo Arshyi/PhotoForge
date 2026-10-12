@@ -6,8 +6,24 @@ the layer tree, not a flattened image.
 ```text
 Extension:      .photoforge
 Container:      PhotoForge Container v2 (magic "PFORGE\r\n")
-Format version: 2 (version 1 remains readable)
+Format version: 2 or 3 (version 1 remains readable)
 ```
+
+## Which version a project is written as
+
+A project is written as the **lowest** version that holds what it contains.
+
+* **Version 2** is what every build since 0.9 reads. A document that uses nothing newer is still
+  written as version 2, byte for byte as before.
+* **Version 3** is written when the document uses state that only Phase 15 and later know: a
+  layer **clipped** to the one beneath it, or one of the ten **Photoshop blend modes**
+  (Linear Burn, Linear Dodge, Darker Color, Lighter Color, Vivid Light, Linear Light, Pin Light,
+  Hard Mix, Subtract, Divide). A Phase 14 build refuses a version 3 project **by name** ("version
+  3 is not supported"). Before this rule such a project was version 2: a Phase 14 build read it,
+  dropped the clip flags without a word, and destroyed the clipping when it saved.
+
+Source metadata (EXIF, XMP, IPTC) is not a reason for version 3: it is stored as extra entries
+that an older build skips.
 
 ## Why not ZIP
 

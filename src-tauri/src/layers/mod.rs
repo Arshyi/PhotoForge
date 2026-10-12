@@ -6,6 +6,7 @@
 
 mod blend;
 pub mod cache;
+mod clip;
 mod composite;
 mod disk_cache;
 mod linear;
@@ -24,6 +25,8 @@ pub(crate) mod workflow;
 
 pub use blend::{composite_pixel, BlendMode};
 pub use cache::{CacheStats, DocumentFingerprint, TileCache, DEFAULT_CACHE_BYTES};
+pub(crate) use clip::range_clipping;
+pub(crate) use composite::{mask_coverage, render_transform};
 pub use composite::{
     render_document, render_layers, PixelSource, RenderOptions, MAX_RENDER_THREADS,
 };
@@ -31,20 +34,21 @@ pub use disk_cache::{DiskCacheStats, DiskTileCache, MAX_DISK_TILE_BYTES};
 pub use linear::{render_document_float, render_document_typed, render_document_typed_cached};
 pub use model::{
     validate_dimensions, Layer, LayerContent, LayerDocument, LayerKind, LayerMask, LayerMetadata,
-    LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS,
+    LAYER_SCHEMA_VERSION, MAX_GROUP_DEPTH, MAX_LAYERS, MAX_LAYER_NAME_CHARS,
 };
 pub use project::{
-    decode_project, encode_project, encode_project_typed, load_project, save_project,
-    save_project_typed, LoadedProject, ProjectManifest, MAX_PROJECT_BYTES, PROJECT_EXTENSION,
-    PROJECT_FORMAT_VERSION,
+    attach_source_metadata, decode_project, encode_project, encode_project_typed, load_project,
+    save_project, save_project_typed, save_project_typed_with_metadata, LoadedProject,
+    ProjectManifest, MAX_PROJECT_BYTES, PROJECT_EXTENSION, PROJECT_FORMAT_VERSION,
 };
 pub use recovery::{
     discard_all as discard_recovery_snapshots, discard_managed_snapshot,
     discard_snapshot as discard_recovery_snapshot, list_snapshots as list_recovery_snapshots,
     read_managed_snapshot, read_snapshot as read_recovery_snapshot,
     write_snapshot as write_recovery_snapshot,
-    write_snapshot_typed as write_recovery_snapshot_typed, RecoveryRecord, MAX_RECOVERY_SNAPSHOTS,
-    RECOVERY_EXTENSION,
+    write_snapshot_typed as write_recovery_snapshot_typed,
+    write_snapshot_typed_with_metadata as write_recovery_snapshot_typed_with_metadata,
+    RecoveryRecord, MAX_RECOVERY_SNAPSHOTS, RECOVERY_EXTENSION,
 };
 pub use selection::{
     intersect_with_layer_bounds, layer_mask_to_selection, mask_geometry_layer, mask_space,
@@ -78,6 +82,7 @@ pub fn test_pixel_layer(id: &str, pixel_id: &str, width: u32, height: u32) -> La
         transform: LayerTransform::default(),
         mask: None,
         collapsed: false,
+        clipped: false,
         metadata: LayerMetadata::default(),
         raw: None,
         origin: None,

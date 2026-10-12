@@ -3,12 +3,11 @@ use crate::domain::{EditOperation, ExportProfile, ExportResult, ImageMetadata, P
 use crate::error::AppError;
 use crate::image_processing::high_precision::pipeline_typed;
 use crate::image_processing::{apply_pipeline, prepare_preview_operations};
-use crate::infrastructure::{
-    encode_preview, load_image, save_color_image_streaming, save_image_with_profile, LoadedImage,
-};
+use crate::infrastructure::{encode_preview, load_image, LoadedImage};
 use crate::layers::{
-    layer_mask_to_selection, preview_dimensions, selection_to_layer_mask, BlendMode, Layer,
-    LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions, ResolvedPixels,
+    layer_mask_to_selection, preview_dimensions, range_clipping, selection_to_layer_mask,
+    BlendMode, Layer, LayerDocument, LayerKind, LayerPixelStore, LoadedProject, RenderOptions,
+    ResolvedPixels,
 };
 use crate::layers::{
     render_document_streaming, render_document_typed, render_document_typed_cached,
@@ -111,7 +110,7 @@ fn session_document_id(state: &AppState) -> Result<u64, AppError> {
 
 /// Clones the `Arc` handles a render needs, then releases the store lock so no
 /// pixel work ever happens while the session is locked.
-fn resolve_pixels(
+pub(super) fn resolve_pixels(
     state: &AppState,
     document: &LayerDocument,
     preview: bool,
@@ -236,6 +235,7 @@ pub async fn export_layer_composite(
     operations: Vec<EditOperation>,
     profile: ExportProfile,
     color: Option<crate::color_management::ColorExportOptions>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     document.validate()?;
@@ -249,23 +249,22 @@ pub async fn export_layer_composite(
     crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
     let _permit = state.export_gate.lock().await;
 
-    let original_path = {
+    let (original_path, source_metadata) = {
         let session = state
             .session
             .lock()
             .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
-        session
-            .as_ref()
-            .ok_or(AppError::NoImageOpen)?
-            .source
-            .path
-            .clone()
+        let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
+        (source.path.clone(), source.source_metadata.clone())
     };
+    let policy = metadata_policy.unwrap_or_default();
+    let wide_gamut_profile = color
+        .is_some_and(|options| options.color_space != crate::color_management::RgbColorSpace::Srgb);
     let (resolved, _) = resolve_pixels(&state, &document, false)?;
     let output_path = PathBuf::from(output_path);
 
     let started = Instant::now();
-    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+    let (saved_path, width, height, report) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         // Protect both RAW inputs and explicit smart links, including content
         // nested inside a source stack. An export must never replace a file
@@ -298,7 +297,16 @@ pub async fn export_layer_composite(
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
         if streams_directly {
-            let saved = save_color_image_streaming(
+            let mut plan = crate::metadata::Plan::new(
+                source_metadata.as_deref(),
+                policy,
+                crate::metadata::OutputFacts {
+                    width: document.canvas_width,
+                    height: document.canvas_height,
+                    wide_gamut_profile,
+                },
+            );
+            let saved = crate::infrastructure::save_color_image_streaming_with_metadata(
                 document.canvas_width,
                 document.canvas_height,
                 &original_path,
@@ -309,6 +317,7 @@ pub async fn export_layer_composite(
                     ..Default::default()
                 }),
                 None,
+                Some(&mut plan),
                 |emit| {
                     render_document_streaming(
                         &document,
@@ -321,7 +330,12 @@ pub async fn export_layer_composite(
                     .map(|_| ())
                 },
             )?;
-            return Ok((saved, document.canvas_width, document.canvas_height));
+            return Ok((
+                saved,
+                document.canvas_width,
+                document.canvas_height,
+                plan.report,
+            ));
         }
 
         let rendered = render_document_typed(&document, &resolved, RenderOptions::default())?;
@@ -335,39 +349,53 @@ pub async fn export_layer_composite(
         }
         let processed = pipeline_typed(rendered, &operations, None)?;
         let (width, height) = processed.dimensions();
+        let mut plan = crate::metadata::Plan::new(
+            source_metadata.as_deref(),
+            policy,
+            crate::metadata::OutputFacts {
+                width,
+                height,
+                wide_gamut_profile,
+            },
+        );
         let saved = match processed {
-            PixelBuffer::LinearRgbaF32(image) => crate::infrastructure::save_color_image(
-                &image,
-                &original_path,
-                &output_path,
-                profile,
-                color.unwrap_or(crate::color_management::ColorExportOptions {
-                    bit_depth: 8,
-                    ..Default::default()
-                }),
-                None,
-            )?,
+            PixelBuffer::LinearRgbaF32(image) => {
+                crate::infrastructure::save_color_image_with_metadata(
+                    &image,
+                    &original_path,
+                    &output_path,
+                    profile,
+                    color.unwrap_or(crate::color_management::ColorExportOptions {
+                        bit_depth: 8,
+                        ..Default::default()
+                    }),
+                    None,
+                    Some(&mut plan),
+                )?
+            }
             PixelBuffer::EncodedSrgba8(image) => {
                 if let Some(color) = color {
-                    crate::infrastructure::save_color_image(
+                    crate::infrastructure::save_color_image_with_metadata(
                         &crate::color::FloatImage::from_rgba8(&image)?,
                         &original_path,
                         &output_path,
                         profile,
                         color,
                         None,
+                        Some(&mut plan),
                     )?
                 } else {
-                    save_image_with_profile(
+                    crate::infrastructure::save_image_with_metadata(
                         &DynamicImage::ImageRgba8(image.as_ref().clone()),
                         &original_path,
                         &output_path,
                         profile,
+                        Some(&mut plan),
                     )?
                 }
             }
         };
-        Ok::<_, AppError>((saved, width, height))
+        Ok::<_, AppError>((saved, width, height, plan.report))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("layer export worker stopped".into()))??;
@@ -377,6 +405,7 @@ pub async fn export_layer_composite(
         width,
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        metadata: Some(report),
     })
 }
 
@@ -505,15 +534,29 @@ pub(crate) async fn render_subset_into_buffer(
     })
 }
 
+/// A validated merge: the layers to render, and whether the layer that replaces
+/// them is clipped.
+pub(crate) struct MergePlan {
+    /// The range in the document's own bottom-to-top order, ready to render.
+    pub layers: Vec<Layer>,
+    /// The replacement takes the lowest layer's place in a clipping group, so it is
+    /// clipped to that group's base like the layer it stands in for.
+    pub clipped: bool,
+}
+
 /// Validates that a merge request can be represented by one ordinary pixel
 /// layer without silently changing the visible composite. A contiguous normal
 /// source-over range is associative and can be rendered against transparency;
 /// a range that omits its backdrop cannot safely bake blend-dependent layers,
 /// adjustments, or pass-through groups.
-pub(crate) fn merge_targets(
+///
+/// Clipping is part of the picture too. A range inside a clipping group is
+/// rendered as ordinary layers and replaced by a clipped layer; a range that would
+/// split a group is refused (see `range_clipping`).
+pub(crate) fn merge_plan(
     document: &LayerDocument,
     layer_ids: &[String],
-) -> Result<Vec<Layer>, AppError> {
+) -> Result<MergePlan, AppError> {
     if layer_ids.is_empty() {
         return Err(AppError::InvalidLayerDocument(
             "merging requires at least one layer".into(),
@@ -556,7 +599,7 @@ pub(crate) fn merge_targets(
             "merging requires a contiguous sibling range".into(),
         ));
     }
-    let selected: Vec<Layer> = indices
+    let mut selected: Vec<Layer> = indices
         .iter()
         .map(|index| {
             siblings
@@ -565,6 +608,19 @@ pub(crate) fn merge_targets(
                 .ok_or_else(|| AppError::LayerNotFound(layer_ids[0].clone()))
         })
         .collect::<Result<_, _>>()?;
+
+    let clipped = range_clipping(siblings, indices[0], indices[indices.len() - 1])?;
+    if clipped {
+        // The base this range is clipped to lies outside it. Rendered as ordinary
+        // layers, one over the other, it is the shape a single clipped layer takes
+        // on that base; rendered with the flags, its lowest layer would paint as
+        // a base of its own and the others would be clipped to it.
+        for layer in &mut selected {
+            layer.clipped = false;
+        }
+    }
+    // The lowest layer of what is rendered is a base, as it is in the document.
+    selected[0].clipped = false;
 
     let omitted_backdrop = indices[0] > 0 || parent.is_some_and(|layer| layer.is_pass_through());
     if omitted_backdrop
@@ -578,7 +634,18 @@ pub(crate) fn merge_targets(
             "this merge depends on layers beneath the selection because of a blend mode, adjustment layer, or pass-through group".into(),
         ));
     }
-    Ok(selected)
+    Ok(MergePlan {
+        layers: selected,
+        clipped,
+    })
+}
+
+/// The layers a merge renders; see `merge_plan`.
+pub(crate) fn merge_targets(
+    document: &LayerDocument,
+    layer_ids: &[String],
+) -> Result<Vec<Layer>, AppError> {
+    merge_plan(document, layer_ids).map(|plan| plan.layers)
 }
 
 /// Merges the named layers, bottom to top, into a single pixel buffer.
@@ -973,6 +1040,7 @@ pub async fn save_layer_project(
     document.validate()?;
     let _permit = state.export_gate.lock().await;
     let path = PathBuf::from(output_path);
+    let source_metadata = session_source_metadata(&state);
 
     let buffers = {
         let store = state
@@ -990,7 +1058,7 @@ pub async fn save_layer_project(
     let started = Instant::now();
     let (saved_path, bytes) = tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        let bytes = crate::layers::save_project_typed(
+        let bytes = crate::layers::save_project_typed_with_metadata(
             &path,
             &document,
             &operations,
@@ -998,6 +1066,7 @@ pub async fn save_layer_project(
             env!("CARGO_PKG_VERSION"),
             &created_at,
             &modified_at,
+            source_metadata.as_deref(),
         )?;
         Ok::<_, AppError>((path, bytes))
     })
@@ -1016,6 +1085,18 @@ struct PreparedProject {
     store: LayerPixelStore,
     source: LoadedImage,
     result: ProjectLoadResult,
+}
+
+/// What the open document's source file carried, if the session has one.
+fn session_source_metadata(state: &AppState) -> Option<Arc<crate::metadata::SourceMetadata>> {
+    state
+        .session
+        .lock()
+        .ok()?
+        .as_ref()?
+        .source
+        .source_metadata
+        .clone()
 }
 
 fn prepare_project(
@@ -1055,6 +1136,7 @@ fn prepare_project(
         Arc::new(original.thumbnail(preview_width, preview_height))
     };
     let original_preview_data_url = encode_preview(&preview)?;
+    let source_metadata = loaded.source_metadata.clone().map(Arc::new);
     let operations = prepare_preview_operations(
         &renderable_operations,
         (width, height),
@@ -1087,10 +1169,18 @@ fn prepare_project(
         has_alpha: true,
         created_at: Some(loaded.created_at.clone()).filter(|value| !value.is_empty()),
         modified_at: Some(loaded.modified_at.clone()).filter(|value| !value.is_empty()),
-        camera_model: None,
-        exif_available: false,
+        camera_model: source_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.summary().model),
+        exif_available: source_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.exif.is_some()),
         raw: None,
         origin: None,
+        source_metadata: source_metadata
+            .as_ref()
+            .filter(|metadata| !metadata.is_empty())
+            .map(|metadata| metadata.summary()),
     };
     let plugin_requirements = {
         let mut needed = crate::plugins::document::requirements(&loaded.document);
@@ -1106,6 +1196,7 @@ fn prepare_project(
             preview,
             metadata: metadata.clone(),
             working,
+            source_metadata,
         },
         store,
         result: ProjectLoadResult {
@@ -1191,6 +1282,7 @@ pub async fn create_blank_layer_document(
             application_version: env!("CARGO_PKG_VERSION").into(),
             created_at: String::new(),
             modified_at: String::new(),
+            source_metadata: None,
         };
         // An empty path denotes an unsaved source, not a real input file.
         let mut prepared = prepare_project(loaded, PathBuf::new(), request_id)?;
@@ -1207,6 +1299,510 @@ pub async fn create_blank_layer_document(
     }
     prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
     Ok(prepared.result)
+}
+
+/// A Photoshop document opened as a layered document, and what did not come across.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PsdImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::psd::ImportReport,
+}
+
+/// Opens a Photoshop document (PSD or PSB) as a new, unsaved layered document.
+///
+/// Like opening a project, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. The document comes back with a report of
+/// everything that was approximated or left out; nothing is dropped silently.
+#[tauri::command]
+pub async fn import_psd_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<PsdImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported =
+            crate::psd::import_psd(&checked, crate::psd::ImportLimits::from_resources())?;
+        let format = imported.report.format.clone();
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is a Photoshop file, not a project.
+        prepared.source.metadata.format = format.clone();
+        prepared.result.metadata.format = format;
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("Photoshop import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(PsdImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+/// Whether `destination` is a file the document still reads from (a linked RAW file or a linked
+/// smart source), which an export must never replace.
+fn document_reads_from(document: &LayerDocument, destination: &std::path::Path) -> bool {
+    if !destination.exists() {
+        return false;
+    }
+    let target = std::fs::canonicalize(destination).ok();
+    let linked = |path: &std::path::Path| std::fs::canonicalize(path).ok() == target;
+    let raw = document.iter_all().any(|layer| {
+        layer
+            .raw
+            .as_ref()
+            .and_then(|raw| raw.linked_path())
+            .is_some_and(|path| linked(std::path::Path::new(path)))
+    });
+    let smart = document.smart_sources.values().any(|source| {
+        source
+            .link
+            .as_ref()
+            .is_some_and(|link| linked(std::path::Path::new(&link.path)))
+    });
+    raw || smart
+}
+
+/// The file the open document was read from, or an empty path when there is none: no document is
+/// open, or it is one that never came from a file (a clipboard picture or a new blank document,
+/// whose source path is empty).
+pub(crate) fn session_source_path(state: &AppState) -> Result<PathBuf, AppError> {
+    let session = state
+        .session
+        .lock()
+        .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
+    Ok(session
+        .as_ref()
+        .map(|session| session.source.path.clone())
+        .unwrap_or_default())
+}
+
+/// Refuses an export of the layered document that would replace a file the document still reads
+/// from (a linked RAW file or smart source) or the file it was opened from. The raster exports
+/// refuse the latter in `validate_output_path`; Photoshop, SVG and OpenEXR files are written by
+/// other code, so this is where they are held to the same rule. Called before anything is
+/// written.
+fn ensure_export_replaces_no_input(
+    document: &LayerDocument,
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), AppError> {
+    if document_reads_from(document, destination) {
+        return Err(AppError::InvalidOutputPath);
+    }
+    crate::infrastructure::image_io::refuse_to_replace_source(source, destination)
+}
+
+/// Opens the picture on the system clipboard as a new, unsaved document of one pixel layer.
+///
+/// Like opening a file, the replacement is staged before the session changes and a superseded
+/// request never replaces a newer open. The picture is 8-bit sRGB, which is what the clipboard
+/// carries, so the document is an 8-bit one.
+#[tauri::command]
+pub async fn open_clipboard_image(
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ProjectLoadResult, AppError> {
+    let started = Instant::now();
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let limit = crate::resources::max_working_pixels();
+    let mut prepared = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let pasted = crate::clipboard::read_image(limit)
+            .map_err(|error| AppError::Clipboard(error.to_string()))?;
+        let (width, height) = pasted.image.dimensions();
+        crate::layers::validate_dimensions(width, height)?;
+        let now = crate::operations::support::Clock::now(&crate::operations::support::SystemClock);
+        let mut document = LayerDocument::new(width, height);
+        document.precision = crate::pixel::DocumentPrecision::LegacySrgb8;
+        let layer = crate::operations::structure::new_layer(
+            "l1",
+            "Pasted image",
+            crate::layers::LayerContent::Pixel {
+                pixel_id: "px1".to_string(),
+                width,
+                height,
+            },
+            &now,
+        );
+        document.active_layer_id = Some(layer.id.clone());
+        document.layers.push(layer);
+        let loaded = LoadedProject {
+            document,
+            document_operations: Vec::new(),
+            pixels: vec![("px1".to_string(), pasted.image)],
+            linear_pixels: Vec::new(),
+            application_version: env!("CARGO_PKG_VERSION").into(),
+            created_at: now.clone(),
+            modified_at: now,
+            source_metadata: None,
+        };
+        // An empty path denotes an unsaved source, not a real input file.
+        let mut prepared = prepare_project(loaded, PathBuf::new(), request_id)?;
+        prepared.source.metadata.filename = "Pasted image".into();
+        prepared.result.metadata.filename = "Pasted image".into();
+        prepared.source.metadata.format = "Clipboard".into();
+        prepared.result.metadata.format = "Clipboard".into();
+        Ok::<_, AppError>(prepared)
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("clipboard worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(prepared.result)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvgImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::svg::SvgImportReport,
+}
+
+/// Opens an SVG as a new, unsaved layered document of shape layers.
+///
+/// Like opening a Photoshop file, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. Nothing in the file is fetched or run, and
+/// what the subset does not cover is named in the report.
+#[tauri::command]
+pub async fn import_svg_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<SvgImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported = crate::svg::import_svg(&checked)?;
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is an SVG, not a project.
+        prepared.source.metadata.format = "SVG".to_string();
+        prepared.result.metadata.format = "SVG".to_string();
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("SVG import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(SvgImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvgExportResult {
+    pub output_path: String,
+    pub report: crate::svg::SvgReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the shape layers of the document as an SVG file.
+///
+/// What an SVG cannot hold (pixels, text, masks, adjustments) is named in the report and not
+/// rasterised into the file. The document is not changed.
+#[tauri::command]
+pub async fn export_svg_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    state: State<'_, AppState>,
+) -> Result<SvgExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    let destination = PathBuf::from(output_path);
+    let is_svg = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+    let parent_exists = destination
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty() && parent.is_dir());
+    if !is_svg || !destination.is_absolute() || !parent_exists || destination.is_dir() {
+        return Err(AppError::InvalidOutputPath);
+    }
+    let _permit = state.export_gate.lock().await;
+    let source = session_source_path(&state)?;
+    let started = Instant::now();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
+        let exported = crate::svg::export_svg(&document, &crate::svg::SvgOptions { operations })?;
+        crate::psd::export::write_beside_then_rename(&destination, exported.text.as_bytes())?;
+        Ok::<_, AppError>((destination, exported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("SVG export worker stopped".into()))??;
+    Ok(SvgExportResult {
+        output_path: report.0.to_string_lossy().into_owned(),
+        report: report.1,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExrImportResult {
+    pub project: ProjectLoadResult,
+    pub report: crate::openexr::ExrImportReport,
+}
+
+/// Opens an OpenEXR file as a new, unsaved high-precision document.
+///
+/// Like opening a Photoshop file, the replacement is staged before the session changes and a
+/// superseded request never replaces a newer open. The file is admitted from its header before any
+/// pixel is decoded, and what the picture carries that PhotoForge has no place for is named in
+/// the report.
+#[tauri::command]
+pub async fn import_exr_document(
+    path: String,
+    request_id: u64,
+    state: State<'_, AppState>,
+) -> Result<ExrImportResult, AppError> {
+    let started = Instant::now();
+    let checked = crate::infrastructure::local_path::validated_local_path(&path)?;
+    let request = super::editor::OpenRequest::begin(&state, request_id)?;
+    let (mut prepared, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        let imported =
+            crate::openexr::import_exr(&checked, crate::psd::ImportLimits::from_resources())?;
+        let mut prepared = prepare_project(imported.project, checked, request_id)?;
+        // The file it came from is an OpenEXR file, not a project.
+        prepared.source.metadata.format = "OpenEXR".to_string();
+        prepared.result.metadata.format = "OpenEXR".to_string();
+        Ok::<_, AppError>((prepared, imported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("OpenEXR import worker stopped".into()))??;
+    prepared.result.is_current = request.commit(prepared.source, prepared.store)?;
+    if !prepared.result.is_current {
+        prepared.result.original_preview_data_url.clear();
+        prepared.result.preview_data_url.clear();
+    }
+    prepared.result.processing_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    Ok(ExrImportResult {
+        project: prepared.result,
+        report,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExrExportResult {
+    pub output_path: String,
+    pub report: crate::openexr::ExrExportReport,
+    /// What the export did with the photograph's EXIF, XMP and IPTC: an OpenEXR file has no place
+    /// for any of them, and says so.
+    pub metadata: crate::metadata::MetadataReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the document, composited, as an OpenEXR file of scene-linear light.
+///
+/// `bit_depth` is 16 (half float) or 32 (single precision, the default). The editable document is
+/// never changed, and an existing file is replaced only by a complete new one.
+#[tauri::command]
+pub async fn export_exr_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    bit_depth: Option<u16>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
+    state: State<'_, AppState>,
+) -> Result<ExrExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    let destination = PathBuf::from(output_path);
+    let is_exr = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exr"));
+    let parent_exists = destination
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty() && parent.is_dir());
+    if !is_exr || !destination.is_absolute() || !parent_exists || destination.is_dir() {
+        return Err(AppError::InvalidOutputPath);
+    }
+    // A file made without a plug-in the document needs would be a different picture.
+    let plugins = crate::plugins::store::global();
+    crate::plugins::document::ensure_available(&plugins, &document)?;
+    crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
+    let _permit = state.export_gate.lock().await;
+    let mut plan = crate::metadata::Plan::new(
+        session_source_metadata(&state).as_deref(),
+        metadata_policy.unwrap_or_default(),
+        crate::metadata::OutputFacts {
+            width: document.canvas_width,
+            height: document.canvas_height,
+            wide_gamut_profile: false,
+        },
+    );
+    // An OpenEXR file has no place for EXIF, XMP or IPTC: whatever the policy would have kept is
+    // said not to have been.
+    crate::metadata::report_unplaced(
+        &mut plan.report,
+        &plan.prepared,
+        crate::metadata::container::Placed::default(),
+    );
+    let source = session_source_path(&state)?;
+    let (resolved, _) = resolve_pixels(&state, &document, false)?;
+    let started = Instant::now();
+    let (written, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        // An export never replaces a file the document still reads from or was opened from.
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
+        let exported = crate::openexr::export_exr(
+            &document,
+            &resolved,
+            &crate::openexr::ExrOptions {
+                operations,
+                bit_depth,
+            },
+        )?;
+        crate::psd::export::write_beside_then_rename(&destination, &exported.bytes)?;
+        Ok::<_, AppError>((destination, exported.report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("OpenEXR export worker stopped".into()))??;
+    Ok(ExrExportResult {
+        output_path: written.to_string_lossy().into_owned(),
+        report,
+        metadata: std::mem::take(&mut plan.report),
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PsdExportResult {
+    /// Where the file was written. Not always where it was asked for: a document too large for a
+    /// PSD is written as a PSB, with that extension.
+    pub output_path: String,
+    pub report: crate::psd::ExportReport,
+    /// What the file does with the photograph's EXIF, XMP and IPTC.
+    pub metadata: crate::metadata::MetadataReport,
+    pub processing_time_ms: f64,
+}
+
+/// Writes the layered document as a Photoshop file (PSD, or PSB when the size asks for it).
+///
+/// The editable document is never changed. The result carries a report of everything that was
+/// written approximately or left out; nothing is dropped silently.
+#[tauri::command]
+pub async fn export_psd_document(
+    output_path: String,
+    document: LayerDocument,
+    operations: Vec<EditOperation>,
+    bit_depth: Option<u16>,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
+    state: State<'_, AppState>,
+) -> Result<PsdExportResult, AppError> {
+    document.validate()?;
+    for operation in &operations {
+        operation.validate()?;
+    }
+    // A file made without a plug-in the document needs would be a different picture.
+    let plugins = crate::plugins::store::global();
+    crate::plugins::document::ensure_available(&plugins, &document)?;
+    crate::plugins::document::ensure_operations_available(&plugins, &operations)?;
+    let _permit = state.export_gate.lock().await;
+    let mut plan = crate::metadata::Plan::new(
+        session_source_metadata(&state).as_deref(),
+        metadata_policy.unwrap_or_default(),
+        crate::metadata::OutputFacts {
+            width: document.canvas_width,
+            height: document.canvas_height,
+            wide_gamut_profile: false,
+        },
+    );
+    let prepared_metadata = plan.prepared.clone();
+
+    let mut destination = PathBuf::from(output_path);
+    let extension = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if !matches!(extension.as_deref(), Some("psd" | "psb")) {
+        return Err(AppError::InvalidOutputPath);
+    }
+    let force_large_format = extension.as_deref() == Some("psb");
+    let source = session_source_path(&state)?;
+    let (resolved, _) = resolve_pixels(&state, &document, false)?;
+    let started = Instant::now();
+    let (written, report) = tauri::async_runtime::spawn_blocking(move || {
+        let _job = crate::resources::acquire_job(None)?;
+        // An export never replaces a file the document still reads from or was opened from.
+        ensure_export_replaces_no_input(&document, &source, &destination)?;
+        let options = crate::psd::ExportOptions {
+            bit_depth,
+            operations,
+            force_large_format,
+            metadata: Some(prepared_metadata),
+        };
+        let mut report = crate::psd::export_psd(&document, &resolved, &destination, &options)?;
+        // A file that needed the large format is a PSB whatever it was called, unless that
+        // name is taken: another file is not replaced to make the name right.
+        if report.format == "PSB" && !force_large_format {
+            let renamed = destination.with_extension("psb");
+            if renamed.exists() {
+                report.entries.push(crate::psd::ReportEntry {
+                    kind: crate::psd::ReportKind::Note,
+                    layer: None,
+                    detail: format!(
+                        "The file is a PSB, but {} already exists, so it keeps the .psd name.",
+                        renamed
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("that file")
+                    ),
+                });
+            } else {
+                std::fs::rename(&destination, &renamed).map_err(|_| AppError::ExportFailure)?;
+                report.entries.push(crate::psd::ReportEntry {
+                    kind: crate::psd::ReportKind::Note,
+                    layer: None,
+                    detail: "The document is too large for a PSD, so it was written as a PSB and the name ends in .psb."
+                        .to_string(),
+                });
+                destination = renamed;
+            }
+        }
+        Ok::<_, AppError>((destination, report))
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("Photoshop export worker stopped".into()))??;
+
+    // A Photoshop file holds all three blocks, so nothing is left unplaced.
+    let metadata = std::mem::take(&mut plan.report);
+    Ok(PsdExportResult {
+        output_path: written.to_string_lossy().into_owned(),
+        report,
+        metadata,
+        processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1241,9 +1837,10 @@ pub async fn write_recovery_snapshot(
         buffers
     };
 
+    let source_metadata = session_source_metadata(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
-        crate::layers::write_recovery_snapshot_typed(
+        crate::layers::write_recovery_snapshot_typed_with_metadata(
             &document,
             &operations,
             &buffers,
@@ -1252,6 +1849,7 @@ pub async fn write_recovery_snapshot(
             env!("CARGO_PKG_VERSION"),
             &saved_at,
             None,
+            source_metadata.as_deref(),
         )
     })
     .await
@@ -1326,6 +1924,17 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
     builder.invoke_handler(tauri::generate_handler![
         render_layer_composite,
         export_layer_composite,
+        export_psd_document,
+        export_svg_document,
+        export_exr_document,
+        super::mask::export_mask_file,
+        super::mask::export_mask_png,
+        import_svg_document,
+        import_exr_document,
+        open_clipboard_image,
+        super::clipboard::copy_to_clipboard,
+        super::clipboard::paste_clipboard_image,
+        super::clipboard::clipboard_has_image,
         import_layer_image,
         create_layer_pixels,
         merge_layer_pixels,
@@ -1342,6 +1951,7 @@ pub fn register_layer_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) ->
         save_layer_project,
         load_layer_project,
         create_blank_layer_document,
+        import_psd_document,
         write_recovery_snapshot,
         list_recovery_snapshots,
         restore_recovery_snapshot,
@@ -1391,6 +2001,7 @@ mod project_session_tests {
             application_version: "test".into(),
             created_at: String::new(),
             modified_at: String::new(),
+            source_metadata: None,
         }
     }
 

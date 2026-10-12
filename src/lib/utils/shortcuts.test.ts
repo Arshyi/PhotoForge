@@ -211,6 +211,47 @@ describe('layer shortcuts', () => {
   });
 });
 
+describe('clipboard shortcuts', () => {
+  it('copies the layer with Ctrl+C and the merged picture with Ctrl+Shift+C', () => {
+    expect(resolveShortcut(press('c', { ctrlKey: true }), context())).toEqual({
+      type: 'clipboard',
+      action: 'copy'
+    });
+    expect(resolveShortcut(press('c', { ctrlKey: true, shiftKey: true }), context())).toEqual({
+      type: 'clipboard',
+      action: 'copy_merged'
+    });
+  });
+
+  it('pastes with Ctrl+V, with or without a document open', () => {
+    expect(resolveShortcut(press('v', { ctrlKey: true }), context())).toEqual({
+      type: 'clipboard',
+      action: 'paste'
+    });
+    expect(
+      resolveShortcut(press('v', { ctrlKey: true }), context({ hasImage: false, hasLayers: false }))
+    ).toEqual({ type: 'clipboard', action: 'paste' });
+  });
+
+  it('copies nothing without a layer tree, and does not turn a bare C into a copy', () => {
+    expect(resolveShortcut(press('c', { ctrlKey: true }), context({ hasLayers: false }))).toBeNull();
+    // A bare C is the colour-range tool, and Compare is a binding; neither is a copy.
+    expect(resolveShortcut(press('c'), context())?.type).not.toBe('clipboard');
+  });
+
+  it('leaves Ctrl+C and Ctrl+V to a text field being typed in', () => {
+    const field = element('input', { type: 'text' });
+    expect(resolveShortcut(press('c', { ctrlKey: true, target: field }), context())).toBeNull();
+    expect(resolveShortcut(press('v', { ctrlKey: true, target: field }), context())).toBeNull();
+    const area = element('textarea');
+    expect(resolveShortcut(press('v', { ctrlKey: true, target: area }), context())).toBeNull();
+  });
+
+  it('is not offered while a dialog owns the keyboard', () => {
+    expect(resolveShortcut(press('v', { ctrlKey: true }), context({ modalOpen: true }))).toBeNull();
+  });
+});
+
 describe('transform shortcuts', () => {
   it('toggles the transform box with Ctrl+T', () => {
     expect(resolveShortcut(press('t', { ctrlKey: true }), context())).toEqual({

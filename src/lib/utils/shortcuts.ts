@@ -21,6 +21,7 @@ export type ShortcutIntent =
   | { type: 'transform_cancel' }
   | { type: 'transform_commit' }
   | { type: 'mask'; action: 'select_all' | 'deselect' | 'invert' }
+  | { type: 'clipboard'; action: 'copy' | 'copy_merged' | 'paste' }
   | { type: 'overlay_visibility' }
   | { type: 'tool'; tool: SelectionTool }
   | { type: 'cancel_mask_operation' }
@@ -183,8 +184,17 @@ export function resolveShortcut(
     }
   }
 
+  // Paste works with or without a document: with one it places a new layer, without one it opens
+  // the picture as a document. A text field keeps Ctrl+V for its own text (withheld above).
+  if (!typing && command && !event.shiftKey && !event.altKey && key === 'v') {
+    return { type: 'clipboard', action: 'paste' };
+  }
+
   if (context.hasImage && !typing) {
     if (context.hasLayers) {
+      if (command && !event.altKey && key === 'c') {
+        return { type: 'clipboard', action: event.shiftKey ? 'copy_merged' : 'copy' };
+      }
       if (command && event.shiftKey && key === 'n') return { type: 'layer', action: 'new' };
       if (command && !event.shiftKey && key === 'j') return { type: 'layer', action: 'duplicate' };
       if (command && !event.shiftKey && key === 'g') return { type: 'layer', action: 'group' };

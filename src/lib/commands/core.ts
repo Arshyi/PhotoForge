@@ -50,6 +50,10 @@ export interface CoreCommandContext {
     openAutomation: () => void;
     startRecording: () => void;
     stopRecording: () => void;
+    copyLayer: () => void;
+    copyMerged: () => void;
+    paste: () => void;
+    newFromClipboard: () => void;
   };
 }
 
@@ -97,6 +101,24 @@ export function buildCoreCommands(context: CoreCommandContext): PaletteCommand[]
     }),
     entry('redo', 'Redo', 'Edit', a.redo, needs(context.canRedo, 'There is nothing to redo.'), {
       shortcut: context.shortcutFor('Redo')
+    }),
+    entry('copy_layer', 'Copy layer', 'Edit', a.copyLayer, needs(context.hasActiveLayer, noLayer), {
+      shortcut: 'Ctrl+C',
+      description: 'Puts the layer, or the selected part of it, on the clipboard as a picture.',
+      keywords: ['clipboard', 'picture']
+    }),
+    entry('copy_merged', 'Copy merged picture', 'Edit', a.copyMerged, needs(context.hasLayers, noLayers), {
+      shortcut: 'Ctrl+Shift+C',
+      description: 'Puts everything visible, with the document\'s edits, on the clipboard as a picture.',
+      keywords: ['clipboard', 'flatten']
+    }),
+    entry('paste', 'Paste picture', 'Edit', a.paste, always, {
+      shortcut: 'Ctrl+V',
+      description: 'Places the clipboard picture as a new layer, or opens it as a document if none is open.',
+      keywords: ['clipboard', 'place']
+    }),
+    entry('new_from_clipboard', 'New document from clipboard', 'File', a.newFromClipboard, always, {
+      keywords: ['clipboard', 'paste', 'screenshot']
     }),
     entry('reset_edits', 'Reset all edits', 'Edit', a.resetEdits, needs(context.hasEdits, 'There are no edits to reset.'), {
       keywords: ['revert', 'clear']

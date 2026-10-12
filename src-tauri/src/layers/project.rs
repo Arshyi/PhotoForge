@@ -3,6 +3,7 @@ use crate::color::{FloatImage, FloatRgba};
 use crate::domain::EditOperation;
 use crate::error::AppError;
 use crate::mask::{MaskBitmap, MaskSnapshot};
+use crate::metadata::SourceMetadata;
 use crate::pixel::{DocumentPrecision, PixelBuffer, PixelFormat};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbaImage};
@@ -17,7 +18,15 @@ pub const PROJECT_EXTENSION: &str = "photoforge";
 /// Container magic. The trailing CR/LF pair makes a file mangled by a text-mode
 /// transfer fail immediately instead of decoding into nonsense.
 pub const PROJECT_MAGIC: &[u8; 8] = b"PFORGE\r\n";
-pub const PROJECT_FORMAT_VERSION: u32 = 2;
+/// The newest format this build reads and writes.
+///
+/// A project is written as the **lowest** version that holds what it contains (see
+/// `required_format_version`): a document that uses nothing newer than Phase 14 is still a
+/// version 2 project that every earlier build opens, and one that uses Phase 15's state is
+/// version 3, which an earlier build refuses by name instead of reading it wrongly.
+pub const PROJECT_FORMAT_VERSION: u32 = 3;
+/// What every Phase 14 build reads.
+const BASE_FORMAT_VERSION: u32 = 2;
 
 pub const MAX_PROJECT_BYTES: u64 = 1_073_741_824;
 pub const MAX_MANIFEST_BYTES: u64 = 33_554_432;
@@ -90,6 +99,145 @@ pub struct LoadedProject {
     pub application_version: String,
     pub created_at: String,
     pub modified_at: String,
+    /// The EXIF, XMP and IPTC of the photograph the document came from, when the project kept
+    /// them (the entries are optional, and older versions of the application ignore them).
+    pub source_metadata: Option<SourceMetadata>,
+}
+
+const ENTRY_EXIF: &str = "metadata/exif.bin";
+const ENTRY_XMP: &str = "metadata/xmp.xml";
+const ENTRY_IPTC: &str = "metadata/iptc.bin";
+const ENTRY_SOURCE: &str = "metadata/source.txt";
+
+/// Adds the source's metadata to encoded project bytes as entries of their own.
+///
+/// They are not in the manifest: a reader that does not know them skips them, so a project
+/// carrying them still opens in an older version, without the metadata. The container's
+/// entry count and its checksum are updated, nothing else is touched.
+pub fn attach_source_metadata(
+    mut bytes: Vec<u8>,
+    metadata: &SourceMetadata,
+) -> Result<Vec<u8>, AppError> {
+    let mut extra: Vec<(&str, Vec<u8>)> = Vec::new();
+    if let Some(exif) = &metadata.exif {
+        extra.push((ENTRY_EXIF, exif.as_ref().clone()));
+    }
+    if let Some(xmp) = &metadata.xmp {
+        extra.push((ENTRY_XMP, xmp.as_ref().clone()));
+    }
+    if let Some(iptc) = &metadata.iptc {
+        extra.push((ENTRY_IPTC, iptc.as_ref().clone()));
+    }
+    if extra.is_empty() {
+        return Ok(bytes);
+    }
+    extra.push((
+        ENTRY_SOURCE,
+        format!(
+            "orientation={}\napplied={}\n",
+            metadata.source_orientation,
+            u8::from(metadata.orientation_applied)
+        )
+        .into_bytes(),
+    ));
+    let malformed = || AppError::ProjectFormat("the project bytes are not a project".into());
+    if bytes.len() < PROJECT_MAGIC.len() + 4 + 8 + 4 + 8
+        || &bytes[..PROJECT_MAGIC.len()] != PROJECT_MAGIC
+    {
+        return Err(malformed());
+    }
+    let manifest_len = u64::from_le_bytes(
+        bytes[PROJECT_MAGIC.len() + 4..PROJECT_MAGIC.len() + 12]
+            .try_into()
+            .map_err(|_| malformed())?,
+    ) as usize;
+    let count_at = PROJECT_MAGIC
+        .len()
+        .checked_add(12)
+        .and_then(|value| value.checked_add(manifest_len))
+        .ok_or_else(malformed)?;
+    let body_end = bytes.len() - 8;
+    if count_at + 4 > body_end {
+        return Err(malformed());
+    }
+    let count = u32::from_le_bytes(
+        bytes[count_at..count_at + 4]
+            .try_into()
+            .map_err(|_| malformed())?,
+    ) as usize;
+    if count + extra.len() > MAX_PROJECT_ENTRIES {
+        return Err(AppError::ProjectFormat(
+            "a project may not hold this many entries".into(),
+        ));
+    }
+    // The size it will have, checked before a byte is moved: a project a little under the cap
+    // can be over it with its metadata, and that is said before a second copy is made of it.
+    let added: u64 = extra
+        .iter()
+        .map(|(name, payload)| 2 + name.len() as u64 + 1 + 8 + 8 + payload.len() as u64)
+        .sum();
+    let total = bytes.len() as u64 + added;
+    if total > MAX_PROJECT_BYTES {
+        return Err(AppError::ProjectTooLarge {
+            bytes: total,
+            limit: MAX_PROJECT_BYTES,
+        });
+    }
+    // In place: the trailer comes off, the count is rewritten, the entries are appended, and the
+    // trailer is made again. The container is not copied.
+    bytes.truncate(body_end);
+    bytes[count_at..count_at + 4].copy_from_slice(&((count + extra.len()) as u32).to_le_bytes());
+    bytes
+        .try_reserve(added as usize + 8)
+        .map_err(|_| AppError::OutOfMemoryRisk)?;
+    for (name, payload) in &extra {
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(ENCODING_RAW);
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&fnv1a64(payload).to_le_bytes());
+        bytes.extend_from_slice(payload);
+    }
+    let trailer = fnv1a64(&bytes);
+    bytes.extend_from_slice(&trailer.to_le_bytes());
+    Ok(bytes)
+}
+
+/// The source metadata a project's entries hold, if any. Entries that are not understood are
+/// ignored, like every entry the manifest does not name.
+fn read_source_metadata(entries: &[ReadEntry<'_>]) -> Option<SourceMetadata> {
+    let payload = |name: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.name == name && entry.encoding == ENCODING_RAW)
+            .map(|entry| entry.payload.to_vec())
+    };
+    let exif = payload(ENTRY_EXIF);
+    let xmp = payload(ENTRY_XMP);
+    let iptc = payload(ENTRY_IPTC);
+    if exif.is_none() && xmp.is_none() && iptc.is_none() {
+        return None;
+    }
+    let mut metadata = SourceMetadata::from_blocks(exif, xmp, iptc);
+    if let Some(text) = payload(ENTRY_SOURCE) {
+        let text = String::from_utf8_lossy(&text).to_string();
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("orientation", value)) => {
+                    if let Ok(value) = value.trim().parse::<u8>() {
+                        if (1..=8).contains(&value) {
+                            metadata.source_orientation = value;
+                        }
+                    }
+                }
+                Some(("applied", value)) => {
+                    metadata.orientation_applied = value.trim() == "1";
+                }
+                _ => {}
+            }
+        }
+    }
+    (!metadata.is_empty()).then_some(metadata)
 }
 
 struct Entry {
@@ -324,6 +472,24 @@ pub fn encode_project_typed(
     )
 }
 
+/// The lowest format version that holds `document` without loss in the builds that read it.
+///
+/// Phase 15 stores state an earlier build does not know: a layer clipped to the one beneath it
+/// (`clipped`) and ten Photoshop blend modes. A Phase 14 build drops the clip flag without a word,
+/// and the clipping is gone for good when it saves; it refuses an unknown blend mode with an
+/// unreadable-manifest error. A project that uses either is therefore written as version 3, which
+/// such a build refuses as a version it does not know. Everything else is version 2, as before.
+fn required_format_version(document: &LayerDocument) -> u32 {
+    let newer = document
+        .iter_all()
+        .any(|layer| layer.clipped || layer.blend_mode.is_photoshop_only());
+    if newer {
+        PROJECT_FORMAT_VERSION
+    } else {
+        BASE_FORMAT_VERSION
+    }
+}
+
 fn encode_project_sources(
     document: &LayerDocument,
     document_operations: &[EditOperation],
@@ -460,8 +626,9 @@ fn encode_project_sources(
         mask_entries.push(entry);
     }
 
+    let format_version = required_format_version(document);
     let manifest = ProjectManifest {
-        format_version: PROJECT_FORMAT_VERSION,
+        format_version,
         application: "PhotoForge".into(),
         application_version: application_version.to_string(),
         created_at: created_at.to_string(),
@@ -507,7 +674,7 @@ fn encode_project_sources(
         .try_reserve_exact(required as usize)
         .map_err(|_| AppError::OutOfMemoryRisk)?;
     bytes.extend_from_slice(PROJECT_MAGIC);
-    bytes.extend_from_slice(&PROJECT_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&format_version.to_le_bytes());
     bytes.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&manifest_bytes);
     bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -616,7 +783,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         offset: PROJECT_MAGIC.len(),
     };
     let version = cursor.u32()?;
-    if !matches!(version, 1 | PROJECT_FORMAT_VERSION) {
+    if !(1..=PROJECT_FORMAT_VERSION).contains(&version) {
         return Err(AppError::UnsupportedProjectVersion(version));
     }
     let manifest_len = cursor.u64()?;
@@ -888,6 +1055,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
     }
     document.validate()?;
 
+    let source_metadata = read_source_metadata(&entries);
     Ok(LoadedProject {
         document,
         document_operations: manifest.document_operations,
@@ -896,6 +1064,7 @@ pub fn decode_project(bytes: &[u8]) -> Result<LoadedProject, AppError> {
         application_version: manifest.application_version,
         created_at: manifest.created_at,
         modified_at: manifest.modified_at,
+        source_metadata,
     })
 }
 
@@ -939,6 +1108,32 @@ pub fn save_project_typed(
         created_at,
         modified_at,
     )?;
+    save_project_bytes(path, &bytes)
+}
+
+/// As [`save_project_typed`], with the source's metadata kept in the project.
+#[allow(clippy::too_many_arguments)]
+pub fn save_project_typed_with_metadata(
+    path: &Path,
+    document: &LayerDocument,
+    document_operations: &[EditOperation],
+    pixels: &[(String, PixelBuffer)],
+    application_version: &str,
+    created_at: &str,
+    modified_at: &str,
+    metadata: Option<&SourceMetadata>,
+) -> Result<u64, AppError> {
+    let mut bytes = encode_project_typed(
+        document,
+        document_operations,
+        pixels,
+        application_version,
+        created_at,
+        modified_at,
+    )?;
+    if let Some(metadata) = metadata {
+        bytes = attach_source_metadata(bytes, metadata)?;
+    }
     save_project_bytes(path, &bytes)
 }
 
@@ -1103,6 +1298,49 @@ mod tests {
             let original = pixels.iter().find(|(name, _)| name == id).unwrap();
             assert_eq!(restored.as_raw(), original.1.as_raw());
         }
+    }
+
+    #[test]
+    fn a_photographs_metadata_survives_a_project_and_a_damaged_entry_is_refused() {
+        let document = sample_document();
+        let pixels = sample_pixels();
+        let plain = encode_project(
+            &document,
+            &[],
+            &borrowed(&pixels),
+            "0.15.0",
+            "created",
+            "modified",
+        )
+        .unwrap();
+        // A project that never had metadata reads as one with none.
+        assert!(decode_project(&plain).unwrap().source_metadata.is_none());
+
+        let source = SourceMetadata {
+            exif: Some(std::sync::Arc::new(
+                crate::metadata::exif::orientation_only(6),
+            )),
+            xmp: Some(std::sync::Arc::new(b"<x:xmpmeta/>".to_vec())),
+            iptc: Some(std::sync::Arc::new(vec![0x1C, 2, 25, 0, 1, b'a'])),
+            source_orientation: 6,
+            orientation_applied: true,
+        };
+        let with = attach_source_metadata(plain.clone(), &source).unwrap();
+        let loaded = decode_project(&with).unwrap();
+        assert_eq!(loaded.source_metadata, Some(source.clone()));
+        // The rest of the project is exactly what it was.
+        assert_eq!(loaded.document, document);
+        assert_eq!(loaded.pixels.len(), 2);
+        // Attaching nothing changes nothing.
+        let nothing = attach_source_metadata(plain.clone(), &SourceMetadata::default()).unwrap();
+        assert_eq!(nothing, plain);
+        // The container's own integrity check covers the new entries.
+        let mut damaged = with.clone();
+        let at = damaged.len() - 20;
+        damaged[at] ^= 0x55;
+        assert!(decode_project(&damaged).is_err());
+        // Bytes that are not a project are refused rather than appended to.
+        assert!(attach_source_metadata(b"not a project".to_vec(), &source).is_err());
     }
 
     fn origin(view: crate::source::SourceView) -> Box<crate::source::SourceOrigin> {
@@ -1460,6 +1698,83 @@ mod tests {
             decode_project(&padded),
             Err(AppError::ProjectFormat(_))
         ));
+    }
+
+    fn version_of(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_project_that_uses_nothing_newer_is_still_version_2() {
+        // Byte for byte what an earlier build wrote and reads.
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        assert_eq!(version_of(&bytes), 2);
+        assert_eq!(decode_project(&bytes).unwrap().document, document);
+    }
+
+    #[test]
+    fn clipping_or_a_photoshop_blend_mode_makes_a_version_3_project_this_build_reads() {
+        use crate::layers::BlendMode;
+        let pixels = sample_pixels();
+        let mut clipped = sample_document();
+        // The group above the base is clipped to it.
+        clipped.layers[1].clipped = true;
+        assert!(clipped.validate().is_ok());
+        let bytes = encode(&clipped, &pixels);
+        assert_eq!(version_of(&bytes), 3);
+        let loaded = decode_project(&bytes).unwrap();
+        assert!(loaded.document.layers[1].clipped);
+
+        for mode in BlendMode::ALL {
+            let mut document = sample_document();
+            document.layers[0].blend_mode = mode;
+            let bytes = encode(&document, &pixels);
+            let expected = if mode.is_photoshop_only() { 3 } else { 2 };
+            assert_eq!(version_of(&bytes), expected, "{mode:?}");
+            assert_eq!(
+                decode_project(&bytes).unwrap().document.layers[0].blend_mode,
+                mode
+            );
+        }
+        assert_eq!(
+            BlendMode::ALL
+                .iter()
+                .filter(|mode| mode.is_photoshop_only())
+                .count(),
+            10
+        );
+    }
+
+    #[test]
+    fn what_an_earlier_build_wrote_is_still_read() {
+        // A project of either older version, rewritten by hand: version 1 and 2 headers.
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        assert_eq!(version_of(&bytes), 2);
+        assert!(decode_project(&bytes).is_ok());
+    }
+
+    #[test]
+    fn metadata_is_attached_in_place_and_the_cap_is_checked_before_copying() {
+        let document = sample_document();
+        let bytes = encode(&document, &sample_pixels());
+        let before = bytes.len();
+        let metadata = SourceMetadata::from_blocks(
+            Some(vec![1, 2, 3, 4]),
+            Some(b"<x:xmpmeta/>".to_vec()),
+            None,
+        );
+        let attached = attach_source_metadata(bytes, &metadata).unwrap();
+        assert!(attached.len() > before);
+        let loaded = decode_project(&attached).unwrap();
+        assert_eq!(loaded.document, document);
+        assert!(loaded.source_metadata.is_some());
+        // The integrity check holds over the rewritten container.
+        let mut corrupted = attached.clone();
+        let middle = corrupted.len() / 2;
+        corrupted[middle] ^= 0xff;
+        assert!(decode_project(&corrupted).is_err());
     }
 
     #[test]

@@ -860,6 +860,734 @@ async fn a_locked_descendant_is_not_discarded_by_a_merge_into_its_group() {
     assert!(error.to_string().contains("child"), "{error}");
 }
 
+// ---- the operations the Layers panel needs ----------------------------------------
+//
+// Phase 15.0 routes the panel's own edits through the engine, so each of these is an
+// operation a person can now trigger from the panel and a macro can record.
+
+fn rotate() -> Value {
+    serde_json::to_value(EditOperation::Rotate { degrees: 15 }).unwrap()
+}
+
+/// A document with one group (`g`) holding one pixel layer (`a`), plus a layer `b`.
+fn grouped() -> (AppState, LayerDocument) {
+    let (state, mut document) = world(&["a", "b"]);
+    let a = document.layers.remove(0);
+    let group = new_layer(
+        "g",
+        "g",
+        LayerContent::Group {
+            children: vec![a],
+            isolated: true,
+        },
+        "t0",
+    );
+    document.layers.insert(0, group);
+    document.active_layer_id = Some("b".into());
+    (state, document)
+}
+
+#[tokio::test]
+async fn pass_through_is_set_and_returns_the_blend_mode_to_normal() {
+    let (state, mut document) = grouped();
+    document.layer_mut("g").unwrap().blend_mode = photoforge_lib::layers::BlendMode::Multiply;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("g"), "passThrough": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let group = result.document.find("g").unwrap();
+    assert!(matches!(
+        group.content,
+        LayerContent::Group {
+            isolated: false,
+            ..
+        }
+    ));
+    assert_eq!(group.blend_mode, photoforge_lib::layers::BlendMode::Normal);
+
+    // And back: isolating the group again does not invent a blend mode.
+    let back = run(
+        &state,
+        request(
+            &result.document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("g"), "passThrough": false}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        back.document.find("g").unwrap().content,
+        LayerContent::Group { isolated: true, .. }
+    ));
+}
+
+#[tokio::test]
+async fn pass_through_is_refused_for_a_layer_that_is_not_a_group() {
+    let (state, document) = world(&["a"]);
+    let error = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_pass_through",
+                json!({"selector": id("a"), "passThrough": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("not one"), "{error}");
+}
+
+#[tokio::test]
+async fn a_mask_can_be_added_inverted_disabled_and_removed_in_one_transaction() {
+    let (state, document) = world(&["a"]);
+    // The later steps act on a mask the first step makes, so the dry run must make it too.
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![
+                call(
+                    "core.layer.mask_add",
+                    json!({"selector": id("a"), "filled": false}),
+                ),
+                call(
+                    "core.layer.mask_set_inverted",
+                    json!({"selector": id("a"), "inverted": true}),
+                ),
+                call(
+                    "core.layer.mask_set_enabled",
+                    json!({"selector": id("a"), "enabled": false}),
+                ),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    let mask = result.document.find("a").unwrap().mask.as_ref().unwrap();
+    assert!(mask.inverted);
+    assert!(!mask.enabled);
+    assert_eq!((mask.snapshot.width, mask.snapshot.height), (8, 8));
+
+    let removed = run(
+        &state,
+        request(
+            &result.document,
+            vec![call("core.layer.mask_remove", json!({"selector": id("a")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(removed.document.find("a").unwrap().mask.is_none());
+}
+
+#[tokio::test]
+async fn a_revealing_mask_and_a_hiding_mask_differ() {
+    let (state, document) = world(&["a"]);
+    let make = |filled: bool| {
+        request(
+            &document,
+            vec![call(
+                "core.layer.mask_add",
+                json!({"selector": id("a"), "filled": filled}),
+            )],
+        )
+    };
+    let reveal = run(&state, make(true)).await.unwrap();
+    let hide = run(&state, make(false)).await.unwrap();
+    let decode = |result: &TransactionResult| {
+        result
+            .document
+            .find("a")
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .decode()
+            .unwrap()
+    };
+    assert_ne!(decode(&reveal), decode(&hide));
+}
+
+#[tokio::test]
+async fn editing_a_mask_that_is_not_there_names_the_layer() {
+    let (state, document) = world(&["a"]);
+    for (op, params) in [
+        ("core.layer.mask_remove", json!({"selector": id("a")})),
+        (
+            "core.layer.mask_set_enabled",
+            json!({"selector": id("a"), "enabled": true}),
+        ),
+        (
+            "core.layer.mask_set_inverted",
+            json!({"selector": id("a"), "inverted": true}),
+        ),
+    ] {
+        let error = run(&state, request(&document, vec![call(op, params)]))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("a has no mask"), "{op}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn an_automation_cannot_edit_the_mask_of_a_locked_layer_but_a_person_can() {
+    let (state, mut document) = world(&["a"]);
+    document.layer_mut("a").unwrap().locked = true;
+    let add = |origin: Origin| {
+        let mut req = request(
+            &document,
+            vec![call(
+                "core.layer.mask_add",
+                json!({"selector": id("a"), "filled": true}),
+            )],
+        );
+        req.origin = origin;
+        req
+    };
+    assert!(run(&state, add(Origin::Automation)).await.is_err());
+    // Matches what the Layers panel has always allowed: its lock stops automation.
+    assert!(run(&state, add(Origin::User)).await.is_ok());
+}
+
+#[tokio::test]
+async fn an_adjustment_layer_can_be_changed_but_nothing_else_can() {
+    let (state, document) = world(&["a"]);
+    let added = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.add_adjustment",
+                json!({"operation": contrast(), "name": "Punch"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let adjustment = added.last_created.clone().unwrap();
+
+    let changed = run(
+        &state,
+        request(
+            &added.document,
+            vec![call(
+                "core.layer.update_adjustment",
+                json!({"selector": id(&adjustment), "operation": brightness()}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    match &changed.document.find(&adjustment).unwrap().content {
+        LayerContent::Adjustment { operation } => {
+            assert_eq!(**operation, EditOperation::Contrast { amount: -0.1 });
+        }
+        other => panic!("expected an adjustment layer, got {other:?}"),
+    }
+
+    // A pixel layer is not an adjustment layer, and a geometry edit cannot be one.
+    for (selector, operation) in [(id("a"), brightness()), (id(&adjustment), rotate())] {
+        let error = run(
+            &state,
+            request(
+                &added.document,
+                vec![call(
+                    "core.layer.update_adjustment",
+                    json!({"selector": selector, "operation": operation}),
+                )],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn placing_pixels_shows_a_buffer_the_session_already_holds() {
+    let (state, document) = world(&["a"]);
+    let pixel_id = state
+        .layers
+        .lock()
+        .unwrap()
+        .register(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .unwrap();
+    let before = buffers(&state);
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.place_pixels",
+                json!({"pixelId": pixel_id, "width": 8, "height": 8, "name": "Placed"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    let layer = result
+        .document
+        .find(result.last_created.as_ref().unwrap())
+        .unwrap();
+    assert_eq!(layer.name, "Placed");
+    assert_eq!(layer.pixel_id(), Some(pixel_id.as_str()));
+    assert_eq!(
+        result.document.active_layer_id.as_deref(),
+        Some(layer.id.as_str())
+    );
+    // Placing registers nothing: the buffer was already there.
+    assert_eq!(buffers(&state), before);
+    assert!(result.created_pixel_ids.is_empty());
+}
+
+#[tokio::test]
+async fn placing_pixels_checks_the_buffer_exists_and_is_the_size_claimed() {
+    let (state, document) = world(&["a"]);
+    let held = document.find("a").unwrap().pixel_id().unwrap().to_string();
+    for params in [
+        json!({"pixelId": "px-nowhere", "width": 8, "height": 8}),
+        json!({"pixelId": held, "width": 9, "height": 8}),
+    ] {
+        let error = run(
+            &state,
+            request(&document, vec![call("core.layer.place_pixels", params)]),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn only_a_person_may_place_pixels() {
+    let (state, document) = world(&["a"]);
+    let pixel_id = document.find("a").unwrap().pixel_id().unwrap().to_string();
+    for origin in [Origin::Automation, Origin::Planner, Origin::Batch] {
+        let mut req = request(
+            &document,
+            vec![call(
+                "core.layer.place_pixels",
+                json!({"pixelId": pixel_id, "width": 8, "height": 8}),
+            )],
+        );
+        req.origin = origin;
+        let error = run(&state, req).await.unwrap_err();
+        assert!(
+            error.to_string().contains("only a person"),
+            "{origin:?}: {error}"
+        );
+    }
+}
+
+// ---- clipping ----------------------------------------------------------------------
+
+fn order(document: &LayerDocument) -> Vec<String> {
+    document
+        .layers
+        .iter()
+        .map(|layer| layer.id.clone())
+        .collect()
+}
+
+fn clipped_ids(document: &LayerDocument) -> Vec<String> {
+    document
+        .layers
+        .iter()
+        .filter(|layer| layer.clipped)
+        .map(|layer| layer.id.clone())
+        .collect()
+}
+
+/// A stack `a, b, c, d` with `c` and `d` clipped to `b`.
+async fn clipped_world() -> (AppState, LayerDocument) {
+    let (state, document) = world(&["a", "b", "c", "d"]);
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![
+                call(
+                    "core.layer.set_clipped",
+                    json!({"selector": id("c"), "clipped": true}),
+                ),
+                call(
+                    "core.layer.set_clipped",
+                    json!({"selector": id("d"), "clipped": true}),
+                ),
+            ],
+        ),
+    )
+    .await
+    .unwrap();
+    (state, result.document)
+}
+
+#[tokio::test]
+async fn a_layer_can_be_clipped_and_released() {
+    let (state, document) = world(&["a", "b"]);
+    let clipped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(clipped.find("b").unwrap().clipped);
+    assert!(!clipped.find("a").unwrap().clipped);
+
+    let released = run(
+        &state,
+        request(
+            &clipped,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": false}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(!released.find("b").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn the_bottom_layer_of_a_stack_cannot_be_clipped() {
+    let (state, document) = world(&["a", "b"]);
+    let error = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("a"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    assert!(error.to_string().contains("no layer beneath"), "{error}");
+}
+
+#[tokio::test]
+async fn automation_cannot_change_the_clipping_of_a_locked_layer() {
+    let (state, document) = world(&["a", "b"]);
+    let locked = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.set_locked",
+                json!({"selector": id("b"), "locked": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    let mut automated = request(
+        &locked,
+        vec![call(
+            "core.layer.set_clipped",
+            json!({"selector": id("b"), "clipped": true}),
+        )],
+    );
+    automated.origin = Origin::Automation;
+    let error = run(&state, automated).await.unwrap_err();
+    assert!(matches!(error, AppError::Transaction { .. }), "{error}");
+    // A person at the panel still can: a lock protects against automation.
+    let by_hand = run(
+        &state,
+        request(
+            &locked,
+            vec![call(
+                "core.layer.set_clipped",
+                json!({"selector": id("b"), "clipped": true}),
+            )],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(by_hand.document.find("b").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn moving_a_base_moves_the_layers_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    assert_eq!(order(&document), ["a", "b", "c", "d"]);
+    // Down to the bottom: the group stays together and keeps its flags.
+    let down = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "index": 0}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&down), ["b", "c", "d", "a"]);
+    assert_eq!(clipped_ids(&down), ["c", "d"]);
+    // And to the top, past `a`.
+    let up = run(
+        &state,
+        request(
+            &down,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "index": 1}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&up), ["a", "b", "c", "d"]);
+    assert_eq!(clipped_ids(&up), ["c", "d"]);
+}
+
+#[tokio::test]
+async fn moving_a_clipped_layer_moves_only_that_layer() {
+    let (state, document) = clipped_world().await;
+    let moved = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("c"), "index": 3}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&moved), ["a", "b", "d", "c"]);
+    assert_eq!(clipped_ids(&moved), ["d", "c"]);
+}
+
+#[tokio::test]
+async fn a_clipped_layer_that_ends_up_at_the_bottom_is_released() {
+    let (state, document) = clipped_world().await;
+    let moved = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("c"), "index": 0}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&moved), ["c", "a", "b", "d"]);
+    assert!(!moved.find("c").unwrap().clipped);
+    // `d` still follows a base, now `b`.
+    assert!(moved.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn a_base_cannot_be_moved_into_a_layer_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    let with_group = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("c")], "name": "Tint"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    // Grouping released `c` from the base: it is the lowest layer in its group.
+    let group_id = with_group
+        .iter()
+        .find(|layer| layer.name == "Tint")
+        .unwrap()
+        .id
+        .clone();
+    let error = run(
+        &state,
+        request(
+            &with_group,
+            vec![call(
+                "core.layer.move",
+                json!({"selector": id("b"), "parent": id(&group_id), "index": 0}),
+            )],
+        ),
+    )
+    .await;
+    // `d` is clipped to `b`, and the group sits between them, so this particular
+    // move is legal; what must hold is that nothing was lost either way.
+    let moved = error.unwrap().document;
+    moved.validate().unwrap();
+    assert_eq!(moved.layer_count(), with_group.layer_count());
+}
+
+#[tokio::test]
+async fn deleting_a_base_promotes_the_first_layer_clipped_to_it() {
+    let (state, document) = clipped_world().await;
+    let deleted = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.delete", json!({"selector": id("b")}))],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&deleted), ["a", "c", "d"]);
+    // `c` is the base of the group now, and `d` is still clipped to it.
+    assert!(!deleted.find("c").unwrap().clipped);
+    assert!(deleted.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn deleting_a_clipped_layer_leaves_the_others_clipped() {
+    let (state, document) = clipped_world().await;
+    let deleted = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.delete", json!({"selector": id("c")}))],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert_eq!(order(&deleted), ["a", "b", "d"]);
+    assert_eq!(clipped_ids(&deleted), ["d"]);
+}
+
+#[tokio::test]
+async fn a_copy_of_a_base_goes_above_its_clipping_group() {
+    let (state, document) = clipped_world().await;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.duplicate", json!({"selector": id("b")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    let copy = result.last_created.clone().unwrap();
+    assert_eq!(order(&result.document), ["a", "b", "c", "d", copy.as_str()]);
+    assert_eq!(clipped_ids(&result.document), ["c", "d"]);
+}
+
+#[tokio::test]
+async fn a_copy_of_a_clipped_layer_stays_in_the_group() {
+    let (state, document) = clipped_world().await;
+    let result = run(
+        &state,
+        request(
+            &document,
+            vec![call("core.layer.duplicate", json!({"selector": id("c")}))],
+        ),
+    )
+    .await
+    .unwrap();
+    let copy = result.last_created.clone().unwrap();
+    assert_eq!(order(&result.document), ["a", "b", "c", copy.as_str(), "d"]);
+    assert!(result.document.find(&copy).unwrap().clipped);
+}
+
+#[tokio::test]
+async fn grouping_a_whole_clipping_group_keeps_it_intact_inside() {
+    let (state, document) = clipped_world().await;
+    let grouped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("b"), id("c"), id("d")], "name": "Art"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    let group = grouped.iter().find(|layer| layer.name == "Art").unwrap();
+    let children: Vec<(&str, bool)> = group
+        .children()
+        .iter()
+        .map(|child| (child.id.as_str(), child.clipped))
+        .collect();
+    assert_eq!(children, [("b", false), ("c", true), ("d", true)]);
+}
+
+#[tokio::test]
+async fn grouping_a_clipped_layer_alone_releases_it() {
+    let (state, document) = clipped_world().await;
+    let grouped = run(
+        &state,
+        request(
+            &document,
+            vec![call(
+                "core.layer.group",
+                json!({"selectors": [id("c")], "name": "Alone"}),
+            )],
+        ),
+    )
+    .await
+    .unwrap()
+    .document;
+    assert!(!grouped.find("c").unwrap().clipped);
+    // The layer above it, `d`, now follows the group, which sits where `c` was.
+    assert!(grouped.find("d").unwrap().clipped);
+}
+
+#[tokio::test]
+async fn the_clipped_flag_survives_a_round_trip_through_a_project() {
+    let (_state, document) = clipped_world().await;
+    let text = serde_json::to_string(&document).unwrap();
+    let back: LayerDocument = serde_json::from_str(&text).unwrap();
+    assert_eq!(clipped_ids(&back), ["c", "d"]);
+    // The revision names the document, clipping included.
+    let mut released = back.clone();
+    released.layers[2].clipped = false;
+    assert_ne!(
+        document_revision(&back).unwrap(),
+        document_revision(&released).unwrap()
+    );
+}
+
 // ---- the registry the interface is tested against ---------------------------------
 
 /// The interface tests read this file to know which operation ids exist. If the

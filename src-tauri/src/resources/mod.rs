@@ -240,10 +240,23 @@ impl ResourceEstimate {
         let mut max_depth = 0_u64;
         let mut adjustment_frames = 0_u64;
         let mut masks = 0_u64;
+        // A clipping group is composited through a buffer of its own, one per stack
+        // that has one at a time, so each depth that holds a clipped layer costs one
+        // more canvas-sized buffer.
+        let mut clip_levels = 0_u64;
+        let mut clipped_at_depth = [false; crate::layers::MAX_GROUP_DEPTH + 2];
         let mut stack: Vec<_> = document.layers.iter().map(|l| (l, 0_u64)).collect();
         while let Some((layer, depth)) = stack.pop() {
             if !layer.visible || layer.opacity <= 0.0 {
                 continue;
+            }
+            if layer.clipped {
+                if let Some(seen) = clipped_at_depth.get_mut(depth as usize) {
+                    if !*seen {
+                        *seen = true;
+                        clip_levels += 1;
+                    }
+                }
             }
             if let Some(mask) = &layer.mask {
                 masks = masks
@@ -266,7 +279,7 @@ impl ResourceEstimate {
         // operation scratch. Reserve PNG16-sized output even for preview.
         let scratch = n
             .checked_mul(16)
-            .and_then(|b| b.checked_mul(1 + max_depth + adjustment_frames))
+            .and_then(|b| b.checked_mul(1 + max_depth + clip_levels + adjustment_frames))
             .and_then(|b| b.checked_add(promotion_bytes))
             .ok_or(AppError::OutOfMemoryRisk)?;
         Self::new(resident, scratch, masks, n * 8 + 40_960_000)
@@ -290,6 +303,32 @@ mod tests {
             assert!(estimate.scratch_bytes > 2_000_000_000);
         }
     }
+    #[test]
+    fn a_clipping_group_costs_one_more_buffer_per_level_that_has_one() {
+        use crate::layers::{test_pixel_layer, LayerDocument};
+        let plain = {
+            let mut document = LayerDocument::new(512, 512);
+            document.layers.push(test_pixel_layer("a", "pa", 512, 512));
+            document.layers.push(test_pixel_layer("b", "pb", 512, 512));
+            document
+        };
+        let mut clipped = plain.clone();
+        clipped.layers[1].clipped = true;
+        let before = ResourceEstimate::render(&plain, 1.0, 0, 0).unwrap();
+        let after = ResourceEstimate::render(&clipped, 1.0, 0, 0).unwrap();
+        // One canvas of 512 x 512 float RGBA pixels.
+        assert_eq!(after.scratch_bytes - before.scratch_bytes, 512 * 512 * 16);
+        // A hidden clipped layer paints nothing and is not counted.
+        let mut hidden = clipped.clone();
+        hidden.layers[1].visible = false;
+        assert_eq!(
+            ResourceEstimate::render(&hidden, 1.0, 0, 0)
+                .unwrap()
+                .scratch_bytes,
+            before.scratch_bytes
+        );
+    }
+
     #[test]
     fn excessive_live_buffers_are_rejected_even_when_dimensions_are_legal() {
         assert!(matches!(

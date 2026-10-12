@@ -9,9 +9,7 @@ use crate::error::AppError;
 use crate::image_processing::{
     apply_pipeline, calculate_histogram, inspect_pixel, prepare_preview_operations,
 };
-use crate::infrastructure::{
-    load_workflow, parse_workflow_json, save_image_with_profile, save_workflow,
-};
+use crate::infrastructure::{load_workflow, parse_workflow_json, save_workflow};
 use image::GenericImageView;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -276,6 +274,7 @@ pub async fn export_with_profile(
     output_path: String,
     operations: Vec<EditOperation>,
     profile: ExportProfile,
+    metadata_policy: Option<crate::metadata::MetadataPolicy>,
     state: State<'_, AppState>,
 ) -> Result<ExportResult, AppError> {
     let _permit = state.export_gate.lock().await;
@@ -283,14 +282,19 @@ pub async fn export_with_profile(
         operation.validate()?;
     }
     let output_path = PathBuf::from(output_path);
-    let (source, original_path) = {
+    let (source, original_path, source_metadata) = {
         let session = state
             .session
             .lock()
             .map_err(|_| AppError::ProcessingFailure("editor state is unavailable".into()))?;
         let source = &session.as_ref().ok_or(AppError::NoImageOpen)?.source;
-        (source.original.clone(), source.path.clone())
+        (
+            source.original.clone(),
+            source.path.clone(),
+            source.source_metadata.clone(),
+        )
     };
+    let policy = metadata_policy.unwrap_or_default();
     let engine = {
         let registry = state.components.lock().map_err(|_| {
             AppError::ComponentInitializationFailure("registry is unavailable".into())
@@ -298,11 +302,26 @@ pub async fn export_with_profile(
         RestorationEngineFactory::create(registry.active_engine())
     };
     let started = Instant::now();
-    let (saved_path, width, height) = tauri::async_runtime::spawn_blocking(move || {
+    let (saved_path, width, height, report) = tauri::async_runtime::spawn_blocking(move || {
         let processed = engine.process(source.as_ref(), &operations)?;
         let (width, height) = processed.dimensions();
-        let saved = save_image_with_profile(&processed, &original_path, &output_path, profile)?;
-        Ok::<_, AppError>((saved, width, height))
+        let mut plan = crate::metadata::Plan::new(
+            source_metadata.as_deref(),
+            policy,
+            crate::metadata::OutputFacts {
+                width,
+                height,
+                wide_gamut_profile: false,
+            },
+        );
+        let saved = crate::infrastructure::save_image_with_metadata(
+            &processed,
+            &original_path,
+            &output_path,
+            profile,
+            Some(&mut plan),
+        )?;
+        Ok::<_, AppError>((saved, width, height, plan.report))
     })
     .await
     .map_err(|_| AppError::ProcessingFailure("profile export worker stopped".into()))??;
@@ -311,6 +330,7 @@ pub async fn export_with_profile(
         width,
         height,
         processing_time_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        metadata: Some(report),
     })
 }
 
