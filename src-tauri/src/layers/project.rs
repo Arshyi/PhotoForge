@@ -486,12 +486,19 @@ pub fn encode_project_typed(
 /// Phase 15 stores state an earlier build does not know: a layer clipped to the one beneath it
 /// (`clipped`) and ten Photoshop blend modes. A Phase 14 build drops the clip flag without a word,
 /// and the clipping is gone for good when it saves; it refuses an unknown blend mode with an
-/// unreadable-manifest error. A project that uses either is therefore written as version 3, which
-/// such a build refuses as a version it does not know. Everything else is version 2, as before.
+/// unreadable-manifest error. A RAW layer that records the orientation it was turned by
+/// (`orientation_applied`) is a field such a build refuses as an unknown one. A project that uses
+/// any of these is therefore written as version 3, which such a build refuses as a version it does
+/// not know. Everything else is version 2, as before.
 fn required_format_version(document: &LayerDocument) -> u32 {
-    let newer = document
-        .iter_all()
-        .any(|layer| layer.clipped || layer.blend_mode.is_photoshop_only());
+    let newer = document.iter_all().any(|layer| {
+        layer.clipped
+            || layer.blend_mode.is_photoshop_only()
+            || layer
+                .raw
+                .as_ref()
+                .is_some_and(|raw| raw.orientation_applied != 1)
+    });
     if newer {
         PROJECT_FORMAT_VERSION
     } else {

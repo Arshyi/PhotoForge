@@ -104,10 +104,12 @@ structure is taken apart the other way: the cleaned block is split into the dire
 keeps them in, every value converted to the file's little-endian order, and the maker note is
 not written (its offsets are into the block it came from; the report says so).
 
-**The orientation of a DNG is read, not applied.** Development leaves the sensor's own way up, so a
-portrait DNG still opens on its side, as a region of a very large JPEG does; the tag travels with
-the pixels (and under *Remove everything* too, for the same reason), so the exported file comes
-out upright in other programs. Turning the developed picture upright is not done.
+**A DNG developed whole is turned upright** from its orientation tag, so a portrait photograph
+opens as a portrait; the layer records the turn (see [raw-development.md](raw-development.md)),
+the tag is spent, and every export says upright. **A region of a sensor is not turned**: its
+rectangle is in the sensor's own coordinates, so it stays in the sensor's orientation and the tag
+travels with its pixels (and under *Remove everything* too, because a sideways picture is a
+defect and not a privacy choice), as a region of a very large JPEG does.
 
 ## What is not carried, under any policy
 
@@ -162,6 +164,6 @@ A DNG's maker note is not carried at all (above).
 
 ## Not done
 
-Turning a developed DNG upright; XMP rewriting (so a packet that
+XMP rewriting (so a packet that
 names a place is dropped whole, including its title and keywords); extended XMP; PNG/WebP IPTC
 in a legacy text chunk; writing a resolution; editing metadata in the interface.

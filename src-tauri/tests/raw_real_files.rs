@@ -323,3 +323,75 @@ fn a_real_converters_file_gives_its_exif_and_xmp() {
         eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
     }
 }
+
+/// A real photograph, with its orientation tag changed to each of the eight values, is turned
+/// the way that value says: the development of the changed file is the unchanged file's
+/// development turned by the same rule, and it has the shape that rule gives.
+///
+/// The Canon sample is upright (orientation 1), so the tag is rewritten in a copy; nothing else
+/// of the file is touched. Preview scale keeps it quick; the turn does not depend on the scale.
+#[test]
+fn a_real_photograph_is_turned_by_each_orientation_value() {
+    use photoforge_lib::orientation;
+    use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_upright};
+
+    let Some(original) = read(LOSSLESS) else {
+        eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
+        return;
+    };
+    let with_orientation = |value: u16| -> Vec<u8> {
+        let mut bytes = original.clone();
+        assert_eq!(&bytes[..2], b"II", "a little-endian file");
+        let directory = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[directory], bytes[directory + 1]]) as usize;
+        for index in 0..count {
+            let at = directory + 2 + index * 12;
+            if u16::from_le_bytes([bytes[at], bytes[at + 1]]) == 274 {
+                bytes[at + 8..at + 10].copy_from_slice(&value.to_le_bytes());
+                return bytes;
+            }
+        }
+        panic!("the first directory has no orientation tag");
+    };
+    let parameters = DevelopmentParameters::default();
+    let upright = develop_bytes(&original, &parameters, RenderScale::Preview).unwrap();
+    let (width, height) = upright.image.dimensions();
+    let pixels = upright.image.pixels().to_vec();
+    // With PHOTOFORGE_UPRIGHT_DUMP set, every picture is left as raw little-endian f32 RGBA
+    // (`<name>.f32` and `<name>.json` with the size), for a reader that is not this program.
+    let dump = std::env::var_os("PHOTOFORGE_UPRIGHT_DUMP").map(PathBuf::from);
+    let leave = |name: String, image: &photoforge_lib::color::FloatImage| {
+        let Some(directory) = &dump else {
+            return;
+        };
+        std::fs::create_dir_all(directory).unwrap();
+        let mut raw = Vec::new();
+        for pixel in image.pixels() {
+            for value in [pixel.red, pixel.green, pixel.blue, pixel.alpha] {
+                raw.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        std::fs::write(directory.join(format!("{name}.f32")), raw).unwrap();
+        let (w, h) = image.dimensions();
+        std::fs::write(
+            directory.join(format!("{name}.json")),
+            format!("{{\"width\": {w}, \"height\": {h}}}"),
+        )
+        .unwrap();
+    };
+    leave("orientation-1".to_string(), &upright.image);
+    for value in 2..=8_u16 {
+        let turned =
+            develop_bytes_upright(&with_orientation(value), &parameters, RenderScale::Preview)
+                .unwrap();
+        let want = orientation::oriented_size(value as u8, width, height);
+        assert_eq!(turned.image.dimensions(), want, "orientation {value}");
+        let by_rule = orientation::turn(pixels.clone(), value as u8, width, height).unwrap();
+        assert!(
+            turned.image.pixels() == by_rule.as_slice(),
+            "orientation {value}: a pixel differs from the turn of the unchanged file"
+        );
+        assert_eq!(turned.source_dimensions, upright.source_dimensions);
+        leave(format!("orientation-{value}"), &turned.image);
+    }
+}
