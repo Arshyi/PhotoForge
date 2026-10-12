@@ -535,11 +535,38 @@ pub struct RawLayerSource {
     /// on a machine with more memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<crate::source::Rect>,
+    /// The EXIF orientation (2 to 8) that was applied to the developed raster, which is otherwise
+    /// the sensor's own way up (1, and then the field is not written).
+    ///
+    /// A layer opened whole is turned upright when it is developed, and re-developing it turns it
+    /// the same way, so its size, its masks and its transform keep meaning what they meant. A
+    /// layer saved before this field existed has 1, and re-developing it is unchanged. A region
+    /// is never turned: its rectangle is in sensor coordinates.
+    #[serde(default = "no_orientation", skip_serializing_if = "is_no_orientation")]
+    pub orientation_applied: u8,
+}
+
+fn no_orientation() -> u8 {
+    1
+}
+
+fn is_no_orientation(value: &u8) -> bool {
+    *value == 1
 }
 
 impl RawLayerSource {
     pub fn validate(&self) -> Result<(), RawError> {
         self.reference.validate_structure()?;
+        if !crate::orientation::is_valid(self.orientation_applied) {
+            return Err(RawError::InvalidMetadata(
+                "the applied orientation must be between 1 and 8".into(),
+            ));
+        }
+        if self.view.is_some() && self.orientation_applied != 1 {
+            return Err(RawError::InvalidMetadata(
+                "a region of a sensor is in the sensor's own orientation and is not turned".into(),
+            ));
+        }
         match &self.view {
             // The layer is the whole sensor, so the whole sensor must fit.
             None => validate_dimensions(self.reference.width, self.reference.height)?,
@@ -801,6 +828,60 @@ mod tests {
         invalid = source;
         invalid.sha256 = "not-a-hash".into();
         assert!(invalid.validate().is_err());
+    }
+
+    fn turned_source(orientation_applied: u8, view: Option<crate::source::Rect>) -> RawLayerSource {
+        RawLayerSource {
+            reference: RawSourceReference {
+                filename: "capture.dng".into(),
+                format: RawFormat::Dng,
+                file_size: 10,
+                sha256: "0".repeat(64),
+                width: 64,
+                height: 48,
+            },
+            mode: RawSourceMode::Linked {
+                path: "C:\\capture.dng".into(),
+            },
+            parameters: DevelopmentParameters::default(),
+            decoder: DECODER_ID.into(),
+            decoder_version: DECODER_VERSION.into(),
+            capture: RawCaptureMetadata::default(),
+            view,
+            orientation_applied,
+        }
+    }
+
+    #[test]
+    fn the_turn_a_layer_was_given_is_recorded_only_when_there_is_one() {
+        // Not turned: the field is not written, so a project that does not use it is as it was.
+        let plain = serde_json::to_value(turned_source(1, None)).unwrap();
+        assert!(plain.get("orientationApplied").is_none(), "{plain}");
+        let turned = serde_json::to_value(turned_source(6, None)).unwrap();
+        assert_eq!(turned["orientationApplied"], 6);
+
+        // A record from before the field existed reads as not turned.
+        let back: RawLayerSource = serde_json::from_value(plain).unwrap();
+        assert_eq!(back.orientation_applied, 1);
+        let back: RawLayerSource = serde_json::from_value(turned).unwrap();
+        assert_eq!(back.orientation_applied, 6);
+    }
+
+    #[test]
+    fn a_turn_must_be_a_real_orientation_and_a_region_is_never_turned() {
+        assert!(turned_source(6, None).validate().is_ok());
+        for bad in [0_u8, 9, 200] {
+            assert!(turned_source(bad, None).validate().is_err(), "{bad}");
+        }
+        let region = crate::source::Rect {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+        };
+        assert!(turned_source(1, Some(region)).validate().is_ok());
+        let error = turned_source(6, Some(region)).validate().unwrap_err();
+        assert!(error.to_string().contains("not turned"), "{error}");
     }
 
     #[test]

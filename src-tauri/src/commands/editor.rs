@@ -678,20 +678,31 @@ async fn open_raw_image_inner(
     let developed = match tauri::async_runtime::spawn_blocking(move || {
         let _job = crate::resources::acquire_job(None)?;
         let defaults = crate::color::DevelopmentParameters::default();
-        let (developed, summary) = match region {
+        // A sensor developed whole is turned upright from its orientation tag, and the layer
+        // records which turn, so developing it again turns it the same way. A region is in the
+        // sensor's coordinates: it is not turned, and carries the tag with its pixels.
+        let (developed, summary, applied) = match region {
             None => {
                 let sensor =
                     crate::raw::dng::decode(&bytes).map_err(crate::source::dng::map_raw)?;
-                let developed = crate::raw::develop::develop_sensor(
+                let developed = crate::raw::develop::develop_sensor_upright(
                     &sensor,
                     &defaults,
                     crate::raw::develop::RenderScale::Full,
                 )
                 .map_err(crate::source::dng::map_raw)?;
-                (developed, sensor.summary())
+                let applied = u8::try_from(sensor.orientation)
+                    .ok()
+                    .filter(|value| crate::orientation::is_valid(*value))
+                    .unwrap_or(1);
+                (developed, sensor.summary(), applied)
             }
-            Some(rect) => crate::raw::develop::develop_region_described(&bytes, rect, &defaults)
-                .map_err(crate::source::dng::map_raw)?,
+            Some(rect) => {
+                let (developed, summary) =
+                    crate::raw::develop::develop_region_described(&bytes, rect, &defaults)
+                        .map_err(crate::source::dng::map_raw)?;
+                (developed, summary, 1)
+            }
         };
         // The identity recorded is that of the bytes just decoded, not of whatever
         // is on disk by the time a second read would happen.
@@ -704,10 +715,15 @@ async fn open_raw_image_inner(
         )
         .map_err(crate::source::dng::map_raw)?;
         // The camera's own EXIF, XMP and IPTC, from the same bytes. The file is a TIFF, so the
-        // block is built from its directories; the orientation is read and not applied, because
-        // development leaves the sensor's own way up and the tag has to travel with the pixels.
-        let source_metadata = crate::metadata::tiff::read(&bytes).filter(|found| !found.is_empty());
-        Ok::<_, AppError>((developed, summary, reference, source_metadata))
+        // block is built from its directories. The orientation tag is spent when the picture was
+        // turned (a whole sensor); a region keeps it, so the tag travels with its pixels.
+        let source_metadata = crate::metadata::tiff::read(&bytes)
+            .filter(|found| !found.is_empty())
+            .map(|mut found| {
+                found.orientation_applied = region.is_none();
+                found
+            });
+        Ok::<_, AppError>((developed, summary, reference, source_metadata, applied))
     })
     .await
     {
@@ -721,7 +737,7 @@ async fn open_raw_image_inner(
             return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
         }
     };
-    let (developed, sensor, reference, source_metadata) = developed;
+    let (developed, sensor, reference, source_metadata, applied) = developed;
 
     let rendered = developed.image.to_rgba8();
     let (width, height) = (rendered.width(), rendered.height());
@@ -797,6 +813,7 @@ async fn open_raw_image_inner(
         decoder_version: crate::raw::DECODER_VERSION.to_string(),
         capture: sensor.metadata.clone(),
         view: region,
+        orientation_applied: applied,
     };
     if let Err(error) = source.validate() {
         clear_pending_open(state, request_id);

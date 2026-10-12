@@ -74,6 +74,43 @@ pub struct DevelopedRaw {
     pub source_dimensions: (u32, u32),
 }
 
+impl DevelopedRaw {
+    /// The picture turned upright from an EXIF orientation (2 to 8; anything else, and 1, leaves
+    /// it as it is). `source_dimensions` still names the sensor, as the sensor has it.
+    ///
+    /// The mirrors and the half turn are made in place. The four that exchange the axes build a
+    /// second buffer while the first is read, which is within what developing the picture held
+    /// at its peak (`DEVELOP_BYTES_PER_PHOTOSITE`).
+    pub fn turned_upright(self, orientation: u16) -> Result<Self, RawError> {
+        let orientation = u8::try_from(orientation)
+            .ok()
+            .filter(|value| crate::orientation::is_valid(*value) && *value != 1);
+        let Some(orientation) = orientation else {
+            return Ok(self);
+        };
+        let Self {
+            image,
+            multipliers,
+            color_managed,
+            demosaic,
+            source_dimensions,
+        } = self;
+        let (width, height, pixels) = image.into_parts();
+        let turned = crate::orientation::turn(pixels, orientation, width, height)
+            .map_err(|_| RawError::FileTooLarge)?;
+        let (width, height) = crate::orientation::oriented_size(orientation, width, height);
+        let image = FloatImage::new(width, height, turned)
+            .map_err(|error: ColorPipelineError| RawError::InvalidMetadata(error.to_string()))?;
+        Ok(Self {
+            image,
+            multipliers,
+            color_managed,
+            demosaic,
+            source_dimensions,
+        })
+    }
+}
+
 /// Resolves a white-balance mode into concrete channel multipliers.
 ///
 /// `AsShot` uses the camera's own recorded neutral when the file carries one.
@@ -247,6 +284,20 @@ fn preview_factor(width: u32, height: u32) -> u32 {
         return 1;
     }
     (longest.div_ceil(PREVIEW_MAX_EDGE)).max(1)
+}
+
+/// As `develop_sensor`, with the picture turned upright from the sensor's own orientation tag.
+///
+/// This is how a sensor developed **whole** is shown: a portrait photograph is a portrait. A
+/// region (`develop_region`) and the preview made to choose one (`develop_preview`) are not
+/// turned: their rectangles are in sensor coordinates, so they stay in the sensor's own
+/// orientation and carry the tag with them.
+pub fn develop_sensor_upright(
+    sensor: &dng::SensorImage,
+    parameters: &DevelopmentParameters,
+    scale: RenderScale,
+) -> Result<DevelopedRaw, RawError> {
+    develop_sensor(sensor, parameters, scale)?.turned_upright(sensor.orientation)
 }
 
 /// Runs the whole development graph on an already decoded sensor image.
@@ -630,11 +681,29 @@ pub fn develop_preview(
     Ok(developed)
 }
 
-/// Decodes and develops a RAW buffer in one step.
+/// Decodes and develops a RAW buffer in one step, in the sensor's own orientation.
 pub fn develop_bytes(
     data: &[u8],
     parameters: &DevelopmentParameters,
     scale: RenderScale,
+) -> Result<DevelopedRaw, RawError> {
+    develop_bytes_oriented(data, parameters, scale, false)
+}
+
+/// As `develop_bytes`, turned upright from the file's orientation tag.
+pub fn develop_bytes_upright(
+    data: &[u8],
+    parameters: &DevelopmentParameters,
+    scale: RenderScale,
+) -> Result<DevelopedRaw, RawError> {
+    develop_bytes_oriented(data, parameters, scale, true)
+}
+
+fn develop_bytes_oriented(
+    data: &[u8],
+    parameters: &DevelopmentParameters,
+    scale: RenderScale,
+    upright: bool,
 ) -> Result<DevelopedRaw, RawError> {
     if data.len() as u64 > super::RAW_MAX_FILE_BYTES {
         return Err(RawError::FileTooLarge);
@@ -644,7 +713,11 @@ pub fn develop_bytes(
     if pixels > raw_max_pixels() {
         return Err(RawError::FileTooLarge);
     }
-    develop_sensor(&sensor, parameters, scale)
+    if upright {
+        develop_sensor_upright(&sensor, parameters, scale)
+    } else {
+        develop_sensor(&sensor, parameters, scale)
+    }
 }
 
 #[cfg(test)]

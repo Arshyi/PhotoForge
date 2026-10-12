@@ -32,6 +32,7 @@ mod network_policy;
 /// macro, a workflow, a planner or a batch run edits a document.
 pub mod openexr;
 pub mod operations;
+pub mod orientation;
 pub mod pixel;
 /// Plugins: filters in a WebAssembly sandbox, declarative commands and panels, and the
 /// package format that carries them.

@@ -184,11 +184,7 @@ impl Layout {
     }
 
     fn out_size(&self) -> (u32, u32) {
-        if self.orientation >= 5 {
-            (self.height, self.width)
-        } else {
-            (self.width, self.height)
-        }
+        crate::orientation::oriented_size(self.orientation, self.width, self.height)
     }
 }
 
@@ -510,20 +506,6 @@ fn read_layout<R: Read + Seek>(
         ));
     }
     Ok(layout)
-}
-
-/// Where a pixel of the file goes in the upright picture.
-fn place(orientation: u8, width: u32, height: u32, x: u32, y: u32) -> (u32, u32) {
-    match orientation {
-        2 => (width - 1 - x, y),
-        3 => (width - 1 - x, height - 1 - y),
-        4 => (x, height - 1 - y),
-        5 => (y, x),
-        6 => (height - 1 - y, x),
-        7 => (height - 1 - y, width - 1 - x),
-        8 => (y, width - 1 - x),
-        _ => (x, y),
-    }
 }
 
 fn half_to_f32(bits: u16) -> f32 {
@@ -1064,7 +1046,8 @@ fn write_segment(
         let y = segment.y + row as u32;
         for column in 0..segment.width as usize {
             let x = segment.x + column as u32;
-            let (dx, dy) = place(layout.orientation, layout.width, layout.height, x, y);
+            let (dx, dy) =
+                crate::orientation::place(layout.orientation, layout.width, layout.height, x, y);
             let pixel = dy as usize * out_width as usize + dx as usize;
             let group = layout.group();
             let mut value_of = |channel: usize| -> f32 {

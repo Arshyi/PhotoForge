@@ -246,6 +246,11 @@ export interface RawLayerSource {
    * sensor coordinates, and re-developing it re-develops that rectangle.
    */
   view?: Rect | null;
+  /**
+   * The EXIF orientation (2 to 8) the developed raster was turned by, so developing it again
+   * turns it the same way. Absent when the raster is the sensor's own way up.
+   */
+  orientationApplied?: number;
 }
 
 /** Mirrors `commands::raw::RawDevelopResult`. */

@@ -150,7 +150,7 @@ pub fn run_batch(
                         let bytes = crate::raw::read_source_bytes(&local_path)
                             .map_err(|e| AppError::RawInspection(e.to_string()))?;
                         check_cancel(Some(&cancelled))?;
-                        let developed = crate::raw::develop::develop_bytes(
+                        let developed = crate::raw::develop::develop_bytes_upright(
                             &bytes,
                             &crate::color::DevelopmentParameters::default(),
                             crate::raw::develop::RenderScale::Full,
@@ -158,10 +158,13 @@ pub fn run_batch(
                         .map_err(|e| AppError::RawInspection(e.to_string()))?;
                         // The camera's EXIF, XMP and IPTC from the same bytes, as opening the
                         // file would give them, so the policy applies to a RAW input as it does
-                        // to a JPEG's.
+                        // to a JPEG's. The picture was turned upright, so the tag is spent.
                         let source_metadata = crate::metadata::tiff::read(&bytes)
                             .filter(|found| !found.is_empty())
-                            .map(Arc::new);
+                            .map(|mut found| {
+                                found.orientation_applied = true;
+                                Arc::new(found)
+                            });
                         (developed.image.into(), path.clone(), source_metadata)
                     } else {
                         let loaded = load_image(path)?;
@@ -719,6 +722,43 @@ mod tests {
             assert_eq!(summary.has_location, place, "{policy:?}");
             assert_eq!(summary.has_identifiers, serial, "{policy:?}");
         }
+    }
+
+    #[test]
+    fn a_batch_dng_is_turned_upright_and_its_orientation_is_spent() {
+        use crate::metadata::{exif, scan, MetadataPolicy};
+
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("in");
+        let output = root.path().join("out");
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&output).unwrap();
+        // 8 wide and 4 tall on the sensor; orientation 6 makes it 4 wide and 8 tall.
+        let builder = crate::raw::dng::fixtures::DngBuilder::new(8, 4, vec![1001; 32])
+            .levels(vec![0], (1, 1), 4095)
+            .orientation(6);
+        fs::write(input.join("a.dng"), builder.build()).unwrap();
+
+        let mut options = options(&input, &output);
+        options.metadata_policy = MetadataPolicy::KeepAll;
+        let result = run_batch(
+            993,
+            options,
+            workflow(),
+            Arc::new(Mutex::new(BatchStatus::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!((result.completed, result.failed), (1, 0), "{result:?}");
+        let written = output.join("a-0001.png");
+        let image = image::open(&written).unwrap();
+        assert_eq!(image::GenericImageView::dimensions(&image), (4, 8));
+        let found = scan::read(&written).unwrap();
+        let summary = exif::summarize(found.exif.as_deref().expect("EXIF is written")).unwrap();
+        assert_eq!(
+            summary.orientation, 1,
+            "upright pixels, and the tag says so"
+        );
     }
 
     #[test]

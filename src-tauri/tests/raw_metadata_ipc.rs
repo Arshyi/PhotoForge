@@ -152,9 +152,9 @@ fn opening_a_dng_reads_what_the_camera_wrote() {
     assert_eq!(summary["hasMakerNote"], true);
     assert_eq!(summary["hasIdentifiers"], true);
     assert_eq!(summary["hasThumbnail"], false);
-    // Development leaves the sensor's own way up, so the tag is not spent.
+    // The sensor was turned upright when it was developed, so the tag is spent.
     assert_eq!(summary["orientation"], 6);
-    assert_eq!(summary["orientationApplied"], false);
+    assert_eq!(summary["orientationApplied"], true);
 
     // The session holds it, so the exports below can use it.
     let state = harness.app.state::<AppState>();
@@ -192,8 +192,8 @@ fn the_default_export_removes_the_place_the_serial_numbers_and_an_xmp_that_names
     assert_eq!(summary.lens.as_deref(), Some("Lens 35mm f/2"));
     assert!(!summary.has_location);
     assert!(!summary.has_identifiers);
-    // The pixels were not turned, so the tag goes with them.
-    assert_eq!(summary.orientation, 6);
+    // The pixels were turned upright, so the tag says upright.
+    assert_eq!(summary.orientation, 1);
     assert!(found.xmp.is_none(), "the packet names a serial number");
     assert!(iptc::is_readable(found.iptc.as_deref().unwrap()));
     let bytes = std::fs::read(&out).unwrap();
@@ -243,7 +243,7 @@ fn keeping_everything_keeps_what_can_be_moved_and_says_what_cannot() {
 }
 
 #[test]
-fn removing_everything_still_writes_the_orientation_the_pixels_did_not_spend() {
+fn removing_everything_writes_no_orientation_because_the_picture_is_upright() {
     let harness = Harness::new();
     let directory = tempfile::tempdir().unwrap();
     let (_, opened) = open(&harness, directory.path(), &dng_with_metadata());
@@ -251,13 +251,12 @@ fn removing_everything_still_writes_the_orientation_the_pixels_did_not_spend() {
     let out = directory.path().join("bare.jpg");
     export(&harness, &out, "remove_all");
     let found = scan::read(&out).unwrap();
-    assert!(found.xmp.is_none() && found.iptc.is_none());
-    let summary = exif::summarize(found.exif.as_deref().unwrap()).unwrap();
-    assert_eq!(summary.orientation, 6);
-    assert_eq!(summary.make, None);
-    assert!(!summary.has_location);
-    // The picture is the developed sensor, at its own size.
+    // Nothing at all: the turn was spent on the pixels, so there is no orientation left to say
+    // (a region, whose turn is not spent, still writes it: see `raw_upright.rs`).
+    assert!(found.is_empty());
+    // The picture is the developed sensor turned upright: 24 by 16 on the sensor, 16 by 24 here.
     let (width, height) = image::open(&out).unwrap().dimensions();
+    assert_eq!((width, height), (16, 24));
     assert_eq!(
         (width, height),
         (
@@ -282,10 +281,15 @@ fn a_region_opened_on_its_own_carries_the_same_metadata() {
         }),
     );
     assert_eq!(region["metadata"]["width"], 12);
-    assert_eq!(
-        region["metadata"]["sourceMetadata"],
-        whole["metadata"]["sourceMetadata"]
-    );
+    // The same camera, lens, place and packet; the one difference is the turn: a whole sensor is
+    // turned and the tag spent, a region is not and keeps it.
+    let mut whole_summary = whole["metadata"]["sourceMetadata"].clone();
+    let mut region_summary = region["metadata"]["sourceMetadata"].clone();
+    assert_eq!(whole_summary["orientationApplied"], true);
+    assert_eq!(region_summary["orientationApplied"], false);
+    whole_summary["orientationApplied"] = json!(null);
+    region_summary["orientationApplied"] = json!(null);
+    assert_eq!(region_summary, whole_summary);
 }
 
 #[test]
@@ -431,5 +435,5 @@ fn the_layered_export_of_a_raw_document_carries_the_metadata_too() {
     let summary = exif::summarize(found.exif.as_deref().unwrap()).unwrap();
     assert_eq!(summary.make.as_deref(), Some("Acme"));
     assert!(!summary.has_location && !summary.has_identifiers);
-    assert_eq!(summary.orientation, 6);
+    assert_eq!(summary.orientation, 1);
 }

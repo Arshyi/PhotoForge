@@ -97,7 +97,7 @@ Read from the file, never assumed:
 - White level
 - Bit depth (8, 10, 12, 14, 16)
 - Active area and the camera's default crop
-- Orientation
+- Orientation (applied to a whole development; see "Orientation" below)
 - As-shot neutral, and the colour matrix
 - Camera make and model, lens, ISO, shutter, aperture, focal length, capture time
 
@@ -132,6 +132,30 @@ render use every photosite and the better algorithm.
 The preview is the same picture, not merely a smaller one: white balance,
 colour matrix, and tone are identical, and a test asserts the mean of the
 preview matches the full render on a real photograph.
+
+## Orientation
+
+A camera stores the sensor as it saw the scene and says in a tag (EXIF orientation, 1 to 8) how to
+turn the picture upright. A DNG **developed whole** is turned by that tag as the last step of
+development, so a portrait photograph opens as a portrait, in the editor and in every export. The
+rule is the one that is shared with TIFF (`orientation.rs`) and was checked against Pillow's
+transposes: the seven turned developments of the real Canon sample are bit-identical to Pillow's
+transposes of the unturned one.
+
+* **The layer records the turn** (`orientationApplied` in its source, 2 to 8; absent for 1), and
+  developing it again, with new parameters or at preview scale, turns it the same way, so its
+  size, its masks and its transform keep meaning what they meant. The sensor's own size stays in
+  `reference` as the sensor has it.
+* **A project saved before this has no record** and is developed as it always was, in the
+  sensor's orientation: the raster it stored has that shape. A project that records a turn is
+  format version 3 (an earlier build refuses it by name).
+* **A region of a sensor is not turned.** Its rectangle is in the sensor's own coordinates, as
+  is the preview that exists to choose it, so a region stays in the file's orientation and the
+  tag travels with its pixels (the export says so). A portrait region is therefore opened
+  sideways; this is the one case left.
+* **Memory**: the mirrors and the half turn are made in place; the four that exchange the axes
+  build a second buffer while the first is read (16 bytes a pixel more, within the 34 bytes a
+  photosite that development already counts at its peak).
 
 ## Source-backed projects
 

@@ -344,6 +344,11 @@ impl FloatImage {
         &mut self.pixels
     }
 
+    /// The picture taken apart, so its buffer can be reused without a copy.
+    pub fn into_parts(self) -> (u32, u32, Vec<FloatRgba>) {
+        (self.width, self.height, self.pixels)
+    }
+
     pub fn get(&self, x: u32, y: u32) -> Option<FloatRgba> {
         if x >= self.width || y >= self.height {
             return None;
