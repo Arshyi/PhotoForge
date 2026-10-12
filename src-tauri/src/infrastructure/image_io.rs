@@ -427,13 +427,29 @@ pub(super) fn validate_output_path(
         return Err(AppError::InvalidOutputPath);
     }
 
-    let original = fs::canonicalize(original_path).map_err(map_io_error)?;
+    // A document that was not read from a file (a clipboard picture, a new blank document) has
+    // no source to protect; resolving its empty path would fail as if the source could not be
+    // read. Everything about the destination is still checked.
+    let original = if has_no_source_file(original_path) {
+        None
+    } else {
+        Some(fs::canonicalize(original_path).map_err(map_io_error)?)
+    };
     let output = resolve_output_path(output_path)?;
 
-    if paths_equal(&original, &output) {
+    if original
+        .as_deref()
+        .is_some_and(|original| paths_equal(original, &output))
+    {
         return Err(AppError::InvalidOutputPath);
     }
     Ok(output)
+}
+
+/// Whether `source` says that the document has no file of its own: an empty path, which is how a
+/// picture pasted from the clipboard and a new blank document are staged.
+fn has_no_source_file(source: &Path) -> bool {
+    source.as_os_str().is_empty()
 }
 
 /// Where a write to `output_path` would land, with symbolic links, `..` segments and short names
@@ -470,7 +486,7 @@ fn resolve_output_path(output_path: &Path) -> Result<PathBuf, AppError> {
 /// can no longer be reached (an unplugged drive): the export then replaces nothing the document
 /// came from.
 pub(crate) fn refuse_to_replace_source(source: &Path, destination: &Path) -> Result<(), AppError> {
-    if source.as_os_str().is_empty() {
+    if has_no_source_file(source) {
         return Ok(());
     }
     let Ok(source) = fs::canonicalize(source) else {
@@ -607,6 +623,116 @@ mod tests {
             validate_output_path(&original, &original),
             Err(AppError::InvalidOutputPath)
         ));
+    }
+
+    /// What the destination checks say about `output` for a document read from `real_source`, and
+    /// for one with no source file (an empty path): they must say the same, whatever it is.
+    fn verdicts(real_source: &Path, output: &Path) -> (String, String) {
+        (
+            format!("{:?}", validate_output_path(real_source, output)),
+            format!("{:?}", validate_output_path(Path::new(""), output)),
+        )
+    }
+
+    #[test]
+    fn a_document_with_no_source_file_exports_to_a_valid_new_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(3, 2, Rgba([9, 80, 200, 255])));
+        for name in ["new.png", "new.jpg", "new.jpeg", "new.webp", "SHOUT.PNG"] {
+            let output = directory.path().join(name);
+            let resolved = validate_output_path(Path::new(""), &output).unwrap();
+            assert_eq!(resolved.file_name(), output.file_name());
+            let written = save_image(&image, Path::new(""), &output).unwrap();
+            assert_eq!(written, resolved);
+            let decoded = image::open(&written).unwrap_or_else(|_| panic!("{name} decodes"));
+            assert_eq!(decoded.dimensions(), (3, 2), "{name}");
+        }
+        // Replacing a file that is not the source is as allowed as it is with a source.
+        let existing = directory.path().join("existing.png");
+        fs::write(&existing, b"old").unwrap();
+        save_image(&image, Path::new(""), &existing).unwrap();
+        assert_eq!(image::open(&existing).unwrap().dimensions(), (3, 2));
+    }
+
+    #[test]
+    fn every_raster_saver_accepts_a_document_with_no_source_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("float.png");
+        let float =
+            crate::color::FloatImage::blank(4, 3, crate::color::FloatRgba::TRANSPARENT).unwrap();
+        save_float_png16(&float, Path::new(""), &output).unwrap();
+        assert_eq!(image::open(&output).unwrap().dimensions(), (4, 3));
+    }
+
+    #[test]
+    fn a_document_with_no_source_file_still_has_its_destination_checked() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("original.png");
+        RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255]))
+            .save(&real)
+            .unwrap();
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])));
+        let folder = directory.path().join("a folder.png");
+        fs::create_dir(&folder).unwrap();
+
+        // An extension nothing is written in, a folder that is not there, a folder where a file
+        // should be, and a destination that is not a full path.
+        let bad_extension = directory.path().join("notes.txt");
+        let no_extension = directory.path().join("picture");
+        for output in [&bad_extension, &no_extension] {
+            assert!(matches!(
+                save_image(&image, Path::new(""), output),
+                Err(AppError::InvalidOutputPath)
+            ));
+            assert!(!output.exists());
+        }
+        let missing_parent = directory.path().join("no/such/folder/new.png");
+        assert!(save_image(&image, Path::new(""), &missing_parent).is_err());
+        assert!(!directory.path().join("no").exists());
+        assert!(matches!(
+            save_image(&image, Path::new(""), &folder),
+            Err(AppError::InvalidOutputPath)
+        ));
+        for relative in ["new.png", "./new.png", ""] {
+            assert!(matches!(
+                validate_output_path(Path::new(""), Path::new(relative)),
+                Err(AppError::InvalidOutputPath)
+            ));
+        }
+        // A file where the parent folder should be is no folder either.
+        let under_a_file = real.join("new.png");
+        assert!(save_image(&image, Path::new(""), &under_a_file).is_err());
+
+        // Each of them is refused in the very words a document with a source gets.
+        for output in [&missing_parent, &folder, &under_a_file] {
+            let (with_source, without) = verdicts(&real, output);
+            assert!(with_source.starts_with("Err("), "{output:?}: {with_source}");
+            assert_eq!(with_source, without, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_file_is_still_protected_when_the_document_has_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("original.png");
+        RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255]))
+            .save(&real)
+            .unwrap();
+        let before = fs::read(&real).unwrap();
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([9, 9, 9, 255])));
+        // The file itself, and the same file under another spelling.
+        let respelled = directory.path().join(".").join("original.png");
+        for output in [&real, &respelled] {
+            assert!(matches!(
+                save_image(&image, &real, output),
+                Err(AppError::InvalidOutputPath)
+            ));
+        }
+        assert_eq!(fs::read(&real).unwrap(), before);
+        // Another file is another matter.
+        let other = directory.path().join("other.png");
+        save_image(&image, &real, &other).unwrap();
+        assert_eq!(fs::read(&real).unwrap(), before);
     }
 
     /// A folder holding `scene.exr` (any bytes will do: the guard compares files, not contents).

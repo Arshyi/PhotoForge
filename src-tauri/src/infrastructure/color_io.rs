@@ -368,6 +368,65 @@ mod tests {
     use crate::color::{srgb_decode, FloatRgba};
     use crate::color_management::RgbColorSpace;
     use image::ImageDecoder;
+
+    fn size_of(path: &Path) -> (u32, u32) {
+        let decoded = image::open(path).expect("the exported file decodes");
+        (decoded.width(), decoded.height())
+    }
+
+    /// A document that was never read from a file (a clipboard picture, a new blank document) has
+    /// an empty source path. Its exports must not mistake that for an unreadable source.
+    #[test]
+    fn a_document_with_no_source_file_exports_in_every_format_and_by_both_paths() {
+        let folder = tempfile::tempdir().unwrap();
+        let image = FloatImage::blank(5, 4, FloatRgba::new(0.2, 0.4, 0.6, 1.0)).unwrap();
+        let eight_bit = ColorExportOptions {
+            bit_depth: 8,
+            ..Default::default()
+        };
+        for name in ["whole.png", "whole.jpg", "whole.webp"] {
+            let output = folder.path().join(name);
+            let written = save_color_image(
+                &image,
+                Path::new(""),
+                &output,
+                ExportProfile::Lossless,
+                eight_bit,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert_eq!(size_of(&written), (5, 4), "{name}");
+        }
+        let streamed = folder.path().join("streamed.png");
+        save_color_image_streaming(
+            5,
+            4,
+            Path::new(""),
+            &streamed,
+            ExportProfile::Lossless,
+            ColorExportOptions::default(),
+            None,
+            |emit| emit(0, &image),
+        )
+        .unwrap();
+        assert_eq!(size_of(&streamed), (5, 4));
+
+        // The destination is still held to its rules, and nothing is left behind.
+        let refused = folder.path().join("notes.txt");
+        assert!(matches!(
+            save_color_image(
+                &image,
+                Path::new(""),
+                &refused,
+                ExportProfile::Lossless,
+                eight_bit,
+                None,
+            ),
+            Err(AppError::InvalidOutputPath)
+        ));
+        assert!(!refused.exists());
+    }
+
     #[test]
     fn png16_retains_precision_and_embeds_the_transformed_space() {
         let directory = tempfile::tempdir().unwrap();

@@ -1565,6 +1565,210 @@ fn exporting_refuses_to_overwrite_the_source_image() {
     assert!(!error.is_empty());
 }
 
+/// Installs the open document the way `open_clipboard_image` leaves it: an 8-bit picture with no
+/// file behind it, so an empty source path and nothing carried over from a source. (The real
+/// command reads the Windows clipboard, which no other platform and no unattended run has.)
+fn open_session_like_a_pasted_picture(harness: &Harness, picture: &std::path::Path, id: u64) {
+    let mut loaded = load_image(picture).expect("test image loads");
+    loaded.path = std::path::PathBuf::new();
+    loaded.source_metadata = None;
+    loaded.metadata.filename = "Pasted image".into();
+    loaded.metadata.format = "Clipboard".into();
+    let state = harness.app.state::<AppState>();
+    *state.session.lock().unwrap() = Some(EditorSession {
+        source: loaded,
+        document_id: id,
+        analysis: None,
+    });
+}
+
+/// Checks an export result against the written file, which must decode with the document's size.
+fn assert_exported(result: &Value, size: (u32, u32)) -> RgbaImage {
+    assert_eq!(
+        (result["width"].as_u64(), result["height"].as_u64()),
+        (Some(size.0.into()), Some(size.1.into()))
+    );
+    let written = std::path::PathBuf::from(result["outputPath"].as_str().unwrap());
+    let decoded = image::open(&written)
+        .unwrap_or_else(|error| panic!("{} does not decode: {error}", written.display()))
+        .to_rgba8();
+    assert_eq!(decoded.dimensions(), size, "{}", written.display());
+    decoded
+}
+
+#[test]
+fn a_new_blank_document_exports_to_every_raster_format() {
+    // A new document has no source file: its source path is empty. The raster exports used to
+    // read that as a source that could not be decoded.
+    let directory = temp_dir();
+    let harness = Harness::new();
+    let blank = harness.ok(
+        "create_blank_layer_document",
+        json!({ "width": 9, "height": 5, "requestId": 1 }),
+    );
+    // Every metadata choice, since there is no source whose metadata they could carry.
+    for (name, profile, policy) in [
+        ("blank.png", "lossless", "remove_private"),
+        ("blank.jpg", "high_jpeg", "keep_all"),
+        ("blank.webp", "archive", "remove_all"),
+    ] {
+        let output = directory.path().join(name);
+        let result = harness.ok(
+            "export_layer_composite",
+            json!({
+                "outputPath": output.to_string_lossy(),
+                "document": blank["document"],
+                "operations": [],
+                "profile": profile,
+                "metadataPolicy": policy
+            }),
+        );
+        let decoded = assert_exported(&result, (9, 5));
+        assert_eq!(result["metadata"]["policy"], policy);
+        assert_eq!(result["metadata"]["notes"], json!([]), "{name}");
+        // The document is empty: clear where the format has transparency, white where it has
+        // none.
+        if name.ends_with("jpg") {
+            assert!(
+                decoded.pixels().all(|p| p.0[..3].iter().all(|c| *c >= 250)),
+                "{name} is not white"
+            );
+        } else {
+            assert!(decoded.pixels().all(|p| p[3] == 0), "{name} is not clear");
+        }
+    }
+    // Another colour space and bit depth take the other save path.
+    let wide = directory.path().join("wide.png");
+    let result = harness.ok(
+        "export_layer_composite",
+        json!({
+            "outputPath": wide.to_string_lossy(),
+            "document": blank["document"],
+            "operations": [],
+            "profile": "lossless",
+            "color": { "colorSpace": "display_p3", "bitDepth": 16 }
+        }),
+    );
+    assert_exported(&result, (9, 5));
+    // The destination is still held to its rules.
+    for bad in ["notes.txt", "no/such/folder/new.png"] {
+        let output = directory.path().join(bad);
+        harness.err(
+            "export_layer_composite",
+            json!({
+                "outputPath": output.to_string_lossy(),
+                "document": blank["document"],
+                "operations": [],
+                "profile": "lossless"
+            }),
+        );
+        assert!(!output.exists());
+    }
+    let relative = harness.err(
+        "export_layer_composite",
+        json!({
+            "outputPath": "relative-export.png",
+            "document": blank["document"], "operations": [], "profile": "lossless"
+        }),
+    );
+    assert!(relative.contains("valid output path"), "{relative}");
+    assert!(!std::path::Path::new("relative-export.png").exists());
+}
+
+#[test]
+fn a_pasted_picture_exports_to_every_raster_format() {
+    let directory = temp_dir();
+    let harness = Harness::new();
+    let picture = write_png(directory.path(), "picture.png", &quadrants(24, 16));
+    let picture_before = std::fs::read(&picture).unwrap();
+    open_session_like_a_pasted_picture(&harness, &picture, 21);
+    let pixel_id = harness.import(&picture)["pixelId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let doc = document((24, 16), vec![pixel_layer("pasted", &pixel_id, 24, 16)]);
+    let before = harness.composite(&doc, 21, 1);
+
+    // Plain 8-bit saving, and the colour-managed save that is chosen with a colour option.
+    let managed = || Some(json!({ "colorSpace": "srgb", "bitDepth": 8 }));
+    for (name, profile, color) in [
+        ("pasted.png", "lossless", None),
+        ("pasted.jpg", "high_jpeg", None),
+        ("pasted.webp", "archive", None),
+        ("managed.png", "lossless", managed()),
+        ("managed.jpg", "web", managed()),
+        ("managed.webp", "archive", managed()),
+    ] {
+        let output = directory.path().join(name);
+        let mut body = json!({
+            "outputPath": output.to_string_lossy(),
+            "document": doc,
+            "operations": [],
+            "profile": profile
+        });
+        if let Some(color) = color {
+            body["color"] = color;
+        }
+        let decoded = assert_exported(&harness.ok("export_layer_composite", body), (24, 16));
+        if !name.ends_with("jpg") {
+            assert!(max_channel_difference(&before, &decoded) <= 1, "{name}");
+        }
+    }
+    // A file that is not the picture's own is replaced like any other, and the picture is not.
+    let again = directory.path().join("pasted.png");
+    harness.ok(
+        "export_layer_composite",
+        json!({
+            "outputPath": again.to_string_lossy(),
+            "document": doc, "operations": [], "profile": "lossless"
+        }),
+    );
+    assert_eq!(std::fs::read(&picture).unwrap(), picture_before);
+    assert_eq!(harness.composite(&doc, 21, 2).as_raw(), before.as_raw());
+}
+
+#[test]
+fn a_real_source_is_still_refused_whichever_way_the_raster_export_is_saved() {
+    let directory = temp_dir();
+    let harness = Harness::new();
+    let source = write_png(directory.path(), "source.png", &quadrants(16, 16));
+    let before = std::fs::read(&source).unwrap();
+    harness.open_session(&source, 22);
+    let pixel_id = harness.blank_pixels(16, 16);
+    let doc = document((16, 16), vec![pixel_layer("a", &pixel_id, 16, 16)]);
+    let respelled = directory.path().join(".").join("source.png");
+    for output in [&source, &respelled] {
+        for color in [None, Some(json!({ "colorSpace": "srgb", "bitDepth": 8 }))] {
+            let mut body = json!({
+                "outputPath": output.to_string_lossy(),
+                "document": doc,
+                "operations": [],
+                "profile": "lossless"
+            });
+            if let Some(color) = color {
+                body["color"] = color;
+            }
+            // Refused for being the source, not for any other reason.
+            let error = harness.err("export_layer_composite", body);
+            assert!(
+                error.contains("different from the original image"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), before);
+        }
+    }
+    // Another file in the same folder is written as ever.
+    let elsewhere = directory.path().join("elsewhere.png");
+    harness.ok(
+        "export_layer_composite",
+        json!({
+            "outputPath": elsewhere.to_string_lossy(),
+            "document": doc, "operations": [], "profile": "lossless"
+        }),
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+}
+
 #[test]
 fn exporting_without_an_open_image_is_refused() {
     let directory = temp_dir();
