@@ -67,8 +67,8 @@ pub use professional::{
 };
 pub use raw::register_raw_commands;
 pub use raw::{
-    develop_raw_layer, export_raw_layer_png16, inspect_raw, open_raw_layer, relink_raw_source,
-    verify_raw_source, RawDevelopResult, RawInspectionResult,
+    develop_raw_layer, export_raw_layer_png16, inspect_raw, open_raw_layer, raw_region_on_picture,
+    relink_raw_source, verify_raw_source, RawDevelopResult, RawInspectionResult,
 };
 pub use render::{
     clear_render_cache, default_render_cache_budget, get_render_backend_mode, render_diagnostics,

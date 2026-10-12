@@ -252,7 +252,7 @@ fn removing_everything_writes_no_orientation_because_the_picture_is_upright() {
     export(&harness, &out, "remove_all");
     let found = scan::read(&out).unwrap();
     // Nothing at all: the turn was spent on the pixels, so there is no orientation left to say
-    // (a region, whose turn is not spent, still writes it: see `raw_upright.rs`).
+    // (a region is turned too, so it is the same: see `raw_upright.rs`).
     assert!(found.is_empty());
     // The picture is the developed sensor turned upright: 24 by 16 on the sensor, 16 by 24 here.
     let (width, height) = image::open(&out).unwrap().dimensions();
@@ -281,14 +281,11 @@ fn a_region_opened_on_its_own_carries_the_same_metadata() {
         }),
     );
     assert_eq!(region["metadata"]["width"], 12);
-    // The same camera, lens, place and packet; the one difference is the turn: a whole sensor is
-    // turned and the tag spent, a region is not and keeps it.
-    let mut whole_summary = whole["metadata"]["sourceMetadata"].clone();
-    let mut region_summary = region["metadata"]["sourceMetadata"].clone();
+    // The same camera, lens, place and packet, and the same turn: a region is chosen on the
+    // upright picture, so the tag is spent for it as it is for the whole.
+    let whole_summary = whole["metadata"]["sourceMetadata"].clone();
+    let region_summary = region["metadata"]["sourceMetadata"].clone();
     assert_eq!(whole_summary["orientationApplied"], true);
-    assert_eq!(region_summary["orientationApplied"], false);
-    whole_summary["orientationApplied"] = json!(null);
-    region_summary["orientationApplied"] = json!(null);
     assert_eq!(region_summary, whole_summary);
 }
 

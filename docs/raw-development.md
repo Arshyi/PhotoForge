@@ -157,8 +157,10 @@ area is used.
   described below, in the sensor's coordinates.
 * **A project saved before this has no record** and is the whole sensor as it always was. A
   project that records a cut is format version 3 (an earlier build refuses it by name).
-* **A region is not cut.** Its rectangle and the preview made to choose it are in the sensor's
-  own coordinates, border included, so a rectangle drawn at the edge of the sensor is that edge.
+* **A region is chosen on the picture** (see "Choosing a region" below): its rectangle is the
+  picture's own, it is mapped back to the photosites it covers, and the layer records those
+  photosites as its `view`. It is the cut already, so it has no `crop` of its own. A region saved
+  before this was drawn on the whole sensor, border included, and is developed as it was.
 
 ## Orientation
 
@@ -176,13 +178,40 @@ transposes of the unturned one.
 * **A project saved before this has no record** and is developed as it always was, in the
   sensor's orientation: the raster it stored has that shape. A project that records a turn is
   format version 3 (an earlier build refuses it by name).
-* **A region of a sensor is not turned.** Its rectangle is in the sensor's own coordinates, as
-  is the preview that exists to choose it, so a region stays in the file's orientation and the
-  tag travels with its pixels (the export says so). A portrait region is therefore opened
-  sideways; this is the one case left.
+* **A region is turned with the picture it was chosen on.** Its rectangle is the upright
+  picture's; it is mapped back to the sensor, developed as those photosites alone, and turned by
+  the same rule, so it is that window of the upright picture, bit for bit (asserted for all eight
+  values, and on the real Canon sample). The layer records the turn as a whole sensor does, so
+  the tag is spent for it too. A region saved before this records no turn and is developed as it
+  was, in the sensor's orientation.
 * **Memory**: the mirrors and the half turn are made in place; the four that exchange the axes
   build a second buffer while the first is read (16 bytes a pixel more, within the 34 bytes a
   photosite that development already counts at its peak).
+
+## Choosing a region
+
+A sensor too large to develop whole is opened as a region, chosen on a preview of the picture.
+What a person sees and chooses on is the **picture** (cut to what the camera declares, turned
+upright), the same image a whole open gives, so a portrait is a portrait and the masked border is
+not there to be drawn on.
+
+* **The probe reports the picture's size** (`width` and `height` of `probe_image_source`), and
+  the planner still prices the **sensor**: opening whole develops every photosite, and a region's
+  window is cut from the sensor, so nothing about admission gets cheaper by being described as
+  the picture.
+* **The preview is cut and turned** after it is built (it is decimated whole-sensor first, then
+  cut in proportion, then turned), so the rectangle drawn on it, scaled by the picture's size,
+  is a rectangle of the picture.
+* **The rectangle is mapped back** by `PictureGeometry::to_sensor` (header only, no sample
+  decoded): the picture's offset on the sensor plus the inverse of the turn (`orientation::unplace`).
+  It is exhaustively tested against `orientation::place` for all eight values, and is the
+  rectangle of exactly the photosites that turn into the chosen one.
+* **Change Source Region** goes the other way: a layer records its region in sensor coordinates,
+  and `raw_region_on_picture` says where that is on the picture, or that it is not on it (a
+  region saved before this may have taken in the border), in which case the chooser starts from
+  its own default.
+* **Admission** is as before: the rectangle must lie on the picture, and it is held to the same
+  planner limit as any region.
 
 ## Source-backed projects
 

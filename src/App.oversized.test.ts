@@ -51,6 +51,9 @@ function rawSource(rect: { x: number; y: number; width: number; height: number }
   };
 }
 
+/** Where the picture of the mocked sensor starts on it: a region is recorded in sensor coordinates. */
+const SENSOR_OFFSET = { x: 100, y: 50 };
+
 const calls = (command: string) => vi.mocked(invoke).mock.calls.filter(([name]) => name === command);
 const argsFor = (command: string) => calls(command).at(-1)?.[1] as Record<string, unknown>;
 
@@ -94,6 +97,12 @@ beforeEach(() => {
         return originState;
       case 'verify_raw_source':
         return { status: originState, expectedSha256: 'b'.repeat(64) };
+      case 'raw_region_on_picture': {
+        // The layer records photosites of the sensor; the chooser works on the picture, which
+        // here starts (100, 50) into the sensor.
+        const view = args.view as { x: number; y: number; width: number; height: number };
+        return { ...view, x: view.x - SENSOR_OFFSET.x, y: view.y - SENSOR_OFFSET.y };
+      }
       case 'open_image':
         return opened(smallMetadata, 'pxsmall');
       case 'open_image_selection': {
@@ -130,7 +139,10 @@ beforeEach(() => {
         const height = rect ? rect.height : 9_000;
         return {
           ...opened({ ...smallMetadata, filename: 'sensor.dng', format: 'DNG', width, height }, 'pxraw'),
-          source: rawSource(rect), multipliers: [2, 1, 1.5], colorManaged: true, cfaPattern: 'RGGB', whiteLevel: 4095
+          source: rawSource(
+            rect ? { ...rect, x: rect.x + SENSOR_OFFSET.x, y: rect.y + SENSOR_OFFSET.y } : null
+          ),
+          multipliers: [2, 1, 1.5], colorManaged: true, cfaPattern: 'RGGB', whiteLevel: 4095
         };
       }
       case 'save_layer_project':
@@ -345,9 +357,14 @@ describe('opening an image too large to open whole', { timeout: 30_000 }, () => 
       await waitFor(() => expect(calls('save_layer_project')).toHaveLength(1));
       const document = argsFor('save_layer_project').document as LayerDocument;
       const chosen = request.region as { x: number; y: number; width: number; height: number };
-      // The project records which part of which sensor this is, and the layer is
+      // The project records which part of which sensor this is (the photosites: the rectangle
+      // chosen on the picture, put back where the picture lies on the sensor), and the layer is
       // named for what it is.
-      expect(document.layers[0].raw?.view).toEqual(chosen);
+      expect(document.layers[0].raw?.view).toEqual({
+        ...chosen,
+        x: chosen.x + SENSOR_OFFSET.x,
+        y: chosen.y + SENSOR_OFFSET.y
+      });
       expect(document.layers[0].raw?.reference.width).toBe(12_000);
       expect(document.layers[0].name).toBe('RAW region');
       expect(document.canvasWidth).toBe(chosen.width);
@@ -458,6 +475,9 @@ describe('opening an image too large to open whole', { timeout: 30_000 }, () => 
       await fireEvent.click(await screen.findByRole('button', { name: /Change Source Region/ }));
       await waitFor(() => expect(screen.getByTestId('change-note')).toBeTruthy());
       expect(argsFor('verify_raw_source')).toMatchObject({ path: SENSOR });
+      // The layer's rectangle is in sensor coordinates; the chooser is started from where it is
+      // on the picture, which the backend says.
+      expect(argsFor('raw_region_on_picture')).toMatchObject({ path: SENSOR });
       await waitFor(() => expect(screen.getByAltText(/Reduced preview/)).toBeTruthy());
       await fireEvent.click(screen.getByRole('button', { name: 'Open region' }));
       await waitFor(() => expect(calls('open_raw_image')).toHaveLength(2));

@@ -164,8 +164,10 @@ existed. The layer records **which file, which part**:
 * the view is either `region` (a pixel-exact rectangle, unscaled) or `reduced` (the whole
   source, resampled, with the resulting size) — a reduced copy **says it has less
   resolution than the file**;
-* a camera RAW region keeps its RAW source and view, so developing it again develops the
-  same region.
+* a camera RAW region keeps its RAW source and view (the photosites, in sensor coordinates)
+  and the turn it was given, so developing it again develops the same region, the same way up.
+  It is chosen on the picture the camera declares, turned upright, and the dialog is told that
+  picture's size (see [raw-development.md](raw-development.md), "Choosing a region").
 
 The pixels themselves are saved in the project like any other layer's. The origin is
 **provenance, not a dependency**: a project whose source is missing opens and edits exactly

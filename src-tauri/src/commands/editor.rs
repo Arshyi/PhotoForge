@@ -680,9 +680,11 @@ async fn open_raw_image_inner(
         let defaults = crate::color::DevelopmentParameters::default();
         // A sensor developed whole is cut to the picture the camera says it holds (the default
         // crop inside its active area) and turned upright from its orientation tag, and the layer
-        // records both, so developing it again does the same. A region is in the sensor's
-        // coordinates: it is neither cut nor turned, and carries the tag with its pixels.
-        let (developed, summary, applied, crop) = match region {
+        // records both, so developing it again does the same. A region is chosen on that picture:
+        // its rectangle is the picture's, so it is mapped back to the photosites it is, developed
+        // as those alone, and turned the way a whole open is. The layer records the photosites
+        // (sensor coordinates) and the turn, which is what keeps it re-developable.
+        let (developed, summary, applied, crop, view) = match region {
             None => {
                 let sensor =
                     crate::raw::dng::decode(&bytes).map_err(crate::source::dng::map_raw)?;
@@ -696,13 +698,28 @@ async fn open_raw_image_inner(
                     .ok()
                     .filter(|value| crate::orientation::is_valid(*value))
                     .unwrap_or(1);
-                (developed, sensor.summary(), applied, sensor.picture_rect())
+                (
+                    developed,
+                    sensor.summary(),
+                    applied,
+                    sensor.picture_rect(),
+                    None,
+                )
             }
-            Some(rect) => {
+            Some(chosen) => {
+                let geometry = crate::raw::dng::inspect_geometry(&bytes)
+                    .map_err(crate::source::dng::map_raw)?;
+                let rect = geometry.to_sensor(&chosen).ok_or_else(|| {
+                    AppError::InvalidOperation("the region lies outside the picture".into())
+                })?;
                 let (developed, summary) =
                     crate::raw::develop::develop_region_described(&bytes, rect, &defaults)
                         .map_err(crate::source::dng::map_raw)?;
-                (developed, summary, 1, None)
+                let applied = geometry.orientation;
+                let developed = developed
+                    .turned_upright(u16::from(applied))
+                    .map_err(crate::source::dng::map_raw)?;
+                (developed, summary, applied, None, Some(rect))
             }
         };
         // The identity recorded is that of the bytes just decoded, not of whatever
@@ -716,12 +733,12 @@ async fn open_raw_image_inner(
         )
         .map_err(crate::source::dng::map_raw)?;
         // The camera's own EXIF, XMP and IPTC, from the same bytes. The file is a TIFF, so the
-        // block is built from its directories. The orientation tag is spent when the picture was
-        // turned (a whole sensor); a region keeps it, so the tag travels with its pixels.
+        // block is built from its directories. The orientation tag is spent: the picture was
+        // turned, whole or as a region, so exports say upright.
         let source_metadata = crate::metadata::tiff::read(&bytes)
             .filter(|found| !found.is_empty())
             .map(|mut found| {
-                found.orientation_applied = region.is_none();
+                found.orientation_applied = true;
                 found
             });
         Ok::<_, AppError>((
@@ -731,6 +748,7 @@ async fn open_raw_image_inner(
             source_metadata,
             applied,
             crop,
+            view,
         ))
     })
     .await
@@ -745,7 +763,7 @@ async fn open_raw_image_inner(
             return Err(AppError::ProcessingFailure("the RAW worker stopped".into()));
         }
     };
-    let (developed, sensor, reference, source_metadata, applied, crop) = developed;
+    let (developed, sensor, reference, source_metadata, applied, crop, view) = developed;
 
     let rendered = developed.image.to_rgba8();
     let (width, height) = (rendered.width(), rendered.height());
@@ -820,7 +838,7 @@ async fn open_raw_image_inner(
         decoder: crate::raw::DECODER_ID.to_string(),
         decoder_version: crate::raw::DECODER_VERSION.to_string(),
         capture: sensor.metadata.clone(),
-        view: region,
+        view,
         orientation_applied: applied,
         crop,
     };

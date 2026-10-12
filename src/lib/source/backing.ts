@@ -7,6 +7,10 @@
  * document has, so it reads both here, in one place, rather than the interface
  * knowing two shapes.
  *
+ * A RAW `view` is in the sensor's coordinates, whereas a region of a camera file is chosen on
+ * its picture (cut and turned upright); the backend says where one lies on the other
+ * (`rawRegionOnPicture`), so no turning is done here.
+ *
  * This only *reads* the relationship. Whether the file is still the one recorded
  * is the backend's question (it hashes the file), and it is asked before anything
  * is offered.

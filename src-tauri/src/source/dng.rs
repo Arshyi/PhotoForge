@@ -63,16 +63,26 @@ fn guarded(path: &Path) -> std::path::PathBuf {
 /// offsets, and the planner counts the file as resident whenever a DNG is opened.
 /// The bytes are dropped before this returns.
 pub fn read_info(path: &Path) -> Result<DngInfo, AppError> {
+    read_header(path).map(|(info, _)| info)
+}
+
+/// As `read_info`, and also where the picture lies on the sensor and how it is turned, which a
+/// region is chosen on. One read of the file serves both.
+pub fn read_header(path: &Path) -> Result<(DngInfo, dng::PictureGeometry), AppError> {
     let bytes = raw::read_source_bytes(&guarded(path)).map_err(map_raw)?;
     let layout = dng::inspect_layout(&bytes).map_err(map_raw)?;
-    Ok(DngInfo {
-        width: layout.width,
-        height: layout.height,
-        bits: layout.bits,
-        tiled: layout.tiled,
-        segment_pixels: layout.segment_pixels(),
-        segments: layout.segment_count(),
-    })
+    let geometry = dng::inspect_geometry(&bytes).map_err(map_raw)?;
+    Ok((
+        DngInfo {
+            width: layout.width,
+            height: layout.height,
+            bits: layout.bits,
+            tiled: layout.tiled,
+            segment_pixels: layout.segment_pixels(),
+            segments: layout.segment_count(),
+        },
+        geometry,
+    ))
 }
 
 /// The most photosites a window can hold beyond its region, for any region on a
@@ -107,15 +117,25 @@ pub fn capabilities(info: &DngInfo) -> DecodeCapabilities {
 }
 
 /// A picture of the whole sensor no larger than `max_edge` on a side, developed
-/// with the default parameters, held one segment at a time.
+/// with the default parameters, held one segment at a time, and then shown as the picture
+/// the camera declares: cut to it and turned upright, so that what a region is chosen on is
+/// what a whole open would show (and the rectangle chosen maps back through
+/// `PictureGeometry::to_sensor`).
 pub fn preview(
     path: &Path,
     max_edge: u32,
     cancel: Option<&AtomicBool>,
 ) -> Result<FloatImage, AppError> {
     let bytes = raw::read_source_bytes(&guarded(path)).map_err(map_raw)?;
-    let developed =
+    let geometry = dng::inspect_geometry(&bytes).map_err(map_raw)?;
+    let mut developed =
         develop::develop_preview(&bytes, &DevelopmentParameters::default(), max_edge, cancel)
             .map_err(map_raw)?;
+    if let Some(rect) = geometry.cut() {
+        developed = developed.cropped(&rect).map_err(map_raw)?;
+    }
+    let developed = developed
+        .turned_upright(u16::from(geometry.orientation))
+        .map_err(map_raw)?;
     Ok(developed.image)
 }

@@ -276,11 +276,14 @@ manifest, each only when used, so a project that uses none of them is written as
   (absolute, local, no traversal, stream or device syntax) only when the person asks to
   check or reopen it. A camera-RAW layer's `source` gains an optional `view` rectangle in
   sensor coordinates, an optional `orientationApplied` (2 to 8): the EXIF orientation the
-  raster was turned by when it was developed whole (absent when it was not turned, and never
-  present with a `view`), and an optional `crop` rectangle: the part of the sensor, in sensor
-  coordinates, the raster was cut to when it was developed whole (the default crop inside the
-  active area; absent when the picture is the whole sensor, and never present with a `view`).
-  A project that records either is written as format version 3.
+  raster was turned by when it was developed (absent when it was not turned; present with a
+  `view` too, for a region chosen on the upright picture, which is turned the way a whole sensor
+  is), and an optional `crop` rectangle: the part of the sensor, in sensor coordinates, the
+  raster was cut to when it was developed whole (the default crop inside the active area; absent
+  when the picture is the whole sensor, and never present with a `view`: a region is the cut).
+  A `view` is always in sensor coordinates, whatever it was chosen on. A project that records
+  either a turn or a crop is written as format version 3; a region that is not turned is as it
+  was.
 * **A `plugin_filter` edit** in an adjustment layer or a layer's edits — the plugin's id,
   exact version, content hash, filter, declared locality and parameters. The plugin
   itself is **not** stored in the project. Opening a project never runs a plugin and

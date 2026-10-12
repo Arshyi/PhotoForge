@@ -41,6 +41,9 @@ pub async fn probe_image_source(path: String) -> Result<SourceAdmission, AppErro
         let probed = probe_path(Path::new(&path))?;
         let (budget, limits) = crate::resources::candidate(&OsProbe);
         let report = report_with(&probed, 0, &budget, &limits);
+        // A camera RAW is chosen on its picture, turned upright; the planner above priced the
+        // sensor.
+        let (width, height) = probed.presented();
         Ok(SourceAdmission {
             filename: probed
                 .path
@@ -50,8 +53,8 @@ pub async fn probe_image_source(path: String) -> Result<SourceAdmission, AppErro
                 .to_string(),
             path,
             kind: probed.kind,
-            width: probed.width,
-            height: probed.height,
+            width,
+            height,
             file_bytes: probed.file_bytes,
             has_icc: probed.has_icc,
             bit_depth: probed.bit_depth,

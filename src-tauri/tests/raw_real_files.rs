@@ -463,3 +463,111 @@ fn a_real_photograph_is_cut_to_the_picture_its_camera_declares() {
         }
     }
 }
+
+/// A region chosen on a real photograph's upright picture is made of exactly the photosites that
+/// turn into it, and is that window of the picture: for each of the eight orientation values (the
+/// tag rewritten in a copy), the rectangle chosen is mapped to the sensor, developed on its own
+/// and turned, and every one of its pixels is the picture's own pixel at the place the turn
+/// carried it from.
+///
+/// One full development stands for all eight (the turn of it is checked against Pillow in
+/// `a_real_photograph_is_turned_by_each_orientation_value`); each region is developed from its own
+/// copy of the file, so nothing of the whole development is reused for the windows.
+#[test]
+fn a_region_chosen_on_a_real_photographs_upright_picture_is_that_window_of_it() {
+    use photoforge_lib::orientation;
+    use photoforge_lib::raw::develop::{develop_region, develop_sensor_picture};
+    use photoforge_lib::source::Rect;
+
+    let Some(original) = read(LOSSLESS) else {
+        eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
+        return;
+    };
+    let with_orientation = |value: u16| -> Vec<u8> {
+        let mut bytes = original.clone();
+        let directory = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        let count = u16::from_le_bytes([bytes[directory], bytes[directory + 1]]) as usize;
+        for index in 0..count {
+            let at = directory + 2 + index * 12;
+            if u16::from_le_bytes([bytes[at], bytes[at + 1]]) == 274 {
+                bytes[at + 8..at + 10].copy_from_slice(&value.to_le_bytes());
+                return bytes;
+            }
+        }
+        panic!("the first directory has no orientation tag");
+    };
+
+    let parameters = DevelopmentParameters::default();
+    let sensor = dng::decode(&original).expect("decodes");
+    let picture = develop_sensor_picture(&sensor, &parameters, RenderScale::Full).unwrap();
+    assert_eq!(picture.image.dimensions(), (5760, 3840));
+    drop(sensor);
+
+    for value in 1..=8_u16 {
+        let bytes = with_orientation(value);
+        let geometry = dng::inspect_geometry(&bytes).expect("the header reads");
+        assert_eq!(u16::from(geometry.orientation), value);
+        assert_eq!(
+            geometry.rect,
+            Rect {
+                x: 140,
+                y: 96,
+                width: 5760,
+                height: 3840
+            }
+        );
+        let (presented_width, presented_height) = geometry.presented_size();
+        assert_eq!(
+            (presented_width, presented_height),
+            orientation::oriented_size(value as u8, 5760, 3840)
+        );
+
+        // A window well inside the picture at an odd offset, and one against its far corner.
+        for chosen in [
+            Rect {
+                x: 1001,
+                y: 703,
+                width: 48,
+                height: 40,
+            },
+            Rect {
+                x: presented_width - 33,
+                y: presented_height - 21,
+                width: 33,
+                height: 21,
+            },
+        ] {
+            let rect = geometry.to_sensor(&chosen).expect("on the picture");
+            let region = develop_region(&bytes, rect, &parameters)
+                .unwrap()
+                .turned_upright(value)
+                .unwrap();
+            assert_eq!(
+                region.image.dimensions(),
+                (chosen.width, chosen.height),
+                "orientation {value}"
+            );
+            // Every photosite of the sensor rectangle lands inside the chosen window, on the
+            // pixel that holds it, and that pixel is the picture's own.
+            let (local_x, local_y) = (rect.x - 140, rect.y - 96);
+            for row in 0..rect.height {
+                for column in 0..rect.width {
+                    let (px, py) = (local_x + column, local_y + row);
+                    let (dx, dy) = orientation::place(value as u8, 5760, 3840, px, py);
+                    assert!(
+                        dx >= chosen.x
+                            && dx < chosen.x + chosen.width
+                            && dy >= chosen.y
+                            && dy < chosen.y + chosen.height,
+                        "orientation {value}: ({px}, {py}) lands outside the window"
+                    );
+                    assert_eq!(
+                        region.image.get(dx - chosen.x, dy - chosen.y),
+                        picture.image.get(px, py),
+                        "orientation {value}: ({px}, {py})"
+                    );
+                }
+            }
+        }
+    }
+}
