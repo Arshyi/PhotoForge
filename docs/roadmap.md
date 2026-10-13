@@ -1,5 +1,72 @@
 # Roadmap
 
+## Now: after 0.15.0
+
+The sections below this one are the history of what each phase delivered, in the order they
+were written; this one is where the project stands and where it is going.
+
+Where the project is, what is left, and the decisions that have been made. It is a plan, not a
+promise: nothing here is claimed until a results page says it was run.
+
+### Where it is
+
+**0.15.0 (Phase 15, interoperability) is released**: the tag `v0.15.0` and a GitHub pre-release
+with unsigned installers. [Phase 15 results](phase-15-results.md) is the ledger of what it holds and
+what is not claimed.
+
+### The sequence
+
+| Version | Theme | Notes |
+| --- | --- | --- |
+| 0.15 | Interoperability: PSD / PSB, TIFF, OpenEXR, SVG, metadata, clipboard, DNG picture handling | **done** |
+| 0.16 | Local semantic selection, object understanding, inpainting and generative restoration | Models are packages the user supplies through the model manager, never in the installer or the repository |
+| 0.17 | GPU renderer parity and CPU/GPU scheduling | Only where measured to help (Phase 11 is the precedent) |
+| 0.18 | Colour, print, proofing and HDR, and the remaining professional gaps | Includes what Phase 15 recorded as not fixed (below) |
+| 0.19 | Interface and product integration: workspace, shortcuts, panels, history | Includes the display-scaling, second-monitor and screen-reader matrix |
+| 1.0 | Stabilisation: fuzzing, huge-document torture tests, crash recovery, accessibility, signing, native Windows validation, performance gates | Signing needs a real certificate |
+
+Principles, in order when they conflict: correctness, image fidelity, non-destructive editing,
+security and privacy, capability, performance, interface, storage. No claim without a run.
+
+### Open work, from the 0.15.0 ledger
+
+Each of these is written up where it was found; they are small and independent.
+
+* **High-dynamic-range values are clipped by most blend modes** (everything but Normal, Multiply,
+  Screen, Darken, Lighten, Difference, Exclusion). A design decision about what Overlay and its
+  relatives mean above white. ([layers.md](layers.md), [openexr.md](openexr.md))
+* **PSD memory**: import decodes every channel (up to about 14 times the per-layer estimate with extra
+  channels); export's peak is about three times what is guarded.
+  ([phase-15-5-review-results.md](phase-15-5-review-results.md))
+* **SVG round trip**: isolated groups written as plain `<g>`; colour names outside 40, `hsl()` and
+  percentage lengths read wrongly; `<title>` not read back. ([svg.md](svg.md))
+* **RAW**: DefaultScale and non-square pixels are not applied; the masked photosites are not used to
+  measure the black level; only DNG is read. ([raw-development.md](raw-development.md))
+* **Packaged window**: the Layers panel's controls use a different type scale from the cards; the
+  clipboard has not been driven in the packaged window; other widths and display scales are
+  unchecked. ([phase-15-9-1-results.md](phase-15-9-1-results.md))
+* **A window that did not close** was seen once and not explained; since 0.15.0 a local log
+  (`close.log`, [phase-15-9-3-results.md](phase-15-9-3-results.md)) records what happens if it recurs.
+* **Installers**: the MSI is registered per machine but installs per user; upgrade over an older
+  version, repair and a machine without WebView2 have not been tried.
+  ([phase-15-results.md](phase-15-results.md))
+
+### Decisions made
+
+* **Licence: none selected.** All rights reserved; the repository is public, as a personal project.
+  Nothing here is open-source licensed.
+* **Binaries are unsigned** and released as a pre-release; SmartScreen warns. A certificate is a
+  decision for 1.0.
+* **Windows only.** The platform layers (WebView2, the clipboard) are not abstracted.
+* **No telemetry, no cloud, no model in the installer.** The optional local planner (Ollama) is
+  text-only and loopback-only.
+
+### Working here
+
+[`development.md`](development.md) is the entry point for building, verifying and releasing.
+
+## History
+
 ## Phase 6 — Professional editing and workflow system (complete)
 
 Version 0.6.0 adds deterministic curves, levels, point sampling, crop, straighten, perspective, lens correction, HSL, temperature/tint, selective color, live scopes, professional inspection, expanded comparison, versioned workflows, bounded batch processing, export profiles, workspace layouts, configurable shortcuts, and accessibility improvements.

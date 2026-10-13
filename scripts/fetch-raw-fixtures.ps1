@@ -28,7 +28,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination = (Join-Path $PSScriptRoot ".." "raw-fixtures")
+    [string]$Destination = (Join-Path (Join-Path $PSScriptRoot "..") "raw-fixtures")
 )
 
 $ErrorActionPreference = "Stop"

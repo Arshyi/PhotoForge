@@ -1,0 +1,11 @@
+# Python packages used by the oracles and corpus scripts in this directory (a virtual environment is
+# enough: python -m venv .work/venv && .work/venv/Scripts/pip install -r tools/requirements.txt).
+# They read what PhotoForge wrote with programs that are not PhotoForge; none is needed to build or
+# run the application.
+numpy==2.5.3
+pillow==12.3.0
+tifffile==2026.9.20
+imagecodecs==2026.10.10
+psd-tools==1.24.0
+OpenEXR==3.5.2
+resvg_py==0.5.0
