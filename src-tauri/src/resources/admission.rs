@@ -28,6 +28,15 @@
 use super::policy::{Budget, ResourceLimits, BYTES_PER_WORKING_PIXEL, HARD_MAX_SOURCE_DIMENSION};
 use serde::{Deserialize, Serialize};
 
+/// Pixels the layer store keeps beside a document's working copy: its preview, which is at most
+/// `PREVIEW_MAX_DIMENSION` on a side (`layers::store`). The store's limit is one working image
+/// of the largest size, and the working copy and its preview are inserted together, so a region
+/// of exactly the pixel limit is refused at the store by what the preview adds. The largest
+/// region offered is therefore the limit less this, which is what makes the figure a boundary
+/// that opens rather than one that is refused a step later.
+pub const STORE_PREVIEW_PIXELS: u64 =
+    crate::layers::PREVIEW_MAX_DIMENSION as u64 * crate::layers::PREVIEW_MAX_DIMENSION as u64;
+
 /// Fixed overhead of a render (output encode buffers, caches warm-up), carried
 /// over from the original estimate so open-time figures stay comparable.
 const RENDER_FIXED_BYTES: u128 = 40_960_000;
@@ -458,7 +467,8 @@ fn region_option(
 ) -> Option<AdmissionOption> {
     let cost = region_cost(probe)?;
     let ceiling = budget_bytes.min(available.unwrap_or(u128::MAX));
-    let pixel_cap = u128::from(limits.working_pixels()).min(probe.pixels());
+    let pixel_cap = u128::from(limits.working_pixels().saturating_sub(STORE_PREVIEW_PIXELS))
+        .min(probe.pixels());
 
     // Largest region whose total peak fits. Peak is monotonic in region size, so
     // a binary search finds the boundary without a closed form for each decoder.
@@ -852,19 +862,50 @@ mod tests {
             peak <= budget.bytes,
             "the stated maximum exceeds the budget"
         );
-        assert!(max_pixels <= limits.working_pixels());
+        assert!(max_pixels <= limits.working_pixels() - STORE_PREVIEW_PIXELS);
         // Probe the model directly one step past the maximum.
         let native = 4u128;
         let over = u128::from(max_pixels) + 1;
         let overhead = u128::from(probe.width) * native + over * native;
         let peak_over = document_peak(over, native, u128::from(probe.file_bytes), overhead);
-        let pixel_cap = u128::from(limits.working_pixels());
+        let pixel_cap = u128::from(limits.working_pixels() - STORE_PREVIEW_PIXELS);
         assert!(
             peak_over > u128::from(budget.bytes)
                 || over > pixel_cap
                 || max_pixels as u128 == pixel_cap,
             "a larger region than the reported maximum would still have fit"
         );
+    }
+
+    /// The working copy of a region and its preview go into the layer store together, and the
+    /// store holds one working image of the largest size, so the largest region offered leaves
+    /// room for the preview. Found by opening the default region of a real file in the packaged
+    /// window: the planner offered a rectangle the store then refused.
+    #[test]
+    fn the_largest_region_leaves_room_for_the_preview_the_store_keeps_with_it() {
+        let (budget, limits) = budget_of(16, 12);
+        for region in [
+            RegionDecode::Rows,
+            RegionDecode::TransientFull { bytes_per_pixel: 3 },
+        ] {
+            let probe = png(30_000, 20_000, 200_000_000, region);
+            let report = plan(&probe, &budget, &limits, Some(12 * GIB), 0);
+            let max_pixels = report
+                .options
+                .iter()
+                .find_map(|option| match option {
+                    AdmissionOption::OpenRegion {
+                        max_region_pixels, ..
+                    } => Some(*max_region_pixels),
+                    _ => None,
+                })
+                .expect("region option");
+            assert!(
+                max_pixels + STORE_PREVIEW_PIXELS <= limits.working_pixels(),
+                "{region:?}: {max_pixels} leaves no room for a preview under {}",
+                limits.working_pixels()
+            );
+        }
     }
 
     /// The coefficients the interface evaluates must be exactly the model the

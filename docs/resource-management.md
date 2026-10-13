@@ -134,6 +134,14 @@ the planner used, with no second copy of the model to drift. The details per for
 what is decoded, what is held, what is *not* claimed — are in
 [oversized-images.md](oversized-images.md).
 
+**The largest region offered is the working-pixel limit less the preview.** A region's
+working copy and its preview (at most 1,600 × 1,600 pixels) go into the layer store together,
+and the store holds one working image of the largest size, so a region of exactly the pixel
+limit is refused at the store by what the preview adds. The planner therefore offers the limit
+less `STORE_PREVIEW_PIXELS` (2.56 MP). This was found by opening the default region of a real
+file in the packaged window: the figure the dialog gave as the maximum could not be opened, and
+it is now a boundary that opens (`tests/raw_flow.rs::the_largest_region_the_planner_offers_opens`).
+
 **Out-of-core editing is not offered**, and the report says why in every case; see that
 document.
 
