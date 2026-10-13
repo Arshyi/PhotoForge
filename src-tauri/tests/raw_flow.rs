@@ -316,6 +316,62 @@ fn an_oversized_sensor_opens_only_as_a_region_on_a_small_machine() {
     );
 }
 
+/// The region chooser's starting rectangle is the largest the planner offers. Its window carries
+/// a margin of photosites around it for the demosaic, so a window held to the same pixel limit as
+/// the region would refuse exactly the rectangle the planner just allowed (found by opening a
+/// real file's default region in the packaged window).
+#[test]
+fn the_largest_region_the_planner_offers_opens() {
+    let _isolated = Isolated::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = write(
+        directory.path(),
+        "big.dng",
+        &sensor(4096, 3072, Some((256, 256))),
+    );
+    let settings_home = tempfile::tempdir().unwrap();
+    std::env::set_var("LOCALAPPDATA", settings_home.path());
+    resources::settings::save_mode(BudgetMode::Manual { bytes: 512 * MIB }).unwrap();
+    let harness = Harness::new();
+
+    let probed = harness.ok("probe_image_source", json!({ "path": path }));
+    let ceiling = probed["report"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["kind"] == "openRegion")
+        .expect("a region is offered")["maxRegionPixels"]
+        .as_u64()
+        .unwrap();
+
+    // The widest rectangle of this height under the ceiling, at an odd offset so the window
+    // needs its margin on every side.
+    let height = 3000_u32;
+    let width = (ceiling / u64::from(height)) as u32;
+    assert!(u64::from(width) * u64::from(height) <= ceiling);
+    assert!(
+        u64::from(width + 1) * u64::from(height) > ceiling,
+        "not the largest"
+    );
+    assert!(
+        width + 8 <= 4096,
+        "the ceiling {ceiling} does not fit this sensor"
+    );
+    let opened = harness.ok(
+        "open_raw_image",
+        json!({ "path": path, "requestId": 1, "region": rect(1, 1, width, height) }),
+    );
+    assert_eq!(opened["metadata"]["width"], width);
+    assert_eq!(opened["metadata"]["height"], height);
+
+    // One photosite wider is over the ceiling and is still refused.
+    harness.err(
+        "open_raw_image",
+        json!({ "path": path, "requestId": 2, "region": rect(1, 1, width + 1, height) }),
+    );
+    resources::settings::save_mode(BudgetMode::Automatic).unwrap();
+}
+
 #[test]
 fn a_region_layer_is_redeveloped_as_the_same_rectangle() {
     let _isolated = Isolated::new();

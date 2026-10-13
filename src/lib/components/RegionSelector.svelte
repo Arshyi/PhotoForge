@@ -190,7 +190,7 @@
     <div
       class="stage"
       bind:this={stage}
-      style={`aspect-ratio:${sourceWidth} / ${sourceHeight}`}
+      style={`aspect-ratio:${sourceWidth} / ${sourceHeight}; max-width:calc(62vh * ${sourceWidth} / ${sourceHeight})`}
       data-testid="region-stage"
     >
       {#if previewState === 'ready' && preview}
@@ -294,7 +294,7 @@
 <style>
   .region-selector { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; padding: 16px 21px 21px; }
   .stage-column { min-width: 0; }
-  .stage { position: relative; width: 100%; max-height: 62vh; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: repeating-conic-gradient(#222 0% 25%, #2b2b2b 0% 50%) 50% / 16px 16px; touch-action: none; user-select: none; }
+  .stage { position: relative; width: 100%; margin-inline: auto; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: repeating-conic-gradient(#222 0% 25%, #2b2b2b 0% 50%) 50% / 16px 16px; touch-action: none; user-select: none; }
   .stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
   .stage-note { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; color: var(--ink-soft); font-size: 0.68rem; text-align: center; }
   .region { position: absolute; box-sizing: border-box; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55); pointer-events: none; }

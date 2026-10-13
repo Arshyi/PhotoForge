@@ -373,6 +373,102 @@ fn the_preview_a_region_is_chosen_on_is_the_picture() {
     assert!((ratio - 0.75).abs() < 0.06, "{width} x {height}: {ratio}");
 }
 
+/// Found by the packaged window: a portrait region opened, and then every render, thumbnail and
+/// analysis of the document was refused because a RAW region layer's raster had to be the size
+/// of its view, which is the sensor's way round, while the raster is turned.
+#[test]
+fn a_turned_region_is_a_valid_layer_and_survives_a_project() {
+    use photoforge_lib::layers::{
+        decode_project, encode_project, BlendMode, Layer, LayerContent, LayerDocument,
+        LayerMetadata, LayerTransform,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = write(directory.path(), "portrait.dng", &framed(6));
+    let harness = Harness::new();
+    let opened = harness.ok(
+        "open_raw_image",
+        json!({
+            "path": path,
+            "requestId": 12,
+            "region": { "x": 2, "y": 3, "width": 8, "height": 5 },
+        }),
+    );
+    assert_eq!(opened["metadata"]["width"], 8);
+    assert_eq!(opened["metadata"]["height"], 5);
+    let source: photoforge_lib::raw::RawLayerSource =
+        serde_json::from_value(opened["source"].clone()).unwrap();
+    assert_eq!(source.orientation_applied, 6);
+    let view = source.view.expect("a region");
+    assert_eq!((view.width, view.height), (5, 8));
+    let pixel_id = opened["backgroundPixelId"].as_str().unwrap().to_string();
+
+    let layer = |width: u32, height: u32| Layer {
+        id: "region".into(),
+        name: "RAW region".into(),
+        visible: true,
+        locked: false,
+        opacity: 1.0,
+        blend_mode: BlendMode::Normal,
+        transform: LayerTransform::default(),
+        mask: None,
+        collapsed: false,
+        clipped: false,
+        metadata: LayerMetadata::default(),
+        raw: Some(source.clone()),
+        origin: None,
+        content: LayerContent::Pixel {
+            pixel_id: pixel_id.clone(),
+            width,
+            height,
+        },
+    };
+    let document = |layer: Layer| LayerDocument {
+        schema_version: photoforge_lib::layers::LAYER_SCHEMA_VERSION,
+        precision: Default::default(),
+        canvas_width: 8,
+        canvas_height: 5,
+        layers: vec![layer],
+        smart_sources: Default::default(),
+        active_layer_id: Some("region".into()),
+    };
+    let raster = image::RgbaImage::from_pixel(8, 5, image::Rgba([10, 20, 30, 255]));
+    let buffers = vec![(pixel_id.clone(), &raster)];
+
+    // The raster is the region the way up it was turned to: 8 wide, 5 tall.
+    let encoded = encode_project(
+        &document(layer(8, 5)),
+        &[],
+        &buffers,
+        "0.14.0",
+        "2026-10-12T00:00:00Z",
+        "2026-10-12T00:00:00Z",
+    )
+    .expect("a turned region layer saves");
+    let restored = decode_project(&encoded).expect("and loads");
+    let back = restored
+        .document
+        .find("region")
+        .unwrap()
+        .raw
+        .clone()
+        .unwrap();
+    assert_eq!(back.view, source.view);
+    assert_eq!(back.orientation_applied, 6);
+
+    // The sensor's way round is not a size the source could reproduce for it.
+    let wrong = image::RgbaImage::from_pixel(5, 8, image::Rgba([10, 20, 30, 255]));
+    assert!(encode_project(
+        &document(layer(5, 8)),
+        &[],
+        &[(pixel_id.clone(), &wrong)],
+        "0.14.0",
+        "2026-10-12T00:00:00Z",
+        "2026-10-12T00:00:00Z",
+    )
+    .is_err());
+}
+
 #[test]
 fn where_a_region_lies_on_the_picture_is_found_from_its_photosites() {
     let directory = tempfile::tempdir().unwrap();

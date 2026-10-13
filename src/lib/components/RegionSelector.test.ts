@@ -43,6 +43,25 @@ describe('region selector', () => {
     expect(screen.getByTestId('admission').textContent).toContain('Supported');
   });
 
+  it('keeps a tall picture its own proportions instead of squeezing it into a wide box', () => {
+    // Found in the packaged window: a 2:3 portrait was given the full width and a height capped
+    // by the viewport, so the preview was stretched and the box was not the picture's shape.
+    render(RegionSelector, {
+      admission: admissionFixture({ width: 3_840, height: 5_760 }),
+      previewState: 'ready',
+      preview: { dataUrl: 'data:image/png;base64,AAAA', width: 400, height: 600 },
+      initial: { x: 100, y: 100, width: 1_000, height: 1_000 },
+      onconfirm: vi.fn(),
+      oncancel: vi.fn(),
+      onback: vi.fn()
+    });
+    // The attribute is serialised with or without a space after each colon; compare without.
+    const style = (screen.getByTestId('region-stage').getAttribute('style') ?? '').replace(/:\s+/g, ':');
+    expect(style).toContain('aspect-ratio:3840 / 5760');
+    // The width is limited so the height the aspect ratio gives stays inside the viewport.
+    expect(style).toContain('max-width:calc(62vh * 3840 / 5760)');
+  });
+
   it('moves in source pixels, whatever size the preview is drawn at', async () => {
     const { box } = setup();
     pointer(box, 'pointerdown', 100, 100);

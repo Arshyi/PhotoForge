@@ -318,11 +318,17 @@ impl Layer {
                     "only pixel layers can carry a RAW source".into(),
                 ));
             };
-            // A layer that is a region of a sensor is exactly that many pixels.
-            // Re-developing it rebuilds the rectangle, so a raster of any other
-            // size would be one the source could not reproduce.
+            // A layer that is a region of a sensor is exactly that many pixels, the way
+            // up it was turned to (a quarter turn exchanges the axes). Re-developing it
+            // rebuilds the rectangle and turns it again, so a raster of any other size
+            // would be one the source could not reproduce.
             if let Some(view) = &raw.view {
-                if view.width != *width || view.height != *height {
+                let (want_width, want_height) = crate::orientation::oriented_size(
+                    raw.orientation_applied,
+                    view.width,
+                    view.height,
+                );
+                if want_width != *width || want_height != *height {
                     return Err(AppError::InvalidLayerDocument(
                         "a RAW region layer's raster must be the size of its region".into(),
                     ));
