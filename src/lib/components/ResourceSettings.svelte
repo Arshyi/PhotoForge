@@ -29,17 +29,21 @@
 
   $: range = status ? manualRange(status) : null;
   $: warning = status && choice === 'manual' ? manualWarning(status, manualBytes) : null;
+  // What the person chose, which is not always what is in force: a lower budget waits for the
+  // next document, and showing the one in force would show the choice they just replaced.
+  $: chosen = status ? status.savedMode : null;
   $: unchanged =
-    !status ||
-    (choice === 'automatic' && status.budget.mode.mode === 'automatic') ||
-    (choice === 'manual' && status.budget.mode.mode === 'manual' && status.budget.mode.bytes === manualBytes);
+    !chosen ||
+    (choice === 'automatic' && chosen.mode === 'automatic') ||
+    (choice === 'manual' && chosen.mode === 'manual' && chosen.bytes === manualBytes);
 
   onMount(() => void refresh());
 
   function adopt(next: ResourceStatus) {
     status = next;
-    choice = next.budget.mode.mode;
-    manualBytes = snapBudget(next.budget.mode.mode === 'manual' ? next.budget.mode.bytes : next.budget.bytes, manualRange(next));
+    const saved = next.savedMode;
+    choice = saved.mode;
+    manualBytes = snapBudget(saved.mode === 'manual' ? saved.bytes : next.budget.bytes, manualRange(next));
   }
 
   async function refresh() {

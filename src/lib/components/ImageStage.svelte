@@ -401,7 +401,7 @@
         <span class="mountain two"></span>
       </span>
       <strong>Bring a photo to the forge</strong>
-      <span>Drop a PNG, JPEG, WebP or Photoshop file here</span>
+      <span>Drop a PNG, JPEG, WebP, TIFF, DNG, EXR, SVG or Photoshop file here</span>
       <em>or choose an image</em>
       <small>Your image stays on this device.</small>
     </button>

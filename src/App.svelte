@@ -4659,7 +4659,7 @@
         aria-disabled={!metadata || fileMutationBusy}
       >
         {#if layerDocument}
-          <fieldset disabled={fileMutationBusy || geometryMutationBusy || selectionBusy || Boolean(refineOriginalMask)} aria-label="Semantic layer tools">
+          <fieldset class="semantic-tools" disabled={fileMutationBusy || geometryMutationBusy || selectionBusy || Boolean(refineOriginalMask)} aria-label="Semantic layer tools">
             <legend>Text, shapes and smart objects</legend>
             <label>Canvas tool<select aria-label="Semantic canvas tool" value={semanticTool}
               on:change={(event) => chooseSemanticTool(event.currentTarget.value as typeof semanticTool)}>
