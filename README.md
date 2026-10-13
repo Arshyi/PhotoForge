@@ -1,13 +1,42 @@
 # PhotoForge
 
-PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It processes PNG, JPEG, and WebP images locally with a typed, non-destructive edit pipeline and never uploads photos.
+PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It opens and saves PNG, JPEG, WebP, TIFF, OpenEXR, SVG and Photoshop (PSD / PSB) files, and develops camera RAW (DNG), locally with a typed, non-destructive edit pipeline and never uploads photos.
 
-This repository contains the Phase 0 foundation through Phase 14: extensibility,
-resource management, oversized images, safe automation and a sandboxed plugin
-architecture. The target version is **0.14.0**. See
-[Phase 14 results](docs/phase-14-results.md) for current verification, measurements
-and release limits, and what is not claimed; Phase 10 remains the precision and colour
-baseline, Phase 11 the tiled-render baseline and Phase 13 the layer baseline.
+This repository contains the Phase 0 foundation through Phase 15: interoperability
+(Photoshop, TIFF, OpenEXR, SVG, metadata, the clipboard and camera RAW), on top of
+Phase 14's extensibility, resource management, oversized images, safe automation and
+sandboxed plugin architecture. The target version is **0.15.0**. See
+[Phase 15 results](docs/phase-15-results.md) for current verification, the packaged
+installers and what is not claimed, and [Phase 14 results](docs/phase-14-results.md) for
+the baseline before it; Phase 10 remains the precision and colour baseline, Phase 11 the
+tiled-render baseline and Phase 13 the layer baseline.
+
+## Interoperability (Phase 15)
+
+* **Photoshop documents, in and out.** PSD and PSB open as layered documents (groups,
+  masks, 26 blend modes, clipping masks, Curves / Levels / Invert / Exposure adjustments)
+  with a report of everything that was approximated or left out, and save with their
+  layers, with a report of the same kind. Vector shapes, text, smart objects and layer
+  styles are not carried as such. Never opened in Photoshop itself. See
+  [PSD import](docs/psd-import.md) and [PSD export](docs/psd-export.md).
+* **TIFF, OpenEXR and SVG.** TIFF in and out (8 / 16-bit, ICC, metadata); OpenEXR as
+  scene-linear float, in and out; SVG shape layers out, and a shape subset in. See
+  [TIFF](docs/tiff.md), [OpenEXR](docs/openexr.md) and [SVG](docs/svg.md).
+* **Metadata is kept, and you choose what leaves.** EXIF, XMP and IPTC travel with the
+  document; the orientation tag is applied on open; export removes place, serial numbers,
+  maker note and embedded previews by default, or keeps everything, or removes everything.
+  See [Metadata](docs/metadata.md).
+* **Camera RAW (DNG) the way the camera declares it.** A DNG is turned upright from its
+  orientation tag and cut to the picture its camera declares (active area and default
+  crop); a region of a very large sensor is chosen on that picture, and turned with it.
+  Only DNG is read. See [RAW development](docs/raw-development.md).
+* **The Windows clipboard.** Copy a layer or the merged picture; paste as a layer or as a
+  document. See [Clipboard](docs/clipboard.md).
+* **Verified in the packaged window**, not only by tests: the release executable was
+  driven in a real window, which found and fixed three defects; both installers were
+  installed, run and uninstalled. **Not signed**, and the MSI registers per machine but
+  installs per user, so the NSIS installer is the one to use. Everything that was not
+  checked is listed in [Phase 15 results](docs/phase-15-results.md).
 
 ## Extensibility, resources and oversized images (Phase 14)
 
@@ -156,11 +185,13 @@ See [docs/layers.md](docs/layers.md),
 [docs/project-format.md](docs/project-format.md). The smart-object boundary is
 documented in [docs/smart-objects.md](docs/smart-objects.md).
 
-PhotoForge does not support PSD, general GPU compositing, general TIFF import, CMYK,
-printer proofing or proprietary RAW formats. Earlier phase reports remain
+PhotoForge does not support general GPU compositing, CMYK, printer proofing or
+camera RAW formats other than DNG, and it is not an editor of Photoshop vector shapes,
+text, smart objects or layer styles. Earlier phase reports remain
 historical evidence; [Phase 13 results](docs/phase-13-results.md) records current
 verification, the packaged 0.13.0 artifacts and their checksums, and what is
-still not claimed; [Phase 14 results](docs/phase-14-results.md) does the same for 0.14.0.
+still not claimed; [Phase 14 results](docs/phase-14-results.md) does the same for 0.14.0
+and [Phase 15 results](docs/phase-15-results.md) for 0.15.0.
 
 ## What works
 
@@ -170,6 +201,7 @@ still not claimed; [Phase 14 results](docs/phase-14-results.md) does the same fo
 - Ordinary typed pipelines for five presets
 - Undo, redo, reset, zoom, fit view, and before/after comparison
 - PNG, JPEG, and WebP full-resolution export
+- Photoshop (PSD / PSB), TIFF, OpenEXR and SVG open and save; camera RAW (DNG) opens whole or as a region; the Windows clipboard copies and pastes pictures and layers (Phase 15)
 - Protection against overwriting the original image
 - Document and request-generation checks that prevent stale opens or previews from replacing newer results
 - Bounded preview/export work and a 200-entry history ceiling
@@ -303,7 +335,10 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 
 ## Honest scope
 
-PhotoForge 0.14.0 adds the operation registry and transaction engine, structured
+PhotoForge 0.15.0 adds Photoshop, TIFF, OpenEXR and SVG interchange, kept metadata, the
+clipboard and camera-RAW picture handling (see above and [Phase 15
+results](docs/phase-15-results.md)). PhotoForge 0.14.0 added the operation registry and
+transaction engine, structured
 automation, a sandboxed WebAssembly plugin runtime, a machine-derived memory budget and
 bounded opening of oversized images (see above and [Phase 14
 results](docs/phase-14-results.md)). PhotoForge 0.13.0 added deterministic local layers, editable projects, bounded local
@@ -320,9 +355,9 @@ source-backed RAW projects are implemented for the documented DNG subset.
 Phase 10 adds float compositing, RGB ICC input, sRGB/P3/Adobe RGB output and
 batch RAW. Phase 11 adds bounded CPU tiles, an in-memory render cache, and
 optional Vulkan acceleration for eligible wide Gaussian blur only. Arbitrary
-output ICC, printer proofing, PSD, general GPU compositing,
+output ICC, printer proofing, general GPU compositing,
 semantic selection, OCR, neural restoration, super-resolution, inpainting,
-generative editing, procedural/neural layer kinds, PSD, and general GPU
+generative editing, procedural/neural layer kinds, and general GPU
 compositing remain outside this release. Native/package validation limits are
 listed separately in the Phase 13 report.
 
