@@ -38,6 +38,15 @@ export function decideClose(state: CloseState): CloseDecision {
 }
 
 /**
+ * The words the local close log (`close_log.rs`) is given for a decision. A fixed set, which the
+ * backend checks again, so nothing but these phrases ever reaches the file.
+ */
+export function closeDecisionLabel(decision: CloseDecision): 'close' | 'prompt-busy' | 'prompt-dirty' {
+  if (decision.action === 'close') return 'close';
+  return decision.prompt === 'busy' ? 'prompt-busy' : 'prompt-dirty';
+}
+
+/**
  * The decision to use when working out the real one fails.
  *
  * Always closing. Whether to warn about unsaved changes is not worth trapping

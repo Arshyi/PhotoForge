@@ -3,6 +3,7 @@
 // underlying Rust functions directly. Nothing outside the app consumes them.
 pub mod application;
 pub mod clipboard;
+pub mod close_log;
 pub mod color;
 pub mod color_management;
 pub mod commands;
@@ -213,6 +214,7 @@ pub fn run() {
             copy_to_clipboard,
             paste_clipboard_image,
             open_clipboard_image,
+            close_log::note_close_decision,
             clipboard_has_image,
             render_preview,
             analyze_image,

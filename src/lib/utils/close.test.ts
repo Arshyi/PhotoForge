@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { closeOnFailure, decideClose, type CloseState } from './close';
+import { closeDecisionLabel, closeOnFailure, decideClose, type CloseState } from './close';
 
 /** Every combination of the three inputs. */
 const everyState: CloseState[] = [false, true].flatMap((busy) =>
@@ -77,5 +77,20 @@ describe('deciding whether the window may close', () => {
     const frozen = Object.freeze({ ...state });
     expect(() => decideClose(frozen)).not.toThrow();
     expect(frozen).toEqual(state);
+  });
+});
+
+describe('what the local close log is told', () => {
+  const allowed = ['close', 'prompt-busy', 'prompt-dirty'];
+
+  it('is one of three fixed phrases for every state, and says what was decided', () => {
+    for (const state of everyState) {
+      const decision = decideClose(state);
+      const label = closeDecisionLabel(decision);
+      expect(allowed).toContain(label);
+      expect(label === 'close').toBe(decision.action === 'close');
+      if (decision.action === 'prompt') expect(label).toBe(`prompt-${decision.prompt}`);
+    }
+    expect(closeDecisionLabel(closeOnFailure)).toBe('close');
   });
 });

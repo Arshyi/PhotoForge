@@ -104,6 +104,9 @@ pub fn create_main_window(app: &tauri::App) -> Result<(), Box<dyn Error>> {
         .on_download(|_, event| !matches!(event, DownloadEvent::Requested { .. }))
         .build()?;
 
+    // What happens when the window is asked to close is written down locally (`close_log`), so a
+    // window that does not close can be explained rather than only observed.
+    crate::close_log::watch(&window);
     configure_platform_privacy(&window)?;
     window.navigate(application_url)?;
     Ok(())
