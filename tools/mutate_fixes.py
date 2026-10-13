@@ -2,7 +2,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run  # noqa: E402
 import os
 import subprocess
 
@@ -56,6 +56,9 @@ def main():
         else:
             verdict = 'SURVIVED'
         print(name, '->', verdict, flush=True)
+
+
+dry_run([(m[0], m[1], m[2]) for m in MUTANTS])
 
 
 main()

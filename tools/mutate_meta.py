@@ -2,7 +2,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run  # noqa: E402
 import os
 import shutil
 import subprocess
@@ -83,6 +83,9 @@ def main():
             # A restored file keeps the old time of its copy; cargo would then take the last mutant build as current.
             os.utime(full, None)
     print('restored')
+
+
+dry_run([(m[0], os.path.join(ROOT, m[1]), m[2]) for m in MUTANTS])
 
 
 main()

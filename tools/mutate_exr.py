@@ -6,7 +6,8 @@ Each mutation is a (file, old, new) replacement made once, the tests run, and th
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import (CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run,  # noqa: E402
+                   fit_line_ends)
 import os
 import subprocess
 import sys
@@ -52,6 +53,7 @@ MUTATIONS = {
 def run(name):
     path, old, new, scope = MUTATIONS[name]
     original = open(path, encoding='utf-8', newline='').read()
+    old, new = fit_line_ends(original, old, new)
     assert original.count(old) == 1, (name, original.count(old))
     open(path, 'w', encoding='utf-8', newline='').write(original.replace(old, new))
     os.utime(path, None)
@@ -70,6 +72,9 @@ def run(name):
     finally:
         open(path, 'w', encoding='utf-8', newline='').write(original)
         os.utime(path, (time.time() + 5, time.time() + 5))
+
+
+dry_run([(name, spec[0], spec[1]) for name, spec in MUTATIONS.items()])
 
 
 if __name__ == '__main__':

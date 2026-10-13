@@ -2,7 +2,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run  # noqa: E402
 import os
 import subprocess
 import sys
@@ -54,6 +54,9 @@ def run(name):
     finally:
         open(path, 'w', encoding='utf-8', newline='').write(original)
         os.utime(path, (time.time() + 5, time.time() + 5))
+
+
+dry_run([(name, spec[0], spec[1]) for name, spec in MUTATIONS.items()])
 
 
 if __name__ == '__main__':

@@ -36,12 +36,42 @@ Each `mutate_*.py` holds a list of small breakages of one feature's code, runs t
 notice, and restores the file (and refreshes its modification time, so cargo does not reuse the
 mutant's build). They are how this project's tests were shown to fail for the right reason.
 
-* `python tools/mutate_<name>.py --dry` checks that each pattern still matches exactly once;
-* `python tools/mutate_<name>.py [index ...]` runs them (minutes per mutant).
+* `python -I tools/mutate_<name>.py --dry` checks that each pattern still matches exactly once and
+  **changes nothing**. Every harness takes it; any other `--option` is refused (exit 2) before a file
+  is touched, because a harness that ignores its arguments would read it as "run every mutant".
+  Run `--dry` first;
+* `python -I tools/mutate_<name>.py [index | name ...]` runs them (minutes per mutant, each one a
+  cargo build and test run).
 
-They are **tied to the code as it was** when each feature landed: a pattern that no longer matches
-is reported as `BAD PATTERN` and needs updating before it is run. Never format, commit or build in
-another window while one runs: it edits source files in place.
+A pattern is matched in the line-ending convention the file has (`pfenv.fit_line_ends`), so a
+checkout with `core.autocrlf=true` works. They are otherwise **tied to the code as it was** when
+each feature landed: a pattern that no longer matches is reported (`BAD`, or `BAD PATTERN` in a run)
+and is skipped, and needs updating before it is run. At 0.15.0, `--dry` says:
+
+| Harness | Patterns | No longer match (the code moved on) |
+| --- | --- | --- |
+| `mutate_clip.py` | 15 | `png-not-written`, `dibv5-not-written`, `dib-preferred-over-png`, `clipboard-not-emptied` |
+| `mutate_crop.py` | 16 | the active area origin is ignored; a crop outside the active area is believed; a picture that is the whole sensor is a cut |
+| `mutate_dng_meta.py` | 21 | private data is not noticed; an Exif maker note is not noticed; no Photoshop-resource IPTC; the GPS directory is not followed; a repeated tag is not skipped |
+| `mutate_exr.py` | 27 | `unfilled-alpha-obeyed`, `store-budget-ignored`, `export-straight-alpha`, `export-bad-depth-accepted` |
+| `mutate_followups.py` | 12 | `clipping-not-a-reason-for-v3`, `blend-modes-not-a-reason-for-v3`, `primaries-conditioning-removed` |
+| `mutate_svg_import.py` | 10 | a DTD allowed (matches twice) |
+| `mutate_tiff.py` | 33 | orientation 6 is not rotated; the profile is not embedded |
+| `mutate_upright.py` | 17 | the transpose is not one (matches twice); a whole open is not turned; the tag is not spent; re-developing does not turn; a raw layer is not turned when added; a batch is not turned; a recorded turn is version two; a region may be turned |
+| `mutate_fixes.py`, `mutate_meta.py`, `mutate_region.py`, `mutate_svg.py` | 4, 8, 26, 8 | none |
+
+That is 30 of 197. They are the proof the tests were checked when the code was written, not a
+suite that is current; the ones above are what a new change to those areas should re-establish by
+writing a fresh mutant. (The `mutate_upright.py` ones were superseded by `mutate_crop.py` and
+`mutate_region.py` when 15.8 and 15.9 changed what "the picture" is.)
+
+Never format, commit or build in another window while one runs: it edits source files in place. If
+a run is killed, the file it was changing stays changed: `git status` shows it, and
+`git checkout -- <file>` restores it (a harness that copies the file first leaves
+`<file>.mutbak` beside it; delete that too).
+
+`mutate_clip.py` runs the tests that **replace the clipboard**: back it up first
+(`clipboard_backup.ps1 save`).
 
 ## The packaged-window harness
 

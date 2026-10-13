@@ -2,7 +2,8 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import (CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run,  # noqa: E402
+                   fit_line_ends)
 import os
 import shutil
 import subprocess
@@ -52,9 +53,13 @@ def run(args):
     return failed, ('error[' in text or 'could not compile' in text)
 
 
+dry_run([(m[0], os.path.join(ROOT, m[1]), m[2]) for m in MUTANTS])
+
+
 for name, path, old, new in MUTANTS:
     full = os.path.join(ROOT, path)
     original = open(full, 'rb').read().decode()
+    old, new = fit_line_ends(original, old, new)
     if original.count(old) != 1:
         print(f'SKIP     {name}: pattern found {original.count(old)} times')
         continue

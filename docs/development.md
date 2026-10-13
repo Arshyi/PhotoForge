@@ -112,8 +112,10 @@ running the file on a fresh clone.
 
 * **Mutation checks.** A new test is shown to fail for the right reason by breaking the code it
   guards and watching it fail (`tools/mutate_*.py`, see `tools/README.md`). Several tests that
-  passed for the wrong reason were found this way. Never format, commit or build while a harness
-  runs: it edits source files in place.
+  passed for the wrong reason were found this way. Run a harness with `--dry` first (it checks
+  that every pattern still matches and changes nothing; 30 of the 197 patterns no longer do at
+  0.15.0, listed in `tools/README.md`). Never format, commit or build while a harness runs: it
+  edits source files in place.
 * **Oracles.** What PhotoForge writes is read back with programs that are not PhotoForge (Pillow,
   tifffile, psd-tools, OpenEXR, resvg): `tools/*_oracle.py` and friends.
 * **The packaged window.** The release executable is driven in a real window, with real pointer

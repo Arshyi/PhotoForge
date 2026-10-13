@@ -6,7 +6,8 @@ Usage: python -I mutate_dng_meta.py [first_index]
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pfenv import CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH  # noqa: E402
+from pfenv import (CARGO_SH, CRATE_PATH, REPO_PATH, WORK_PATH, dry_run,  # noqa: E402
+                   fit_line_ends)
 import subprocess
 import sys
 
@@ -95,6 +96,7 @@ def main():
         if only and index not in only:
             continue
         original = open(path, encoding='utf-8', newline='').read()
+        old, new = fit_line_ends(original, old, new)
         count = original.count(old)
         if count != 1:
             results.append((index, name, 'BAD PATTERN (%d matches)' % count))
@@ -121,6 +123,9 @@ def main():
     print('---- summary')
     for index, name, verdict in results:
         print(index, name, '->', verdict)
+
+
+dry_run([(m[0], m[1], m[2]) for m in MUTANTS])
 
 
 main()
