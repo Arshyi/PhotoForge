@@ -57,15 +57,19 @@ test had seen, listed in [15.9.1](phase-15-9-1-results.md) and fixed, and the po
 SVG and PSD, the RAW region chooser with a pointer (landscape and portrait), Change Source Region,
 the memory settings, and closing the window.
 
-**Installers** (built from `main` at `8f7e32a`, installed, driven and uninstalled):
+**Installers.** Built from the release commit, unsigned (`NotSigned`), checksums in
+`SHA256SUMS.txt`. The NSIS installer was installed, driven and uninstalled again on the 0.15.0
+build; the MSI was on the same code at `8f7e32a` (its 0.15.0 package differs in version and in the
+close log of 15.9.3 only, and was built but **not** put through the elevated install again: the
+UAC prompt was not answered).
 
 | | NSIS (per-user) | MSI |
 | --- | --- | --- |
 | Size | 13.1 MB | 19.1 MB |
-| Install | silent, 3.2 s, no elevation | `/qn`, 49 s with the UAC prompt |
+| Install | silent, 3.4 s, no elevation | `/qn`, 49 s with the UAC prompt (at `8f7e32a`) |
 | Registered | per-user uninstall entry, Start Menu shortcut | per-machine uninstall entry |
-| Installed app | opened a RAW region, no IPC errors, closed on `WM_CLOSE` | the same |
-| Uninstall | silent, 5.8 s, nothing left | 22 s, nothing left |
+| Installed app | opened a RAW region, no IPC errors, closed on `WM_CLOSE` | the same (at `8f7e32a`) |
+| Uninstall | silent, 5.7 s, nothing left | 22 s, nothing left (at `8f7e32a`) |
 
 **The MSI is registered per machine but installs into the installing user's profile**
 (`%LOCALAPPDATA%\PhotoForge`): a second Windows user on the same machine would see PhotoForge
