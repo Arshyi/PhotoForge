@@ -1,6 +1,6 @@
-# PhotoForge 0.14.0 - SHA-256 of the final bytes
+# PhotoForge 0.15.0 - SHA-256 of the final bytes
 # Unsigned: no production Authenticode identity is available and no certificate was generated.
 # Get-AuthenticodeSignature reports NotSigned for all three files.
-a2db40aebf0c7be693a5dbb75515770c2e66ca3ce50eac39d220b0cc44a309d1 *nsis/PhotoForge_0.14.0_x64-setup.exe
-4ba9c0db284cd1a11ffe283467c51d83c0ba0b26077644f464d9f25d7155c02b *msi/PhotoForge_0.14.0_x64_en-US.msi
-9e912e69bf35716eb81dce0ddfe794cd288c8ce0c92baf8edec51eab20b51f97 *../photoforge.exe
+505499fa8a2d336e316d4ed2fb897f8b68bac33e4a8cdbd7feb88fc76fc44f81 *PhotoForge_0.15.0_x64-setup.exe
+39a55108d355dbe74f016427c3d90b9435df826a63386a7ded4d63c9ff24fd72 *PhotoForge_0.15.0_x64_en-US.msi
+604d743ad831df64993bfe5529622c5f9c01adffd283a5cf1080f55c4ec2cadf *PhotoForge-portable.exe

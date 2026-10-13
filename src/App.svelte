@@ -47,7 +47,7 @@
     ,ShortcutBinding
   } from './lib/types/editor';
   import { errorMessage, formatBytes } from './lib/utils/format';
-  import { closeOnFailure, decideClose } from './lib/utils/close';
+  import { closeDecisionLabel, closeOnFailure, decideClose } from './lib/utils/close';
   import {
     defaultGuidedSettings,
     loadGuidedSettings,
@@ -558,6 +558,7 @@
     // visible way to. Anything else is a close button that does nothing.
     getCurrentWindow().onCloseRequested((event) => {
       let decision = closeOnFailure;
+      let decisionFailed = false;
       try {
         decision = decideClose({
           busy: layerBusy || recoveryBusy || exporting || opening || engineInFlight > 0,
@@ -567,7 +568,14 @@
       } catch {
         // Already `closeOnFailure`. Working out whether to warn about unsaved
         // changes is not worth trapping the user in the application for.
+        decisionFailed = true;
       }
+      // Said to the local close log (what the page decided), so that a window that stays open
+      // can be told apart from a page that never answered. Fire and forget: it must not delay or
+      // change the decision.
+      void invoke('note_close_decision', {
+        decision: decisionFailed ? 'failed' : closeDecisionLabel(decision)
+      }).catch(() => undefined);
       if (decision.action === 'close') return;
       if (decision.prompt === 'busy') closeWarned = true;
       event.preventDefault();
