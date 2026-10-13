@@ -237,15 +237,19 @@ and [Phase 15 results](docs/phase-15-results.md) for 0.15.0.
 
 - Windows 10 or 11 with a current Evergreen Microsoft Edge WebView2 runtime that supports `ICoreWebView2Settings8`; startup fails closed on an older runtime that cannot apply and verify the documented reputation-checking policy
 - Node.js 20 or newer and npm
-- Rust stable with the `x86_64-pc-windows-msvc` toolchain
+- Rust **1.96 or newer** (the `rust-version` in `src-tauri/Cargo.toml`) with the `x86_64-pc-windows-msvc` toolchain: `rustup update stable`
 - Microsoft C++ Build Tools with the Desktop development with C++ workload
+- Git for Windows (its `bash` runs the scripts in `scripts/`)
 
 See the official [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) if the Rust linker is unavailable.
+A new machine, from clone to release, is walked through in [Developing PhotoForge](docs/development.md).
 
 ## Develop
 
 ```powershell
-npm install
+git clone https://github.com/Arshyi/PhotoForge.git
+cd PhotoForge
+npm ci
 npm run tauri dev
 ```
 
@@ -262,13 +266,19 @@ npm run test
 npm run build
 ```
 
+`scripts/gates.sh` runs clippy and the tests under the four feature sets the project is held to, and
+`tools/validate/` drives the packaged executable in a real window. Both are described in
+[Developing PhotoForge](docs/development.md).
+
 ## Package
 
 ```powershell
 npm run tauri build
 ```
 
-Windows installers are written under `src-tauri/target/release/bundle/`.
+Windows installers are written under `src-tauri/target/release/bundle/` (or `<CARGO_TARGET_DIR>/release/bundle/`).
+Released builds, with their SHA-256, are on the [Releases page](https://github.com/Arshyi/PhotoForge/releases);
+they are **not signed**.
 
 ## Use
 
@@ -287,6 +297,7 @@ Windows installers are written under `src-tauri/target/release/bundle/`.
 
 ## Architecture and project notes
 
+- [Developing PhotoForge](docs/development.md) and the [roadmap](docs/roadmap.md)
 - [Architecture](docs/architecture.md)
 - [Image processing](docs/image-processing.md)
 - [Restoration](docs/restoration.md)

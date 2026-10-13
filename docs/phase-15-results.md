@@ -47,6 +47,18 @@ psd-tools, OpenEXR, resvg), and PSD, TIFF, EXR and SVG were checked against real
 programs' own test corpora (hundreds of them; the per-increment pages give the counts and the
 ones refused).
 
+**Added after the release, from a fresh clone (2026-10-13).** Running the real-file RAW tests with
+the fixtures set, in a checkout that had never been built, showed that
+`a_real_photograph_is_turned_by_each_orientation_value` had been failing since 15.8: its baseline
+was still the uncut sensor (1480 × 986) while the turned side was the cut picture (1440 × 959).
+That is a wrong test, not a product defect: the baseline is now the picture, the ten real-file
+tests pass, and the Canon sample developed with orientations 2 to 8 is identical to Pillow's
+transposes (`tools/upright_oracle.py`, "problems: none"). The gates did not see it because these
+tests skip themselves without `PHOTOFORGE_RAW_FIXTURES`. The same run found three defects in the
+new-machine tooling (the fixture script on Windows PowerShell 5.1, the validation harness never
+offering the region chooser on a new profile, a parameter that `powershell -File` cannot pass);
+all three are fixed and `docs/development.md` now says how to check a new machine.
+
 ## The packaged window
 
 15.0 to 15.8 were verified without the packaged executable. For this release the release exe was
@@ -58,18 +70,15 @@ SVG and PSD, the RAW region chooser with a pointer (landscape and portrait), Cha
 the memory settings, and closing the window.
 
 **Installers.** Built from the release commit, unsigned (`NotSigned`), checksums in
-`SHA256SUMS.txt`. The NSIS installer was installed, driven and uninstalled again on the 0.15.0
-build; the MSI was on the same code at `8f7e32a` (its 0.15.0 package differs in version and in the
-close log of 15.9.3 only, and was built but **not** put through the elevated install again: the
-UAC prompt was not answered).
+`SHA256SUMS.txt`. Both were installed, driven and uninstalled again on the 0.15.0 build.
 
 | | NSIS (per-user) | MSI |
 | --- | --- | --- |
 | Size | 13.1 MB | 19.1 MB |
-| Install | silent, 3.4 s, no elevation | `/qn`, 49 s with the UAC prompt (at `8f7e32a`) |
+| Install | silent, 3.4 s, no elevation | `/qn`, 4.3 s (elevated; the UAC prompt answered at once) |
 | Registered | per-user uninstall entry, Start Menu shortcut | per-machine uninstall entry |
-| Installed app | opened a RAW region, no IPC errors, closed on `WM_CLOSE` | the same (at `8f7e32a`) |
-| Uninstall | silent, 5.7 s, nothing left | 22 s, nothing left (at `8f7e32a`) |
+| Installed app | opened a RAW region, no IPC errors, closed on `WM_CLOSE` | the same |
+| Uninstall | silent, 5.7 s, nothing left | 4.4 s, nothing left |
 
 **The MSI is registered per machine but installs into the installing user's profile**
 (`%LOCALAPPDATA%\PhotoForge`): a second Windows user on the same machine would see PhotoForge

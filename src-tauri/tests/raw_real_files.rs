@@ -330,10 +330,15 @@ fn a_real_converters_file_gives_its_exif_and_xmp() {
 ///
 /// The Canon sample is upright (orientation 1), so the tag is rewritten in a copy; nothing else
 /// of the file is touched. Preview scale keeps it quick; the turn does not depend on the scale.
+///
+/// Both sides are the *picture* (`develop_bytes_picture`: cut to the camera's default crop, then
+/// turned), so the unchanged file's development, which orientation 1 leaves unturned, is the
+/// baseline. Phase 15.8 made the picture a cut one; this baseline was still the whole sensor
+/// then, which this test (skipped without the fixtures) did not show until it was run.
 #[test]
 fn a_real_photograph_is_turned_by_each_orientation_value() {
     use photoforge_lib::orientation;
-    use photoforge_lib::raw::develop::{develop_bytes, develop_bytes_picture};
+    use photoforge_lib::raw::develop::develop_bytes_picture;
 
     let Some(original) = read(LOSSLESS) else {
         eprintln!("skipped: set PHOTOFORGE_RAW_FIXTURES to run real-file checks");
@@ -354,7 +359,7 @@ fn a_real_photograph_is_turned_by_each_orientation_value() {
         panic!("the first directory has no orientation tag");
     };
     let parameters = DevelopmentParameters::default();
-    let upright = develop_bytes(&original, &parameters, RenderScale::Preview).unwrap();
+    let upright = develop_bytes_picture(&original, &parameters, RenderScale::Preview).unwrap();
     let (width, height) = upright.image.dimensions();
     let pixels = upright.image.pixels().to_vec();
     // With PHOTOFORGE_UPRIGHT_DUMP set, every picture is left as raw little-endian f32 RGBA
