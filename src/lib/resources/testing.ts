@@ -26,6 +26,8 @@ export function statusFixture(overrides: Partial<ResourceStatus> = {}, budget: P
     diskFreeBytes: 120 * GIB,
     gpuMemory: { measurable: false, reason: 'Video memory is not reliably measurable.' },
     reductionPending: false,
+    // What was chosen is what is in force unless a test says a lower figure is waiting.
+    savedMode: budget.mode ?? { mode: 'automatic' },
     ...overrides
   };
 }

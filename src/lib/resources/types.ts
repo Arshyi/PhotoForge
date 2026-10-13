@@ -55,6 +55,8 @@ export interface ResourceStatus {
   gpuMemory: { measurable: boolean; reason: string };
   /** A lower budget is saved but not yet in force. */
   reductionPending: boolean;
+  /** What the person last chose; the one in force unless a lower budget is waiting. */
+  savedMode: BudgetMode;
 }
 
 export interface ModeChange {

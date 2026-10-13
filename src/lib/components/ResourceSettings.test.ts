@@ -116,6 +116,10 @@ describe('the memory settings', () => {
     await fireEvent.click(within(region).getByRole('button', { name: 'Apply' }));
     expect(await within(region).findByText(/Saved\. The budget stays at 6\.00 GB while this document is open/)).toBeTruthy();
     expect(within(region).getByText(/A lower budget is saved but not in force yet/)).toBeTruthy();
+    // And what is shown is what was chosen, not the automatic budget it is waiting to replace
+    // (found in the packaged window: the radio went back to Automatic after Apply).
+    expect((within(region).getByRole('radio', { name: /Manual/ }) as HTMLInputElement).checked).toBe(true);
+    expect((within(region).getByLabelText('Budget in gigabytes') as HTMLInputElement).value).toBe('2');
   });
 
   it('warns when a manual figure leaves little for Windows, without refusing it', async () => {

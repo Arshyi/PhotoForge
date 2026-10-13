@@ -53,6 +53,10 @@ pub struct ResourceStatus {
     pub gpu_memory: GpuMemory,
     /// Whether a lower budget has been saved but not yet applied.
     pub reduction_pending: bool,
+    /// The budget the person last chose. It is the one in force unless a lower one is waiting for
+    /// the next document (`reduction_pending`); the settings show this one, so a saved choice is
+    /// not displayed as the choice it replaced.
+    pub saved_mode: BudgetMode,
 }
 
 /// Whether a lower budget has been *chosen* and is waiting for the next document.
@@ -90,6 +94,7 @@ fn status(state: &AppState) -> Result<ResourceStatus, AppError> {
             reason: GPU_MEMORY_REASON,
         },
         reduction_pending: reduction_pending(saved, &current, wanted.bytes),
+        saved_mode: saved,
     })
 }
 

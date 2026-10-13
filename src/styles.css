@@ -64,7 +64,9 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 .brand {
-  min-width: 205px;
+  /* It was a fixed 205px, which pushed Settings past the edge of a 1,360px window once the
+     Change Source Region button was present. */
+  flex: none;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -133,13 +135,22 @@ button { -webkit-tap-highlight-color: transparent; }
 
 main { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--professional-panel-width); }
 
+/* The panel is a column of cards and the controls beneath them, and scrolls as one. It was a grid
+   with three explicit rows, which stopped matching its children once the colour and metadata
+   cards were added: the 1fr row landed on the first card, which was given no height and drawn
+   over the next one. */
 aside {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
   border-left: 1px solid var(--line);
   background: var(--surface);
 }
+aside > * { flex: none; }
+aside > .scroll-panel { overflow: visible; }
 
 .inspector-title {
   min-height: 62px;
@@ -162,7 +173,22 @@ aside {
   text-align: center;
 }
 
-.raw-card { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.015); }
+.raw-card { display: grid; gap: 6px; margin: 0 10px 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.015); }
+.raw-card > summary { cursor: pointer; color: var(--ink-soft); font-size: 0.66rem; font-weight: 700; }
+.raw-card p { margin: 0; color: var(--ink-faint); font-size: 0.58rem; line-height: 1.4; }
+.raw-card label { display: grid; gap: 4px; color: var(--ink-soft); font-size: 0.6rem; font-weight: 700; }
+.raw-card select { min-width: 0; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: var(--surface-soft); font: inherit; font-size: 0.6rem; }
+.raw-card label:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+
+/* Text, shapes and smart objects: the fieldset had no styles and was drawn with the browser's. */
+.semantic-tools { min-width: 0; display: grid; gap: 6px; margin: 0 10px 8px; padding: 8px 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.015); }
+.semantic-tools legend { padding: 0 6px; color: var(--ink-soft); font-size: 0.6rem; font-weight: 700; }
+.semantic-tools label { display: grid; gap: 4px; color: var(--ink-soft); font-size: 0.6rem; font-weight: 700; }
+.semantic-tools select, .semantic-tools button { padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: var(--surface-soft); font: inherit; font-size: 0.6rem; }
+.semantic-tools button { cursor: pointer; }
+.semantic-tools button:hover:not(:disabled) { border-color: var(--accent); }
+.semantic-tools button:disabled, .semantic-tools select:disabled { opacity: 0.5; cursor: default; }
+.semantic-tools p { margin: 0; color: var(--ink-faint); font-size: 0.58rem; line-height: 1.4; }
 .raw-heading h3 { margin: 0; font-size: 0.72rem; }
 .raw-heading small { display: block; color: var(--ink-faint); font-size: 0.58rem; line-height: 1.4; }
 .raw-card dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }

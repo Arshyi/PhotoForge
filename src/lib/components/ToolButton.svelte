@@ -26,10 +26,12 @@
     min-height: 38px;
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    /* Tighter than it was (8px and 11px): with Change Source Region in the row the toolbar was
+       29px wider than a 1,360px window and Settings was drawn past its edge. */
+    gap: 6px;
     border: 1px solid transparent;
     border-radius: 9px;
-    padding: 0 11px;
+    padding: 0 9px;
     color: var(--ink-soft);
     background: transparent;
     font: inherit;
