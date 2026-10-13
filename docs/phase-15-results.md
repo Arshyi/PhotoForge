@@ -47,6 +47,18 @@ psd-tools, OpenEXR, resvg), and PSD, TIFF, EXR and SVG were checked against real
 programs' own test corpora (hundreds of them; the per-increment pages give the counts and the
 ones refused).
 
+**Added after the release, from a fresh clone (2026-10-13).** Running the real-file RAW tests with
+the fixtures set, in a checkout that had never been built, showed that
+`a_real_photograph_is_turned_by_each_orientation_value` had been failing since 15.8: its baseline
+was still the uncut sensor (1480 × 986) while the turned side was the cut picture (1440 × 959).
+That is a wrong test, not a product defect: the baseline is now the picture, the ten real-file
+tests pass, and the Canon sample developed with orientations 2 to 8 is identical to Pillow's
+transposes (`tools/upright_oracle.py`, "problems: none"). The gates did not see it because these
+tests skip themselves without `PHOTOFORGE_RAW_FIXTURES`. The same run found three defects in the
+new-machine tooling (the fixture script on Windows PowerShell 5.1, the validation harness never
+offering the region chooser on a new profile, a parameter that `powershell -File` cannot pass);
+all three are fixed and `docs/development.md` now says how to check a new machine.
+
 ## The packaged window
 
 15.0 to 15.8 were verified without the packaged executable. For this release the release exe was

@@ -25,16 +25,23 @@ WebView2 profile under `<work>\validate`.
 ## One-time setup
 
 ```powershell
-npm install
+npm ci
 npm run build
 cd src-tauri; cargo build --release; cd ..          # or: npm run tauri build  (also builds installers)
-.\scripts\fetch-raw-fixtures.ps1                    # three CC0 DNG files into .\raw-fixtures
+.\scripts\fetch-raw-fixtures.ps1                    # three CC0 DNG files into .\raw-fixtures (~75 MB)
 node tools\validate\make_inputs.mjs                 # landscape.dng and a portrait copy, in <work>\validate\inputs
 ```
 
 `<work>` is `.work` in the repository (ignored by git); set `PF_WORK` to put it elsewhere. The
 executable is looked for in `%PF_TARGET_DIR%\release` (or `CARGO_TARGET_DIR`), else
 `src-tauri\target\release`.
+
+**The memory budget.** The RAW scenarios go through the *Choose Region* chooser, which the
+application only offers for a file that does not fit its memory budget. A new profile's automatic
+budget on a machine with plenty of memory fits the 22-megapixel sample whole, so `launch.ps1` writes
+the file the Memory settings write (`<work>\validate\localappdata\PhotoForge\settings\resources.json`,
+a manual budget of 512 MiB) unless the profile already has one. `PF_BUDGET_BYTES` changes the
+amount; `PF_BUDGET_BYTES=0` leaves the profile alone, and the application then picks its own budget.
 
 ## Scenarios
 
@@ -43,7 +50,7 @@ executable is looked for in `%PF_TARGET_DIR%\release` (or `CARGO_TARGET_DIR`), e
 | `drive_formats.ps1` | Opens and exports EXR, SVG and PSD through the real buttons; records each report dialog, the IPC commands and errors. Needs the samples from `tools/fetch_exr_samples.py`, `fetch_svg_samples.py`, `fetch_psd_samples.py`. Then `python tools\validate\check_formats.py` reads the outputs with OpenEXR, resvg and psd-tools. |
 | `nsis_lifecycle.ps1` | Installs the NSIS installer silently, opens a RAW region in the installed app, closes it, uninstalls; reports files, registration, shortcuts and what is left. **Installs to and removes `%LOCALAPPDATA%\PhotoForge`**: do not run it on a machine where you use an installed PhotoForge. |
 | `msi_lifecycle.ps1` | The same for the MSI, which needs UAC elevation twice (install and uninstall): somebody has to click Yes. |
-| `close_repro.ps1` | Opens a portrait region with the render commands made to fail and asks the window to close, repeatedly; prints `close.log` (the application's own record of close requests). |
+| `close_repro.ps1` | Opens a portrait region with the render commands made to fail and asks the window to close, repeatedly; prints `close.log` (the application's own record of close requests). `-Runs n`; `-NoInject` for a healthy document (nothing made to fail); `-Observe` also records what the page saw. |
 
 The helper files `listen_close.js`, `close_state.js` and `aside_layout.js` are small page snippets
 the scenarios (and you, with `node cdp.mjs evalfile`) use.

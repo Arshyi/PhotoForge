@@ -5,11 +5,11 @@
 #
 # -Runs         how many launches
 # -GapSeconds   idle time between the document settling and the close request
-# -Inject:$false  do not make the render commands fail (a healthy document)
+# -NoInject     do not make the render commands fail (a healthy document)
 # -Observe      also register a close-requested listener in the page, and print what it saw
 param(
     [int]$Runs = 4,
-    [bool]$Inject = $true,
+    [switch]$NoInject,
     [int]$SettleSeconds = 12,
     [int]$GapSeconds = 0,
     [switch]$Observe
@@ -26,7 +26,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     Start-Sleep -Seconds 8
     Push-Location $PfValidate
     node $PfCdp install | Out-Null
-    if ($Inject) { node $PfCdp eval $injector | Out-Null }
+    if (-not $NoInject) { node $PfCdp eval $injector | Out-Null }
     if ($Observe) { node $PfCdp evalfile (Join-Path $PfTools 'listen_close.js') | Out-Null }
     node $PfCdp eval "window.__pf.nextOpen = '$inputs/portrait.dng'; 1" | Out-Null
     node $PfCdp clickText Open | Out-Null; Start-Sleep -Seconds 4
@@ -45,7 +45,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         Stop-Process -Id $procId -Force
     }
     Pop-Location
-    "run ${run}: inject=$Inject sent=$sent exited=$exited after ~$([math]::Round($i*0.5,1))s $detail"
+    "run ${run}: inject=$(-not $NoInject) sent=$sent exited=$exited after ~$([math]::Round($i*0.5,1))s $detail"
     Start-Sleep -Seconds 2
 }
 $log = Join-Path $PfValidate 'localappdata\PhotoForge\diagnostics\close.log'

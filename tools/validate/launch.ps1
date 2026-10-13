@@ -15,6 +15,18 @@ if (-not (Test-Path $Exe)) { throw "No executable at $Exe. Build one: npm run bu
 $data = Join-Path $PfValidate 'localappdata'
 $profileDir = Join-Path $PfValidate 'webview'
 New-Item -ItemType Directory -Force $data, $profileDir | Out-Null
+# The RAW scenarios go through the region chooser, which is only offered for a file that does not
+# fit the memory budget. A new profile's automatic budget on a roomy machine fits the 22-megapixel
+# sample whole, so (unless the profile already has one) this writes the file the Memory settings
+# write: a manual budget, 512 MiB by default. PF_BUDGET_BYTES changes it; 0 leaves the profile alone.
+$settingsDir = Join-Path $data 'PhotoForge\settings'
+$resourcesFile = Join-Path $settingsDir 'resources.json'
+if ($env:PF_BUDGET_BYTES -ne '0' -and -not (Test-Path $resourcesFile)) {
+    $budgetBytes = if ($env:PF_BUDGET_BYTES) { [long]$env:PF_BUDGET_BYTES } else { 536870912 }
+    New-Item -ItemType Directory -Force $settingsDir | Out-Null
+    $json = '{"version":1,"budget":{"mode":"manual","bytes":' + $budgetBytes + '}}'
+    [System.IO.File]::WriteAllText($resourcesFile, $json, (New-Object System.Text.UTF8Encoding $false))
+}
 # The child inherits these; they are put back at once so the rest of the calling script (an
 # installer run, say) is not affected by them.
 $saved = @{}

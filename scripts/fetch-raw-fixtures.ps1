@@ -18,8 +18,8 @@
     unencumbered.
 
 .PARAMETER Destination
-    Where to put the files. Defaults to a raw-fixtures directory beside the
-    repository, which is git-ignored.
+    Where to put the files. Defaults to raw-fixtures in the repository root,
+    which is git-ignored.
 
 .EXAMPLE
     ./scripts/fetch-raw-fixtures.ps1
@@ -28,10 +28,15 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination = (Join-Path (Join-Path $PSScriptRoot "..") "raw-fixtures")
+    [string]$Destination = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Not a parameter default: Windows PowerShell 5.1 leaves $PSScriptRoot empty there.
+if (-not $Destination) {
+    $Destination = Join-Path (Join-Path $PSScriptRoot "..") "raw-fixtures"
+}
 
 # Canon EOS 5D Mark III, written by Adobe DNG Converter in three encodings of
 # the same photograph. The uncompressed and lossless pair is what proves the

@@ -103,6 +103,11 @@ names a directory:
 Do not set one of these to an empty string: an empty value counts as "set" and the test then fails
 (unset it instead).
 
+Because they skip, **the gates cannot tell you a real-file test is broken**: run them with the
+variables set whenever a decoder, the picture geometry or a writer changes. One orientation test
+was wrong from 15.8 to 0.15.0 (its baseline was still the uncut sensor) and was only found by
+running the file on a fresh clone.
+
 ## How the tests are checked
 
 * **Mutation checks.** A new test is shown to fail for the right reason by breaking the code it
@@ -115,6 +120,41 @@ Do not set one of these to an empty string: an empty value counts as "set" and t
   input, to see what tests cannot (permissions, the real WebView2, the installers, the window
   closing): `tools/validate/`. **Run it before calling a phase done**: it found three defects in
   15.9 that nothing else had.
+
+## Checking a new machine
+
+After the first build, this is the shortest path that shows the checkout works end to end. It is
+what was run, from a fresh clone in an empty directory with an empty build output, to check this
+page:
+
+```powershell
+npm ci; npm run build; npx tsc --noEmit; npm run check; npx vitest run
+cd src-tauri; cargo build --release --locked; cd ..       # 9 min 18 s cold, on the development machine
+.\scripts\fetch-raw-fixtures.ps1                           # ~75 MB, about two minutes
+node tools\validate\make_inputs.mjs
+.\tools\validate\close_repro.ps1 -Runs 2 -NoInject -Observe
+$env:PHOTOFORGE_RAW_FIXTURES = "$PWD\raw-fixtures"
+$env:PHOTOFORGE_UPRIGHT_DUMP = "$PWD\.work\upright"        # the test leaves its pictures here
+bash scripts/cargo-ext.sh test --release --locked --test raw_real_files   # ~3 min after the build
+python -m venv .work\venv; .work\venv\Scripts\pip install -r tools\requirements.txt
+.work\venv\Scripts\python -I tools\upright_oracle.py .work\upright
+```
+
+(`PF_TARGET_DIR` and `PF_WORK` move the build output and the scratch space; set them in the same
+shell first if the repository is on a small drive.) What to expect:
+
+* the frontend: 523 files, 0 errors, 0 warnings in `npm run check`; 1,389 tests in 93 files, plus the
+  one known unhandled error;
+* `close_repro.ps1`: each run opens a RAW region (the harness writes a 512 MiB manual memory budget
+  so that the region chooser is offered) and the window exits at once on a close request; `close.log`
+  shows `close requested`, `the page decided: close`, `the window was destroyed` for each run. An
+  `ERROR no visible control with text` line means the chooser was not offered (the file fitted the
+  budget) and nothing past that was exercised;
+* the real-file tests: `10 passed`. A test that finds no fixtures **skips and passes**, so look for
+  `skipped:` in the output if the variable might not name a directory that exists;
+* the oracle: `orientation 2` to `8` each `identical to Pillow's transpose` and `problems: none`:
+  the developed Canon sample, turned by each orientation value, is what a program that is not
+  PhotoForge makes of it.
 
 ## Packaging and releasing
 
