@@ -39,6 +39,7 @@ try {
     }
     Assert-Policy ($properties.ProductVersion -eq $ExpectedVersion) 'Unexpected product version.'
     Assert-Policy ($properties.ALLUSERS -eq '1') 'ALLUSERS must be 1.'
+    Assert-Policy (-not $properties.ContainsKey('AUTOLAUNCHAPP')) 'Silent install must not set auto-launch, even to 0.'
     Assert-Policy ($properties.UpgradeCode -ieq '{DA34C5F7-E5BB-583B-93F8-1F4E4065DC14}') 'The existing upgrade identity changed.'
     Assert-Policy (@($properties.SecureCustomProperties -split ';') -contains 'INSTALLDIR') 'INSTALLDIR is not secure.'
 
@@ -56,13 +57,23 @@ try {
     Assert-Policy ($installDirectory.Count -eq 1 -and $installDirectory[0].Parent -eq 'ProgramFiles64Folder') 'The x64 install default must be Program Files, not a user profile.'
     $registry = @(Read-Rows 'SELECT `Root`, `Key`, `Name`, `Component_` FROM `Registry`' @('Root','Key','Name','Component'))
     $productRegistry = @($registry | Where-Object Key -eq 'Software\photoforge\PhotoForge')
-    Assert-Policy ($productRegistry.Count -ge 4) 'Expected machine product/shortcut registration is missing.'
+    Assert-Policy ($productRegistry.Count -eq 2) 'Expected machine product/uninstall registration is missing or profile shortcut dummy keys remain.'
     Assert-Policy (@($productRegistry | Where-Object Root -ne '2').Count -eq 0) 'Product registration writes the current-user hive.'
     $components = @(Read-Rows 'SELECT `Component`, `Attributes` FROM `Component`' @('Id','Attributes'))
     foreach ($entry in $productRegistry) {
         $component = @($components | Where-Object Id -eq $entry.Component)
         Assert-Policy ($component.Count -eq 1 -and (([int]$component[0].Attributes -band 256) -ne 0)) "Wrong registry view for component $($entry.Component)."
     }
+    $shortcuts = @(Read-Rows 'SELECT `Shortcut`, `Directory_`, `Component_`, `Target` FROM `Shortcut`' @('Id','Directory','Component','Target'))
+    foreach ($shortcutId in 'ApplicationDesktopShortcut', 'ApplicationStartMenuShortcut') {
+        $shortcut = @($shortcuts | Where-Object Id -eq $shortcutId)
+        $expectedDirectory = if ($shortcutId -eq 'ApplicationDesktopShortcut') { 'DesktopFolder' } else { 'ApplicationProgramsFolder' }
+        Assert-Policy ($shortcut.Count -eq 1 -and $shortcut[0].Component -eq 'Path' -and
+            $shortcut[0].Target -eq 'MainProgram' -and $shortcut[0].Directory -eq $expectedDirectory) 'Machine app shortcuts must advertise the required file feature.'
+    }
+    $featureComponents = @(Read-Rows 'SELECT `Feature_`, `Component_` FROM `FeatureComponents`' @('Feature','Component'))
+    $executableFeatures = @($featureComponents | Where-Object Component -eq 'Path')
+    Assert-Policy ($executableFeatures.Count -eq 1 -and $executableFeatures[0].Feature -eq 'MainProgram') 'The executable must be installed by the required feature, never an optional shortcut/PATH feature.'
     $upgrades = @(Read-Rows 'SELECT `UpgradeCode`, `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`' @('Code','Maximum','Attributes','Property'))
     $legacy = @($upgrades | Where-Object Property -eq 'PF_LEGACY_MSI')
     Assert-Policy ($legacy.Count -eq 1 -and $legacy[0].Maximum -eq '0.15.1' -and

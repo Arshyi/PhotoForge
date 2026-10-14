@@ -17,6 +17,8 @@ export function validateInstallerPolicy(template, config) {
   requirePolicy(config.bundle.windows.nsis?.installMode === 'currentUser', 'NSIS must remain per-user.');
   requirePolicy(config.bundle.resources?.['installer/Tauri-MIT.txt'] === 'licenses/Tauri-MIT.txt', 'The upstream template notice must be bundled separately.');
   requirePolicy(attributes(template.match(/<Package\b[^>]*>/)?.[0] || '').InstallScope === 'perMachine', 'The MSI must be per-machine.');
+  const autoLaunch = attributes(template.match(/<Property\b[^>]*Id="AUTOLAUNCHAPP"[^>]*>/)?.[0] || '');
+  requirePolicy(autoLaunch.Secure === 'yes' && !Object.hasOwn(autoLaunch, 'Value'), 'Silent install must leave auto-launch unset; even Value="0" is true in MSI conditions.');
   const property = template.match(/<Property\b([^>]*\bId="INSTALLDIR"[^>]*)>([\s\S]*?)<\/Property>/);
   requirePolicy(property && attributes(property[1]).Secure === 'yes', 'INSTALLDIR must be a secure property.');
   const searches = [...property[2].matchAll(/<RegistrySearch\b([^>]*)\/>/g)].map((m) => attributes(m[1]));
@@ -25,11 +27,19 @@ export function validateInstallerPolicy(template, config) {
   const productState = template.slice(0, template.indexOf('{{#if install_webview}}'));
   requirePolicy(!/<Registry(?:Search|Key|Value)\b[^>]*Root="HKCU"/.test(productState), 'MSI product state must never read/write the NSIS user hive.');
   requirePolicy(!/<RemoveFolder\b[^>]*Id="DesktopFolder"/.test(template), 'Uninstall must not remove the shared Desktop directory.');
-  for (const id of ['RegistryEntries', 'ApplicationShortcutDesktop', 'ApplicationShortcut', 'CMP_UninstallShortcut']) {
+  for (const id of ['RegistryEntries', 'CMP_UninstallShortcut']) {
     const component = template.match(new RegExp(`<Component\\b([^>]*\\bId="${id}"[^>]*)>([\\s\\S]*?)<\\/Component>`));
     requirePolicy(component && attributes(component[1]).Win64 === '$(var.Win64)', `${id} must use the native registry view.`);
     requirePolicy(/<Registry(?:Key|Value)\b[^>]*Root="HKLM"/.test(component[2]), `${id} must have a machine-hive registry key path.`);
   }
+  const fileComponent = template.match(/<Component\b([^>]*\bId="Path"[^>]*)>([\s\S]*?)<\/Component>/);
+  requirePolicy(fileComponent && attributes(fileComponent[1]).Win64 === '$(var.Win64)', 'The application file component must use the native registry view.');
+  requirePolicy(/<File\b[^>]*Id="Path"[^>]*KeyPath="yes"/.test(fileComponent[2]), 'The required application file must be the shortcut key path.');
+  for (const [id, directory] of [['ApplicationDesktopShortcut', 'DesktopFolder'], ['ApplicationStartMenuShortcut', 'ApplicationProgramsFolder']]) {
+    const shortcut = attributes(fileComponent[2].match(new RegExp(`<Shortcut\\b[^>]*Id="${id}"[^>]*>`))?.[0] || '');
+    requirePolicy(shortcut.Advertise === 'yes' && shortcut.Directory === directory && !shortcut.Target, `${id} must be an advertised shortcut owned by the machine file component.`);
+  }
+  requirePolicy([...template.matchAll(/<ComponentRef\b[^>]*Id="Path"/g)].length === 1 && /<ComponentRef Id="RegistryEntries"\s*\/>\s*<ComponentRef Id="Path"\s*\/>/.test(template), 'The executable must belong exactly once to the required MainProgram feature.');
   const legacy = [...template.matchAll(/<UpgradeVersion\b([^>]*)\/>/g)].map((m) => attributes(m[1])).find((a) => a.Property === 'PF_LEGACY_MSI');
   requirePolicy(legacy?.OnlyDetect === 'yes' && legacy.Maximum === '0.15.1' && legacy.IncludeMaximum === 'yes', 'Unsafe legacy MSI versions must be detected, not automatically removed.');
   requirePolicy(/<Condition\b[^>]*>[\s\S]*?Installed OR NOT PF_LEGACY_MSI[\s\S]*?<\/Condition>/.test(template), 'Legacy migration needs an explicit launch-condition refusal.');

@@ -73,8 +73,9 @@
         <WixVariable Id="WixUILicenseRtf" Value="{{license}}" />
         {{/if}}
 
-        <Icon Id="ProductIcon" SourceFile="{{icon_path}}"/>
-        <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+        <!-- Advertised shortcut icon identifiers match the key file's .exe extension. -->
+        <Icon Id="ProductIcon.exe" SourceFile="{{icon_path}}"/>
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon.exe" />
         <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />      <!-- Remove repair -->
         <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
 
@@ -118,12 +119,7 @@
         <UIRef Id="WixUI_InstallDir" />
 
         <Directory Id="TARGETDIR" Name="SourceDir">
-            <Directory Id="DesktopFolder" Name="Desktop">
-                <Component Id="ApplicationShortcutDesktop" Guid="*" Win64="$(var.Win64)">
-                    <Shortcut Id="ApplicationDesktopShortcut" Name="{{product_name}}" Description="Runs {{product_name}}" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
-                    <RegistryValue Root="HKLM" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
-                </Component>
-            </Directory>
+            <Directory Id="DesktopFolder" Name="Desktop" />
             <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
                 <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
             </Directory>
@@ -152,7 +148,19 @@
                 {{/each~}}
             </Component>
             <Component Id="Path" Guid="{{path_component_guid}}" Win64="$(var.Win64)">
-                <File Id="Path" Source="{{main_binary_path}}" KeyPath="yes" Checksum="yes"/>
+                <File Id="Path" Source="{{main_binary_path}}" KeyPath="yes" Checksum="yes">
+                    <!-- Advertised shortcuts belong to the required machine file component,
+                         not profile-directory components with incompatible HKLM key paths. -->
+                    <Shortcut Id="ApplicationDesktopShortcut" Directory="DesktopFolder"
+                              Name="{{product_name}}" Description="Runs {{product_name}}"
+                              Advertise="yes" WorkingDirectory="INSTALLDIR" />
+                    <Shortcut Id="ApplicationStartMenuShortcut" Directory="ApplicationProgramsFolder"
+                              Name="{{product_name}}" Description="Runs {{product_name}}"
+                              Advertise="yes" Icon="ProductIcon.exe" WorkingDirectory="INSTALLDIR">
+                        <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
+                    </Shortcut>
+                </File>
+                <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
                 {{#each file_associations as |association| ~}}
                 {{#each association.ext as |ext| ~}}
                 <ProgId Id="{{../../product_name}}.{{ext}}" Advertise="yes" Description="{{association.description}}">
@@ -200,21 +208,6 @@
             </Component>
         </DirectoryRef>
 
-        <DirectoryRef Id="ApplicationProgramsFolder">
-            <Component Id="ApplicationShortcut" Guid="*" Win64="$(var.Win64)">
-                <Shortcut Id="ApplicationStartMenuShortcut"
-                    Name="{{product_name}}"
-                    Description="Runs {{product_name}}"
-                    Target="[!Path]"
-                    Icon="ProductIcon"
-                    WorkingDirectory="INSTALLDIR">
-                    <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
-                </Shortcut>
-                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
-                <RegistryValue Root="HKLM" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
-           </Component>
-        </DirectoryRef>
-
         {{#each merge_modules as |msm| ~}}
         <DirectoryRef Id="TARGETDIR">
             <Merge Id="{{ msm.name }}" SourceFile="{{ msm.path }}" DiskId="1" Language="!(loc.TauriLanguage)" />
@@ -236,6 +229,8 @@
                 Absent="disallow">
 
             <ComponentRef Id="RegistryEntries"/>
+            <ComponentRef Id="Path"/>
+            <ComponentRef Id="CMP_UninstallShortcut" />
 
             {{#each resource_file_ids as |resource_file_id| ~}}
                 <ComponentRef Id="{{ resource_file_id }}"/>
@@ -247,22 +242,12 @@
                 <ComponentRef Id="UpdateTaskUninstaller" />
             {{/if}}
 
-            <Feature Id="ShortcutsFeature"
-                Title="Shortcuts"
-                Level="1">
-                <ComponentRef Id="Path"/>
-                <ComponentRef Id="CMP_UninstallShortcut" />
-                <ComponentRef Id="ApplicationShortcut" />
-                <ComponentRef Id="ApplicationShortcutDesktop" />
-            </Feature>
-
             <Feature
                 Id="Environment"
                 Title="PATH Environment Variable"
                 Description="!(loc.PathEnvVarFeature)"
                 Level="1"
                 Absent="allow">
-            <ComponentRef Id="Path"/>
             {{#each binaries as |bin| ~}}
             <ComponentRef Id="{{ bin.id }}"/>
             {{/each~}}

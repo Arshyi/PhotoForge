@@ -81,7 +81,8 @@ function Set-Installed {
         (Join-Path $machinePath 'licenses\Tauri-MIT.txt')) { $script:paths[$path] = $true }
 }
 
-Test-Guard 'pristine preflight invokes no elevation' {
+Test-Guard 'pristine preflight preserves a Desktop project folder and invokes no elevation' {
+    $script:paths[(Join-Path ([Environment]::GetFolderPath('Desktop')) 'PhotoForge')] = $true
     Assert-Pristine
     if ($script:launchCalls -ne 0) { throw 'Preflight elevated.' }
 }
@@ -177,6 +178,8 @@ Test-Guard 'nonzero MSI exit is not a pass' {
     if ($state.lastExitCode -ne 1603 -or $null -ne $state.msiexecPid) { throw 'Failure exit was lost.' }
 }
 Test-Guard 'zero MSI exit is successful but not launch/GUI proof' {
+    $installStrings = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.Value -like '/i * /qn *' }, $true))
+    if ($installStrings.Count -ne 1 -or $installStrings[0].Value -match 'AUTOLAUNCHAPP=') { throw 'Silent installation must not set a truthy auto-launch property.' }
     Elevate-Msi 'mock arguments' 'install'
     if ($state.lastExitCode -ne 0 -or $state.restartRequired) { throw 'Incorrect zero-exit handling.' }
 }

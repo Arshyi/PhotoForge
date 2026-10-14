@@ -191,7 +191,7 @@ python -m venv .work\venv; .work\venv\Scripts\pip install -r tools\requirements.
 shell first if the repository is on a small drive.) What to expect:
 
 * the frontend: 0 errors and 0 warnings in `npm run check`; 1,393 tests in 94 files with no
-  unhandled errors; 29 storage/profile/gate/installer-source regressions in
+  unhandled errors; 30 storage/profile/gate/installer-source regressions in
   `npm run test:tools`, plus 26 mocked MSI harness guards in
   `tools/validate/msi_lifecycle.test.ps1` (no real installation or UAC), and nine
   serialization/integrity checks in `tools/clipboard_backup.test.ps1` (no clipboard access);

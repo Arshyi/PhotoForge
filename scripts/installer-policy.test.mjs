@@ -22,7 +22,7 @@ test('a shortcut that writes user state is caught', () => {
   assert.throws(() => validateInstallerPolicy(mutant, config), /user hive/);
 });
 test('shared Desktop directory removal is caught', () => {
-  const mutant = template.replace('<Directory Id="DesktopFolder" Name="Desktop">', '<Directory Id="DesktopFolder" Name="Desktop"><RemoveFolder Id="DesktopFolder" On="uninstall" />');
+  const mutant = template.replace('<Directory Id="DesktopFolder" Name="Desktop" />', '<Directory Id="DesktopFolder" Name="Desktop"><RemoveFolder Id="DesktopFolder" On="uninstall" /></Directory>');
   assert.throws(() => validateInstallerPolicy(mutant, config), /shared Desktop/);
 });
 test('automatic unsafe legacy migration or loss of its refusal is caught', () => {
@@ -30,6 +30,7 @@ test('automatic unsafe legacy migration or loss of its refusal is caught', () =>
   assert.throws(() => validateInstallerPolicy(template.replace('Installed OR NOT PF_LEGACY_MSI', '1'), config), /launch-condition/);
 });
 test('accidental upgrade-code, installer-scope or notice changes are caught', () => {
+  assert.throws(() => validateInstallerPolicy(template.replace('Id="AUTOLAUNCHAPP" Secure="yes"', 'Id="AUTOLAUNCHAPP" Secure="yes" Value="0"'), config), /auto-launch/);
   for (const mutate of [
     (copy) => { copy.bundle.windows.wix.upgradeCode = '00000000-0000-0000-0000-000000000000'; },
     (copy) => { copy.bundle.windows.nsis.installMode = 'perMachine'; },
@@ -39,4 +40,9 @@ test('accidental upgrade-code, installer-scope or notice changes are caught', ()
     const copy = structuredClone(config); mutate(copy);
     assert.throws(() => validateInstallerPolicy(template, copy));
   }
+});
+test('machine shortcuts require advertisement and one required executable feature', () => {
+  assert.throws(() => validateInstallerPolicy(template.replace('Advertise="yes"', 'Advertise="no"'), config), /advertised shortcut/);
+  assert.throws(() => validateInstallerPolicy(template.replace('<ComponentRef Id="Path"/>', ''), config), /required MainProgram/);
+  assert.throws(() => validateInstallerPolicy(template.replace('<ComponentRef Id="Path"/>', '<ComponentRef Id="Path"/><ComponentRef Id="Path"/>'), config), /required MainProgram/);
 });

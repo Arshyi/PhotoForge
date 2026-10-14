@@ -13,7 +13,7 @@ This is not a released version. The published 0.15.1 artifacts remain unchanged.
 - Hosted CI uses the same compact helper and storage checks, and verifies a tiny actual
   Rust fixture for debug assertions and overflow checks. PR pushes do not also launch a
   duplicate branch-push workflow; main and PR checks remain enabled.
-- 29 tool regressions passed locally. Two actual compact-profile Rust probe tests
+- 30 tool regressions cover the storage/profile/gate/template policies. Two actual compact-profile Rust probe tests
   passed, confirming assertions and overflow checks. The unchanged frontend passed
   1,393 tests, TypeScript, Svelte (zero errors/warnings), and production build before
   the version bump; final-head hosted and product-matrix checks are still pending.
@@ -32,7 +32,7 @@ repository documents. The cleanup was not a source-code change and is not repeat
   removal of the old MSI, not silent reuse/removal of a person's existing directory.
 - Future packages refuse downgrades. The upstream template's MIT notice is retained
   and bundled separately; it is not an overall PhotoForge license.
-- Seven source-policy regressions catch hive/view/scope/upgrade-identity, shared-Desktop
+- Eight source-policy regressions catch hive/view/scope/upgrade-identity, shared-Desktop
   removal, and unsafe migration changes. This is source lint, not built-MSI or native
   lifecycle proof.
 - The old MSI lifecycle harness was replaced with a read-only default preflight and
@@ -44,6 +44,14 @@ repository documents. The cleanup was not a source-code change and is not repeat
 - 26 isolated harness regressions passed in Windows PowerShell 5.1 and PowerShell 7.
   They mock registry, process, filesystem and UAC boundaries; they do not prove an
   actual elevated install or GUI launch. The harness keeps those claims explicitly false.
+- Actual WiX validation rejected the initial machine-registry shortcut-component design
+  (ICE38/43/57). Both app shortcuts now advertise the required application file component,
+  with matching icon identity (ICE50), and the executable belongs only to the required
+  MainProgram feature. The MSI links with validation enabled and passes built-table policy
+  inspection. Three retained upstream warnings (ICE03/40/61) are recorded, not hidden.
+- Silent lifecycle tests leave AUTOLAUNCHAPP unset: assigning the string 0 would be
+  truthy in MSI conditions and could launch outside the isolated test profile. Source,
+  built-table and harness regressions protect this boundary.
 - Clipboard-backup restoration now uses a valid message-only window owner and checks
   failed writes instead of ignoring them. Existing backups cannot be overwritten;
   malformed, redirected, truncated or checksum-mismatched backup data is refused before
@@ -51,8 +59,8 @@ repository documents. The cleanup was not a source-code change and is not repeat
   without touching the clipboard. A real canary round trip then passed, restoring all
   seven original formats byte-for-byte; private backup contents are not committed.
 
-Built MSI table inspection, installer lifecycle, native display-scaling and
-cross-application verification are pending. The upstream WebView2 prerequisite handling
+Actual elevated installer lifecycle, native display-scaling and cross-application
+verification are pending. The upstream WebView2 prerequisite handling
 is retained and is not proof of runtime availability for every Windows account.
 
 The user chose to leave the project license unset for now and confirmed that no trusted

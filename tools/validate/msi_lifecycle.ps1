@@ -71,6 +71,10 @@ function Assert-Pristine {
     foreach ($folder in @([Environment]::GetFolderPath('Desktop'), $commonDesktop,
         [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))) {
         Assert-Run (-not (Test-Path -LiteralPath (Join-Path $folder 'PhotoForge.lnk'))) "Existing PhotoForge shortcut in $folder will not be replaced."
+    }
+    # The Desktop may contain a project directory named photoforge (this checkout).
+    # Only Start-menu folders are installer-owned directories; never target that project.
+    foreach ($folder in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms'))) {
         Assert-Run (-not (Test-Path -LiteralPath (Join-Path $folder 'PhotoForge'))) "Existing PhotoForge shortcut directory in $folder will not be replaced."
     }
     # A stale NSIS InstallDir is allowed, but never an executable at that directory.
@@ -203,7 +207,9 @@ try {
     switch ($Action) {
         'Install' {
             $logPath = Join-Path $RunDirectory 'install.log'
-            $arguments = '/i "{0}" /qn /norestart AUTOLAUNCHAPP=0 WIXUI_EXITDIALOGOPTIONALCHECKBOX=0 /l*v "{1}"' -f $Msi, $logPath
+            # Do not set AUTOLAUNCHAPP: in MSI conditions even the string "0" is true.
+            # The audited template leaves that property unset; /qn shows no exit dialog.
+            $arguments = '/i "{0}" /qn /norestart /l*v "{1}"' -f $Msi, $logPath
             Elevate-Msi $arguments 'install'
             Assert-Installed
             $state.installedVerified = $true
