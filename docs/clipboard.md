@@ -115,6 +115,13 @@ reason it is sound.
   are read as the picture, `PNG` preferred.
 * **In the interface** (10 + 5 + 4): the keys, the palette, what is sent (the layer, the selection,
   the edits), the sentences, a failure, a text field keeping its own keys.
+* **In the packaged window** (`tools/validate/clipboard_window.ps1`, 14 checks, real key events, the
+  clipboard read and written from outside with Pillow; [results](phase-15-10-results.md)): Ctrl+C
+  puts the layer on the clipboard trimmed to its content, the `PNG` form and `CF_DIBV5` each equal
+  to the picture pixel for pixel, with the cloud opt-out, replacing text that was there;
+  Ctrl+Shift+C the whole canvas; Ctrl+V places a picture another program copied (`PNG` with
+  alpha, or a lone 24-bit `CF_DIB`) as a layer that copies back out as exactly that picture, and
+  says so in a sentence for text; the palette's "New document from clipboard" opens it.
 * **Mutation checks**: 15 breakages (the alpha dropped, rows not flipped, the mask table not
   skipped, an unfilled alpha obeyed, each size limit removed, the palette ignored, the selection's
   alpha or bounds ignored, a layer not trimmed, the PNG or the DIBV5 not written, PNG ignored on
@@ -132,7 +139,8 @@ reason it is sound.
   soft edges, and the `PNG` form (read first) is unambiguous.
 * A clipboard held by a program that **delays rendering** (formats promised and produced on
   request) was not tried with a program that does it slowly.
-* The interface in a real window.
+* The keys while the caret is in a text field, in a real window (the component tests cover it).
+* Another program's `CF_HDROP`, HTML or OLE objects on the clipboard at paste time.
 
 ## Not done
 

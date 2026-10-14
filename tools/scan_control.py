@@ -6,18 +6,18 @@ import subprocess
 import sys
 
 root = str(REPO_PATH)
-files = subprocess.run(['git', 'ls-files', '-m', '-o', '--exclude-standard'], cwd=root, capture_output=True, text=True).stdout.split('\n')
-files += subprocess.run(['git', 'ls-files'], cwd=root, capture_output=True, text=True).stdout.split('\n')
+files = subprocess.run(['git', 'ls-files', '-m', '-o', '--exclude-standard'], cwd=root, capture_output=True, text=True, check=True).stdout.split('\n')
+files += subprocess.run(['git', 'ls-files'], cwd=root, capture_output=True, text=True, check=True).stdout.split('\n')
 seen = set()
 bad = 0
 for f in files:
     if not f or f in seen:
         continue
     seen.add(f)
-    if not f.endswith(('.rs', '.ts', '.svelte', '.md', '.json', '.js', '.toml', '.html', '.css')):
+    if not f.endswith(('.rs', '.ts', '.svelte', '.md', '.json', '.js', '.mjs', '.toml', '.html', '.css', '.py', '.sh', '.ps1', '.yml', '.yaml')):
         continue
     try:
-        data = open(root + '\\' + f, 'rb').read()
+        data = open(os.path.join(root, f), 'rb').read()
     except OSError:
         continue
     odd = [(i, b) for i, b in enumerate(data) if b < 32 and b not in (9, 10, 13)]
@@ -26,3 +26,4 @@ for f in files:
         i, b = odd[0]
         print(f, len(odd), 'first at', i, hex(b), repr(data[max(0, i - 30):i + 30]))
 print('files scanned', len(seen), 'with control characters', bad)
+sys.exit(1 if bad else 0)

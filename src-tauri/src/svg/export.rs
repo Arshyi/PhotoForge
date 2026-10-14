@@ -239,7 +239,13 @@ impl Writer<'_> {
     }
 
     fn group(&mut self, layer: &Layer, children: &[Layer], isolated: bool, depth: usize) {
-        let attributes = self.layer_attributes(layer);
+        let mut attributes = self.layer_attributes(layer);
+        // A plain `<g>` is not isolated in SVG: what is blended inside it blends with what is
+        // behind it. An isolated group of PhotoForge's is written as one. A group that has an
+        // opacity or a blend mode is isolated by SVG's own rules and needs nothing said.
+        if isolated && layer.opacity >= 1.0 && css_blend(layer.blend_mode).is_none() {
+            attributes.push_str(" style=\"isolation:isolate\"");
+        }
         if !isolated && (layer.opacity < 1.0 || layer.blend_mode != BlendMode::Normal) {
             self.report.push(
                 ReportKind::Approximated,
@@ -756,6 +762,113 @@ mod tests {
         assert!(export.text.contains("mix-blend-mode:multiply"));
         assert_eq!(export.report.groups_written, 1);
         assert_eq!(export.report.layers_written, 1);
+    }
+
+    /// With `PHOTOFORGE_SVG_DUMP` set to a directory, leaves each case as `<name>.svg` and
+    /// `<name>.png` (PhotoForge's own render of the same document) for `tools/svg_compare.py`,
+    /// which renders the SVG with resvg, a renderer that is not this program, and compares.
+    #[test]
+    fn the_exported_svgs_can_be_left_for_an_independent_renderer() {
+        use crate::layers::{render_document_typed, LayerPixelStore, RenderOptions};
+        let Some(directory) = std::env::var_os("PHOTOFORGE_SVG_DUMP") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let blue_over_red = |isolated: bool| {
+            let base = shape("Base", rect());
+            let mut over = shape(
+                "Over",
+                ShapeGeometry::Rectangle {
+                    x: 50.0,
+                    y: 30.0,
+                    width: 100.0,
+                    height: 50.0,
+                    corner_radius: 0.0,
+                },
+            );
+            if let LayerContent::Shape { shape } = &mut over.content {
+                shape.fill = Some(ShapeColor::new(0.0, 0.0, 1.0, 1.0));
+            }
+            over.blend_mode = BlendMode::Multiply;
+            let group = new_layer(
+                "g",
+                "Folder",
+                LayerContent::Group {
+                    children: vec![over],
+                    isolated,
+                },
+                "t",
+            );
+            let mut document = document(vec![base, group]);
+            // shape layers live in a high-precision document
+            document.precision = crate::pixel::DocumentPrecision::LinearSrgbF32;
+            document
+        };
+        for (name, document) in [
+            // Multiply inside an isolated group meets only what is in the group: it stays blue.
+            ("group-isolated-multiply", blue_over_red(true)),
+            // Not isolated, it meets the red behind the group: the overlap is black.
+            ("group-pass-through-multiply", blue_over_red(false)),
+        ] {
+            let export = export_svg(&document, &SvgOptions::default()).unwrap();
+            std::fs::write(directory.join(format!("{name}.svg")), &export.text).unwrap();
+            let mut store = LayerPixelStore::default();
+            store
+                .reset(document.canvas_width, document.canvas_height)
+                .unwrap();
+            let resolved = store
+                .resolve(&document.referenced_pixel_ids(), false)
+                .unwrap();
+            let image = render_document_typed(&document, &resolved, RenderOptions::default())
+                .unwrap()
+                .encoded8()
+                .as_ref()
+                .clone();
+            image.save(directory.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_isolated_group_says_so_and_a_pass_through_group_does_not() {
+        let group = |isolated: bool, opacity: f32, blend: BlendMode| {
+            let mut inner = shape("Inner", rect());
+            inner.blend_mode = BlendMode::Multiply;
+            let mut layer = new_layer(
+                "g",
+                "Folder",
+                LayerContent::Group {
+                    children: vec![inner],
+                    isolated,
+                },
+                "t",
+            );
+            layer.opacity = opacity;
+            layer.blend_mode = blend;
+            export_svg(&document(vec![layer]), &SvgOptions::default())
+                .unwrap()
+                .text
+        };
+        // Isolated, plain: what is blended inside it must not reach what is behind it.
+        let text = group(true, 1.0, BlendMode::Normal);
+        assert!(text.contains("<g style=\"isolation:isolate\">"), "{text}");
+        // Not isolated: a plain <g>, which SVG does not isolate.
+        let text = group(false, 1.0, BlendMode::Normal);
+        assert!(
+            text.contains("<g>") && !text.contains("isolation"),
+            "{text}"
+        );
+        // An opacity or a blend mode isolates in SVG's own rules; nothing more is written.
+        let text = group(true, 0.5, BlendMode::Normal);
+        assert!(
+            text.contains("<g opacity=\"0.5\">") && !text.contains("isolation"),
+            "{text}"
+        );
+        let text = group(true, 1.0, BlendMode::Screen);
+        assert!(
+            text.contains("<g style=\"mix-blend-mode:screen\">") && !text.contains("isolation"),
+            "{text}"
+        );
     }
 
     #[test]

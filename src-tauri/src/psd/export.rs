@@ -1178,10 +1178,11 @@ fn integer_placement(transform: &LayerTransform) -> Option<(i64, i64)> {
 
 // ---- the file ---------------------------------------------------------------------------------
 
-fn layer_info(layers: &[OutLayer], depth: u16, big: bool, merged_has_alpha: bool) -> Vec<u8> {
-    let _ = depth;
+/// The layer count and the layer records. The channel data that follows them in the layer
+/// information is not copied here: it is the bulk of the file and is written from the layers
+/// themselves (`layer_data`), so that a file's bytes are never held a second time.
+fn layer_info_head(layers: &[OutLayer], big: bool, merged_has_alpha: bool) -> Vec<u8> {
     let mut records = Vec::new();
-    let mut data = Vec::new();
     for layer in layers {
         let (top, left, bottom, right) = layer.rect;
         for value in [top, left, bottom, right] {
@@ -1233,9 +1234,6 @@ fn layer_info(layers: &[OutLayer], depth: u16, big: bool, merged_has_alpha: bool
         }
         put_u32(&mut records, extra.len() as u32);
         records.extend_from_slice(&extra);
-        for (_, bytes) in &layer.channels {
-            data.extend_from_slice(bytes);
-        }
     }
     // A negative count says the first alpha channel of the flattened picture is transparency.
     let count = layers.len() as i16;
@@ -1243,8 +1241,14 @@ fn layer_info(layers: &[OutLayer], depth: u16, big: bool, merged_has_alpha: bool
         .to_be_bytes()
         .to_vec();
     out.extend_from_slice(&records);
-    out.extend_from_slice(&data);
     out
+}
+
+/// The channel data of every layer, in the order the records list it.
+fn layer_data(layers: &[OutLayer]) -> impl Iterator<Item = &[u8]> {
+    layers
+        .iter()
+        .flat_map(|layer| layer.channels.iter().map(|(_, bytes)| bytes.as_slice()))
 }
 
 /// The flattened picture's channels, compressed the way the layers' are, in one block with the
@@ -1304,6 +1308,85 @@ fn holds_out_of_range_colour(
 
 /// Exports `document` to `path`. Never changes the document; writes the file only if every part
 /// of it was made, by writing beside it and then renaming.
+/// What an export is counted to take, before anything is made: see `export_estimate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExportEstimate {
+    /// Every layer's pixels once, as written, and the flattened picture: the file before
+    /// compression, which is also what decides PSD against PSB.
+    raw: u64,
+    /// The most held at once, which is what the job budget is compared with.
+    peak: u64,
+    /// The longest side of the canvas or of any layer.
+    widest: u32,
+}
+
+/// What an export can take, counted from the document alone.
+///
+/// The guard is on the **peak**, which is more than `raw`:
+///
+/// * while the layers are written: the layers already encoded, and the planes of the one being
+///   written (and its encoding), which is why the largest layer counts twice;
+/// * while the flattened picture is made: the layers encoded, the picture as rendered (16 bytes a
+///   pixel in a high-precision document, 4 in an 8-bit one), its planes at the file's depth, and
+///   its encoding.
+///
+/// The file itself is written from those pieces and never copied into one buffer. This is an
+/// estimate from what is held, not a measurement.
+fn export_estimate(document: &LayerDocument, depth: u16, float: bool) -> ExportEstimate {
+    let (width, height) = (document.canvas_width, document.canvas_height);
+    let bytes_per_sample = u64::from(depth / 8);
+    let canvas_pixels = u64::from(width) * u64::from(height);
+    let canvas_raw = canvas_pixels * 4 * bytes_per_sample;
+    let mut raw = canvas_raw;
+    let mut layers_raw = 0_u64;
+    let mut largest_layer = 0_u64;
+    let mut widest = width.max(height);
+    // Follow the writer's output tree. Source registries are rendered through
+    // their instances, and a transformed group is written as one canvas-sized
+    // raster rather than as its original children. Semantic and transformed
+    // pixel layers can also fill the canvas regardless of their source size.
+    let mut pending: Vec<_> = document.layers.iter().collect();
+    while let Some(layer) = pending.pop() {
+        let baked = match &layer.content {
+            LayerContent::Pixel { .. } => integer_placement(&layer.transform).is_none(),
+            LayerContent::Group { .. } => !layer.transform.is_identity(),
+            LayerContent::Adjustment { .. } => false,
+            _ => true,
+        };
+        let dimensions = if baked {
+            Some((width, height))
+        } else {
+            match &layer.content {
+                LayerContent::Group { children, .. } => {
+                    pending.extend(children);
+                    None
+                }
+                _ => layer.pixel_dimensions(),
+            }
+        };
+        let mut bytes = 0;
+        if let Some((w, h)) = dimensions {
+            bytes = u64::from(w) * u64::from(h) * 4 * bytes_per_sample;
+            widest = widest.max(w).max(h);
+        }
+        if let Some(mask) = &layer.mask {
+            let (w, h) = if baked {
+                (width, height)
+            } else {
+                (mask.snapshot.width, mask.snapshot.height)
+            };
+            bytes += u64::from(w) * u64::from(h) * bytes_per_sample;
+            widest = widest.max(w).max(h);
+        }
+        raw += bytes;
+        layers_raw += bytes;
+        largest_layer = largest_layer.max(bytes);
+    }
+    let rendered = canvas_pixels * if float { 16 } else { 4 };
+    let peak = (layers_raw + largest_layer).max(layers_raw + rendered + 2 * canvas_raw);
+    ExportEstimate { raw, peak, widest }
+}
+
 pub fn export_psd(
     document: &LayerDocument,
     source: &dyn PixelSource,
@@ -1332,21 +1415,11 @@ pub fn export_psd(
     };
     let (width, height) = (document.canvas_width, document.canvas_height);
 
-    // The most this can take, counted before anything is made: every layer's pixels once, as
-    // written, and the flattened picture.
-    let bytes_per_sample = u64::from(depth / 8);
-    let mut raw = u64::from(width) * u64::from(height) * 4 * bytes_per_sample;
-    let mut widest = width.max(height);
-    for layer in document.iter_all() {
-        if let Some((w, h)) = layer.pixel_dimensions() {
-            raw += u64::from(w) * u64::from(h) * 4 * bytes_per_sample;
-            widest = widest.max(w).max(h);
-        }
-    }
+    let ExportEstimate { raw, peak, widest } = export_estimate(document, depth, float);
     let budget = crate::resources::max_job_bytes();
-    if raw > budget {
+    if peak > budget {
         return Err(AppError::ResourceBudget {
-            required: raw,
+            required: peak,
             limit: budget,
         });
     }
@@ -1426,18 +1499,13 @@ pub fn export_psd(
     }
     let has_alpha = merged.has_transparency();
     let mut loss = std::mem::take(&mut writer.loss);
-    let planes = merged.planes((0, 0, width, height), depth, &mut loss);
     let channel_count: u16 = if has_alpha { 4 } else { 3 };
-    let merged_planes: Vec<Vec<u8>> = if has_alpha {
-        vec![
-            planes[0].clone(),
-            planes[1].clone(),
-            planes[2].clone(),
-            planes[3].clone(),
-        ]
-    } else {
-        vec![planes[0].clone(), planes[1].clone(), planes[2].clone()]
-    };
+    let mut merged_planes: Vec<Vec<u8>> =
+        Vec::from(merged.planes((0, 0, width, height), depth, &mut loss));
+    merged_planes.truncate(usize::from(channel_count));
+    // The float picture and its 8-bit view are done with: only the planes are written.
+    drop(merged);
+    drop(picture);
     if loss.highlights_clipped {
         writer.report.push(
             ReportKind::Approximated,
@@ -1492,44 +1560,71 @@ pub fn export_psd(
     out.extend_from_slice(&resources);
 
     // Layer and mask information. A 16- or 32-bit document keeps its layers in a tagged block.
-    let info = layer_info(&writer.layers, depth, big, has_alpha);
-    let mut section = Vec::new();
+    //
+    // The file is written as a list of pieces: the small parts built here, and the layers' channel
+    // data from where it already is. Nothing is concatenated into one buffer first, so the bytes
+    // of the layers are held once, as the layers hold them, and not three or four times.
+    let info_head = layer_info_head(&writer.layers, big, has_alpha);
+    let info_len = info_head.len() as u64
+        + layer_data(&writer.layers)
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+    let zeros_to =
+        |multiple: u64| vec![0_u8; ((multiple - info_len % multiple) % multiple) as usize];
+    let mut section_head = Vec::new(); // before the layer information's bytes
+    let mut section_tail = Vec::new(); // after them and their padding
+    let padding;
     if depth == 8 {
-        let mut padded = info;
-        pad_to(&mut padded, 2);
-        put_length(&mut section, padded.len() as u64, big);
-        section.extend_from_slice(&padded);
-        put_u32(&mut section, 0); // global layer mask info
+        padding = zeros_to(2);
+        put_length(&mut section_head, info_len + padding.len() as u64, big);
+        put_u32(&mut section_tail, 0); // global layer mask info
     } else {
-        put_length(&mut section, 0, big);
-        put_u32(&mut section, 0);
+        padding = zeros_to(4);
+        put_length(&mut section_head, 0, big);
+        put_u32(&mut section_head, 0);
         let key: &[u8; 4] = if depth == 16 { b"Lr16" } else { b"Lr32" };
-        let mut padded = info;
-        pad_to(&mut padded, 4);
-        section.extend_from_slice(b"8BIM");
-        section.extend_from_slice(key);
+        section_head.extend_from_slice(b"8BIM");
+        section_head.extend_from_slice(key);
         // The layer blocks of a PSB carry an 8-byte length.
-        put_length(&mut section, padded.len() as u64, big);
-        section.extend_from_slice(&padded);
+        put_length(&mut section_head, info_len + padding.len() as u64, big);
     }
-    put_length(&mut out, section.len() as u64, big);
-    out.extend_from_slice(&section);
+    let section_len =
+        section_head.len() as u64 + info_len + padding.len() as u64 + section_tail.len() as u64;
+    put_length(&mut out, section_len, big);
 
     // Image data.
-    out.extend_from_slice(&merged_image(&merged_planes, width, height, depth, big));
+    let image = merged_image(&merged_planes, width, height, depth, big);
+    drop(merged_planes);
 
-    if !big && out.len() as u64 >= (1 << 32) - 1 {
+    // The pieces, in file order.
+    let mut pieces: Vec<&[u8]> = vec![&out, &section_head, &info_head];
+    pieces.extend(layer_data(&writer.layers));
+    pieces.push(&padding);
+    pieces.push(&section_tail);
+    pieces.push(&image);
+    let total: u64 = pieces.iter().map(|piece| piece.len() as u64).sum();
+
+    if !big && total >= (1 << 32) - 1 {
         return Err(failure(
             "the file would be larger than a PSD can hold; export it with a smaller canvas or as a PSB",
         ));
     }
-    write_beside_then_rename(path, &out)?;
-    writer.report.bytes = out.len() as u64;
+    write_pieces_beside_then_rename(path, &pieces)?;
+    writer.report.bytes = total;
     Ok(writer.report)
 }
 
 /// Writes next to `path` and renames, so a failed or interrupted export leaves what was there.
 pub(crate) fn write_beside_then_rename(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    write_pieces_beside_then_rename(path, &[bytes])
+}
+
+/// As `write_beside_then_rename`, for a file that is the concatenation of `pieces`, so that a
+/// large file need not be copied into one buffer to be written.
+pub(crate) fn write_pieces_beside_then_rename(
+    path: &Path,
+    pieces: &[&[u8]],
+) -> Result<(), AppError> {
     let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
     let temporary = match directory {
         Some(directory) => directory.join(format!(
@@ -1542,7 +1637,9 @@ pub(crate) fn write_beside_then_rename(path: &Path, bytes: &[u8]) -> Result<(), 
     };
     let result = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
+        for piece in pieces {
+            file.write_all(piece)?;
+        }
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)
@@ -1552,4 +1649,143 @@ pub(crate) fn write_beside_then_rename(path: &Path, bytes: &[u8]) -> Result<(), 
         return Err(AppError::ExportFailure);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+    use crate::layers::{LayerContent, LayerDocument};
+    use crate::operations::structure::new_layer;
+
+    fn document(canvas: (u32, u32), layers: &[(u32, u32)], float: bool) -> LayerDocument {
+        let mut document = LayerDocument::new(canvas.0, canvas.1);
+        if float {
+            document.precision = DocumentPrecision::LinearSrgbF32;
+        }
+        for (index, (width, height)) in layers.iter().enumerate() {
+            document.layers.push(new_layer(
+                &format!("l{index}"),
+                &format!("Layer {index}"),
+                LayerContent::Pixel {
+                    pixel_id: format!("px{index}"),
+                    width: *width,
+                    height: *height,
+                },
+                "t",
+            ));
+        }
+        document
+    }
+
+    #[test]
+    fn the_peak_of_an_8_bit_export_is_four_canvases_where_the_file_was_counted_as_two() {
+        let estimate = export_estimate(&document((1000, 800), &[(1000, 800)], false), 8, false);
+        let canvas = 1000 * 800 * 4;
+        assert_eq!(
+            estimate.raw,
+            2 * canvas,
+            "the file before compression is unchanged"
+        );
+        // the layer encoded, the picture rendered, its planes, its encoding
+        assert_eq!(estimate.peak, 4 * canvas);
+        assert_eq!(estimate.widest, 1000);
+    }
+
+    #[test]
+    fn a_high_precision_document_counts_its_float_picture() {
+        // 16-bit file from a float document: the picture is 16 bytes a pixel, twice its planes
+        let estimate = export_estimate(&document((1000, 800), &[(500, 400)], true), 16, true);
+        let canvas_raw = 1000 * 800 * 4 * 2;
+        let layer_raw = 500 * 400 * 4 * 2;
+        let rendered = 1000 * 800 * 16;
+        assert_eq!(estimate.raw, canvas_raw + layer_raw);
+        assert_eq!(estimate.peak, layer_raw + rendered + 2 * canvas_raw);
+    }
+
+    #[test]
+    fn many_layers_are_counted_once_each_and_the_largest_twice_while_they_are_written() {
+        // Layers much larger than the canvas: the writing of the largest one is the peak.
+        let layers = [(4000, 4000), (100, 100), (100, 100)];
+        let estimate = export_estimate(&document((200, 200), &layers, false), 8, false);
+        let layers_raw = (4000 * 4000 + 2 * 100 * 100) * 4;
+        let largest = 4000 * 4000 * 4;
+        assert_eq!(estimate.peak, layers_raw + largest);
+        assert_eq!(estimate.widest, 4000);
+    }
+
+    #[test]
+    fn the_peak_is_never_less_than_the_file_it_writes() {
+        for float in [false, true] {
+            for depth in [8_u16, 16, 32] {
+                for layers in [
+                    vec![],
+                    vec![(10, 10)],
+                    vec![(3000, 20), (20, 3000), (64, 64)],
+                ] {
+                    let estimate =
+                        export_estimate(&document((640, 480), &layers, float), depth, float);
+                    assert!(estimate.peak >= estimate.raw, "{float} {depth} {layers:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_transformed_pixel_layer_is_counted_at_the_canvas_size_it_can_fill() {
+        let mut doc = document((1000, 800), &[(10, 10)], true);
+        doc.layers[0].transform.scale_x = 2.0;
+        let estimate = export_estimate(&doc, 16, true);
+        assert_eq!(estimate.raw, 2 * 1000 * 800 * 4 * 2);
+        assert_eq!(estimate.widest, 1000);
+    }
+
+    #[test]
+    fn semantic_layers_and_their_masks_are_counted_as_exported_rasters() {
+        use crate::layers::{LayerMask, ShapeColor, ShapeContent};
+        use crate::mask::{MaskBitmap, MaskSnapshot};
+        use crate::vector::{FillRule, ShapeGeometry};
+        let mut doc = document((1000, 800), &[(10, 10)], true);
+        doc.layers[0].content = LayerContent::Shape {
+            shape: Box::new(ShapeContent {
+                geometry: ShapeGeometry::Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1000.0,
+                    height: 800.0,
+                    corner_radius: 0.0,
+                },
+                fill: Some(ShapeColor::new(1.0, 0.0, 0.0, 1.0)),
+                stroke: None,
+                stroke_style: None,
+                fill_rule: FillRule::NonZero,
+            }),
+        };
+        doc.layers[0].mask = Some(LayerMask {
+            snapshot: MaskSnapshot::encode(&MaskBitmap::full(1000, 800).unwrap()),
+            enabled: true,
+            inverted: false,
+        });
+        let estimate = export_estimate(&doc, 16, true);
+        assert_eq!(estimate.raw, (4 + 4 + 1) * 1000 * 800 * 2);
+    }
+
+    #[test]
+    fn a_baked_group_counts_its_raster_once_instead_of_its_unwritten_children() {
+        let mut doc = document((100, 80), &[(4000, 4000)], false);
+        let child = doc.layers.pop().unwrap();
+        let mut group = new_layer(
+            "group",
+            "Group",
+            LayerContent::Group {
+                children: vec![child],
+                isolated: true,
+            },
+            "t",
+        );
+        group.transform.rotation_degrees = 10.0;
+        doc.layers.push(group);
+        let estimate = export_estimate(&doc, 8, false);
+        assert_eq!(estimate.raw, 2 * 100 * 80 * 4);
+        assert_eq!(estimate.widest, 100);
+    }
 }

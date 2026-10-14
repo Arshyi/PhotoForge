@@ -180,9 +180,12 @@ primaries, the admission, the report) is PhotoForge's own code in `src-tauri/src
 
 An EXR is kept unclipped in the document, and **Normal, Multiply, Screen, Darken, Lighten,
 Difference and Exclusion** keep it unclipped when layers are composited. **Every other blend mode
-evaluates its operands and its result clamped to 0 to 1**, so a layer in Overlay, Soft Light, Vivid
-Light and the like loses its highlights above white where it composites. A single-layer EXR is
-unaffected. (See [layers.md](layers.md).)
+is defined on 0 to 1**, and is applied to the operands clamped to that range **with what the
+backdrop held above white added back**: a highlight under Overlay, Soft Light, Vivid Light and the
+like passes through (it is not flattened to white), and the mode still acts on the part of the
+picture that is in range. A source above white counts as white under these modes. Before Phase 15.11 a
+layer in one of them lost the highlights beneath it. A single-layer EXR is unaffected. (See
+[layers.md](layers.md).)
 
 ## Not checked
 

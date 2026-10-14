@@ -42,9 +42,9 @@ if (-not $Destination) {
 # the same photograph. The uncompressed and lossless pair is what proves the
 # entropy decoder exact; the lossy one is what proves it is refused.
 $files = @(
-    @{ Name = "5G4A9394-compressed-lossless.DNG"; Bytes = 23206642 }
-    @{ Name = "5G4A9394-uncompressed.DNG"; Bytes = 48382640 }
-    @{ Name = "5G4A9394-compressed-lossy.DNG"; Bytes = 6193902 }
+    @{ Name = "5G4A9394-compressed-lossless.DNG"; Bytes = 23206642; Sha256 = "3118116735d4f6dd01fd9d6a80ee9aac52a2c2debdc6dcd112bd5e3059044a55" }
+    @{ Name = "5G4A9394-uncompressed.DNG"; Bytes = 48382640; Sha256 = "95dc76a2f255e623acaa5149b320389f7da7c995da890c3e0d511c0ff681b2e1" }
+    @{ Name = "5G4A9394-compressed-lossy.DNG"; Bytes = 6193902; Sha256 = "159326856c29073e845c3c5a9ecf98c6474f43ca15798a88ad5e2baecd0664b7" }
 )
 $base = "https://raw.pixls.us/data/Adobe%20DNG%20Converter/Canon%20EOS%205D%20Mark%20III"
 
@@ -55,15 +55,17 @@ Write-Host "Total download: about 75 MB."
 
 foreach ($file in $files) {
     $target = Join-Path $Destination $file.Name
-    if ((Test-Path $target) -and ((Get-Item $target).Length -eq $file.Bytes)) {
+    if ((Test-Path $target) -and ((Get-Item $target).Length -eq $file.Bytes) -and
+        ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $file.Sha256)) {
         Write-Host "  already present: $($file.Name)"
         continue
     }
     Write-Host "  downloading $($file.Name) ..."
     Invoke-WebRequest -Uri "$base/$($file.Name)" -OutFile $target -UseBasicParsing
     $actual = (Get-Item $target).Length
-    if ($actual -ne $file.Bytes) {
-        Write-Warning "  $($file.Name) is $actual bytes, expected $($file.Bytes). The upstream sample may have been replaced."
+    $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    if ($actual -ne $file.Bytes -or $hash -ne $file.Sha256) {
+        throw "$($file.Name) failed the expected size/SHA-256 check. The upstream sample may have changed; this is not a verified fixture."
     }
 }
 

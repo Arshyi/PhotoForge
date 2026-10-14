@@ -86,6 +86,11 @@ as a claim to be checked, not a size to allocate.
 * A channel's decoded size is computed from its declared dimensions with checked arithmetic and
   compared with the memory budget before its data is read; the data must fill exactly that size.
   A zlib stream that inflates past it is stopped at it.
+* **Only the channels that are drawn are decoded**: the colour channels (three, or one in a
+  grayscale file) and transparency. A spot or alpha channel beyond them is a plane as large as the
+  layer and a file can carry dozens; it is neither read nor counted, so a layer's memory is what
+  the estimate said it is (before Phase 15.11 a file with many extra channels could take up to about
+  fourteen times the estimate).
 * Nothing in a Photoshop file is executed, fetched or followed: linked files are not opened.
 
 ## How it was verified

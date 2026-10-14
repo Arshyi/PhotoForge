@@ -711,6 +711,61 @@ mod importer {
     }
 
     #[test]
+    fn channels_beyond_the_colour_ones_are_not_decoded() {
+        // A spot or alpha channel (id 3 and up in an RGB file) is never drawn, so it must not be
+        // read: these two are deliberately short for their layer, which is an error if either
+        // were decoded. (Each decoded one is a plane as large as the layer.)
+        let mut layer = flat("Base", (0, 0, 2, 2), [10, 20, 30]);
+        layer.channels.push((3, vec![7]));
+        layer.channels.push((4, vec![9; 3]));
+        let (_dir, path) = write("extra.psd", &build(&TestDoc::rgb8(2, 2, vec![layer])));
+        let imported = import_psd(&path, BIG).unwrap();
+        let document = &imported.project.document;
+        assert_eq!(document.layers.len(), 1);
+        let LayerContent::Pixel { pixel_id, .. } = &document.layers[0].content else {
+            panic!("a pixel layer");
+        };
+        let image = &imported
+            .project
+            .pixels
+            .iter()
+            .find(|(id, _)| id == pixel_id)
+            .expect("its pixels")
+            .1;
+        assert_eq!(image.get_pixel(1, 1).0, [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn a_grey_file_reads_one_colour_plane_and_ignores_the_rest() {
+        // In a grayscale file channel 0 is the grey; channels 1 and 2 are not colour, and are not
+        // decoded either (here one is short for its layer, which would be an error).
+        let mut layer = flat("Grey", (0, 0, 2, 2), [0, 0, 0]);
+        layer.channels = vec![
+            (0, vec![90; 4]),
+            (-1, vec![255; 4]),
+            (1, vec![5]),
+            (2, vec![6]),
+        ];
+        let mut doc = TestDoc::rgb8(2, 2, vec![layer]);
+        doc.mode = 1;
+        doc.channels = 1;
+        doc.merged = vec![0; 4];
+        let (_dir, path) = write("grey.psd", &build(&doc));
+        let imported = import_psd(&path, BIG).unwrap();
+        let LayerContent::Pixel { pixel_id, .. } = &imported.project.document.layers[0].content
+        else {
+            panic!("a pixel layer");
+        };
+        let (_, image) = imported
+            .project
+            .pixels
+            .iter()
+            .find(|(id, _)| id == pixel_id)
+            .expect("its pixels");
+        assert_eq!(image.get_pixel(0, 0).0, [90, 90, 90, 255]);
+    }
+
+    #[test]
     fn layers_keep_position_opacity_visibility_blend_and_pixels() {
         let base = flat("Base", (0, 0, 6, 8), [10, 20, 30]);
         let mut top = flat("Top", (1, 2, 4, 6), [200, 100, 50]);
@@ -1612,6 +1667,124 @@ mod exporter {
             ),
             enabled: true,
             inverted: false,
+        }
+    }
+
+    #[test]
+    fn the_layer_information_is_padded_whatever_its_length() {
+        // The layer information is padded to an even length, and the field after it is found by
+        // that length. Its own length is odd for some contents (the run-length data of a channel
+        // is any length), so a sweep of widths and colours, each read back by the reader, finds
+        // the ones that need the pad: with it left out the global mask field is read one byte
+        // early and the file is refused.
+        let mut odd = 0;
+        for width in 1..=9_u32 {
+            for (seed, alpha) in [(3_u8, 255_u8), (90, 255), (200, 128), (17, 0)] {
+                let mut world = World::eight_bit(12, 3);
+                let layer = world.solid(
+                    "L",
+                    // one row: the red channel varies along it, the others are runs, so the
+                    // data is an odd number of bytes for an even width
+                    (0, 0, width, 1),
+                    [seed, seed.wrapping_mul(3), 255 - seed, alpha],
+                );
+                world.document.layers.push(layer);
+                let (_, path, _guard) = world.export("odd.psd", &ExportOptions::default());
+                let bytes = std::fs::read(&path).unwrap();
+                let document = read_document(std::io::Cursor::new(&bytes))
+                    .unwrap_or_else(|error| panic!("width {width} seed {seed}: {error:?}"));
+                assert_eq!(
+                    document.layers.records.len(),
+                    1,
+                    "width {width} seed {seed}"
+                );
+                // The layer and mask section: the layer information, then the global mask field,
+                // which for an 8-bit file is an empty one, then the image data.
+                let at = 26 + 4 + u32::from_be_bytes(bytes[26..30].try_into().unwrap()) as usize;
+                let resources = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+                let section = at + 4 + resources;
+                let info = u32::from_be_bytes(bytes[section + 4..section + 8].try_into().unwrap());
+                assert_eq!(
+                    info % 2,
+                    0,
+                    "width {width} seed {seed}: the length is padded"
+                );
+                // And the image data is where the section's length says it is: it starts with a
+                // compression field, 0 to 3. One byte short and it begins a byte early.
+                let section_len =
+                    u32::from_be_bytes(bytes[section..section + 4].try_into().unwrap()) as usize;
+                let image_at = section + 4 + section_len;
+                let compression = u16::from_be_bytes([bytes[image_at], bytes[image_at + 1]]);
+                assert!(
+                    compression <= 3,
+                    "width {width} seed {seed}: compression {compression}"
+                );
+                let global = section + 8 + info as usize;
+                assert_eq!(
+                    &bytes[global..global + 4],
+                    &[0, 0, 0, 0],
+                    "width {width} seed {seed}"
+                );
+                let data_end = document.layers.records[0]
+                    .channels
+                    .iter()
+                    .map(|channel| channel.offset + channel.length)
+                    .max()
+                    .unwrap() as usize;
+                if global - data_end == 1 {
+                    odd += 1;
+                }
+            }
+        }
+        assert!(
+            odd > 0,
+            "the sweep never needed the pad, so it proves nothing"
+        );
+    }
+
+    /// With `PHOTOFORGE_PSD_EXPORT_DUMP` set to a directory, leaves the files this exports (8-bit
+    /// with a mask, a group, a blend mode and a hidden layer; 16-bit; 32-bit) so that two builds'
+    /// bytes can be compared. The file is a function of the code alone: run it before and after a
+    /// change that is meant not to change what is written, and compare the files.
+    #[test]
+    fn the_exported_bytes_can_be_left_for_comparison() {
+        let Some(directory) = std::env::var_os("PHOTOFORGE_PSD_EXPORT_DUMP") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut world = World::eight_bit(40, 24);
+        let mut base = world.solid("Base", (0, 0, 40, 24), [30, 60, 90, 255]);
+        base.blend_mode = BlendMode::Normal;
+        let mut over = world.solid("Over", (5, 3, 20, 14), [200, 120, 40, 255]);
+        over.blend_mode = BlendMode::Multiply;
+        over.opacity = 0.6;
+        over.mask = Some(mask(20, 14));
+        let mut hidden = world.solid("Hidden", (1, 1, 6, 6), [9, 9, 9, 255]);
+        hidden.visible = false;
+        let inner = world.solid("Inner", (10, 8, 12, 9), [250, 250, 20, 160]);
+        let folder = group("Folder", vec![inner], true);
+        world.document.layers.extend([base, over, hidden, folder]);
+        for (name, depth) in [("8", None), ("16", Some(16)), ("32", Some(32))] {
+            let options = ExportOptions {
+                bit_depth: depth,
+                ..ExportOptions::default()
+            };
+            let (_, path, _guard) = world.export(&format!("{name}.psd"), &options);
+            std::fs::copy(&path, directory.join(format!("eight-{name}.psd"))).unwrap();
+        }
+        let mut hdr = World::float(16, 12);
+        let hot = hdr.solid("Hot", (0, 0, 16, 12), [200, 100, 50, 255]);
+        let mut second = hdr.solid("Soft", (2, 2, 8, 6), [90, 190, 20, 128]);
+        second.blend_mode = BlendMode::Screen;
+        hdr.document.layers.extend([hot, second]);
+        for (name, depth) in [("16", Some(16)), ("32", Some(32))] {
+            let options = ExportOptions {
+                bit_depth: depth,
+                ..ExportOptions::default()
+            };
+            let (_, path, _guard) = hdr.export(&format!("{name}.psd"), &options);
+            std::fs::copy(&path, directory.join(format!("float-{name}.psd"))).unwrap();
         }
     }
 

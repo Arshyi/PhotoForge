@@ -20,7 +20,8 @@ Python packages: `python -m venv .work/venv`, then `.work/venv/Scripts/pip insta
 | `svg_compare.py`, `svg_import_compare.py` | SVG export and import rendered against resvg |
 | `upright_oracle.py` | A developed DNG with each orientation value against Pillow's transposes |
 | `exif_oracle.py`, `export_oracle.py` | Metadata and exported pictures against Pillow |
-| `clipboard_oracle.py`, `clipboard_backup.ps1` | The clipboard writers and readers against Pillow and the Win32 API. **They replace the clipboard**: back it up with `clipboard_backup.ps1 save` and restore after. Only images are preserved. |
+| `clipboard_oracle.py` | The clipboard writers and readers against Pillow and the Win32 API. **It replaces the clipboard**: save it first with `clipboard_backup.ps1` and restore after. |
+| `clipboard_backup.ps1` | Saves and restores the **whole** clipboard (every format in global memory, in order): `save`, `restore`, `verify`, `list`, `selftest`. Refuses (exit 3) if something on it cannot be put back; `-AllowLoss` overrides. OLE bookkeeping and formats Windows makes from others are not content and are not restored. |
 | `check_corpus_expectations.py` | The expected outcome of each file in a corpus |
 | `scan_control.py` | Fails if a source file contains a control character (a patch made by a shell once put a NUL into a test string) |
 
@@ -59,8 +60,9 @@ and is skipped, and needs updating before it is run. At 0.15.0, `--dry` says:
 | `mutate_tiff.py` | 33 | orientation 6 is not rotated; the profile is not embedded |
 | `mutate_upright.py` | 17 | the transpose is not one (matches twice); a whole open is not turned; the tag is not spent; re-developing does not turn; a raw layer is not turned when added; a batch is not turned; a recorded turn is version two; a region may be turned |
 | `mutate_fixes.py`, `mutate_meta.py`, `mutate_region.py`, `mutate_svg.py` | 4, 8, 26, 8 | none |
+| `mutate_review_items.py`, `mutate_layout.py` (Phase 15.11 and 15.12) | 18, 5 | none |
 
-That is 30 of 197. They are the proof the tests were checked when the code was written, not a
+That is 30 of the 197 above (the last row is new and complete). They are the proof the tests were checked when the code was written, not a
 suite that is current; the ones above are what a new change to those areas should re-establish by
 writing a fresh mutant. (The `mutate_upright.py` ones were superseded by `mutate_crop.py` and
 `mutate_region.py` when 15.8 and 15.9 changed what "the picture" is.)
@@ -70,8 +72,8 @@ a run is killed, the file it was changing stays changed: `git status` shows it, 
 `git checkout -- <file>` restores it (a harness that copies the file first leaves
 `<file>.mutbak` beside it; delete that too).
 
-`mutate_clip.py` runs the tests that **replace the clipboard**: back it up first
-(`clipboard_backup.ps1 save`).
+`mutate_clip.py` runs the tests that **replace the clipboard**: save it first
+(`clipboard_backup.ps1 -Action save`) and restore it after.
 
 ## The packaged-window harness
 

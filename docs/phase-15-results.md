@@ -92,8 +92,9 @@ anyone who needs the format and is warned about here. Neither installer is signe
   opened in Photoshop; TIFF in Lightroom or Photoshop; EXR in Nuke or Blender; SVG in Inkscape; the
   clipboard in Photoshop or Office. They were read by independent readers and compared with their
   sources.
-* **The clipboard was not driven in the packaged window**: the person's clipboard held text, which
-  the test harness cannot preserve. It has its own real-clipboard tests.
+* **The clipboard was not driven in the packaged window** at 0.15.0: the person's clipboard held
+  text, which the test harness could not preserve. It has since been, with a backup that keeps the
+  whole clipboard: [phase-15-10-results.md](phase-15-10-results.md).
 * **One real camera file.** The RAW work was checked against one converter's Canon 5D Mark III DNG
   (with its orientation tag rewritten in copies for the eight values), not against portrait files
   from real cameras, fractional or odd crops, or other makers' DNGs.
@@ -106,6 +107,12 @@ anyone who needs the format and is warned about here. Neither installer is signe
   adds a local log (`close.log`) that will say what happened if it recurs.
 
 ## Known and left
+
+*This is the ledger as 0.15.0 shipped. Since: the blend-mode highlights, the PSD import and
+export memory, and the SVG round-trip items below were fixed in
+[Phase 15.11](phase-15-11-results.md); the clipboard was driven in the packaged window
+([15.10](phase-15-10-results.md)); the panel's controls and the window at other sizes were fixed
+([15.12](phase-15-12-results.md)).*
 
 * **High-dynamic-range values are clipped by most blend modes** (everything but Normal, Multiply,
   Screen, Darken, Lighten, Difference, Exclusion). A design decision about what Overlay and its

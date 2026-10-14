@@ -21,7 +21,7 @@ an SVG holds shapes, not a picture. The document on screen is not changed.
 | Layer opacity, visibility | `opacity`, `display="none"` (hidden layers are kept, hidden) |
 | Layer transform (move, scale, rotate, flip) | one `transform="matrix(…)"`, about the centre of the **canvas**, which is how the compositor maps shapes |
 | Blend modes the W3C set has (16) | `style="mix-blend-mode:…"` |
-| Groups | `<g>` with the same attributes, nested |
+| Groups | `<g>` with the same attributes, nested; an isolated group (one that opacity or a blend mode does not already isolate) says `style="isolation:isolate"`, so that what is blended inside it does not reach what is behind it |
 | Layer names | `<title>`, escaped |
 
 Colours are the document's linear values encoded to sRGB; a colour outside sRGB is clipped and
@@ -109,10 +109,11 @@ run anything, or exhaust memory:
 | `<rect>`, `<circle>`, `<ellipse>`, `<line>` | A rectangle (corner radius kept), ellipse and line, kept parametric when the transform allows |
 | `<polyline>`, `<polygon>`, `<path>` (every command: M L H V C S Q T A Z, relative and absolute) | A path; quadratics become cubics, arcs become cubics in quarter turns |
 | `fill`, `stroke`, `fill-opacity`, `stroke-opacity`, `opacity`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `fill-rule`, `color`/`currentColor`, `display`, `visibility`, as attributes or in `style="…"` | The shape's fill and stroke, in linear light; inherited from groups as CSS says; opacity on the layer |
-| Colours: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, 40 common names, `transparent` | The same colour, decoded from sRGB |
+| Colours: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, `hsl()`, `hsla()` (hue in degrees, `deg`, `grad`, `rad` or `turn`), all 148 CSS colour names, `transparent` | The same colour, decoded from sRGB |
 | `transform`: `matrix`, `translate`, `scale`, `rotate` (about a point), `skewX`, `skewY` | A move or an axis-aligned scale is kept on the shape; a rotation or skew is **baked into the geometry** (the shape becomes its outline) |
 | `<g>`, `<a>` | A group, with its opacity; its transform and style applied to the children |
-| `<title>` and `id` | The layer name |
+| `<title>` (a child of the element) and `id` | The layer name: the title, else the id |
+| A length in `%` | Of the view box's width or height (of the canvas when there is no view box); `r` and a stroke width of the normalised diagonal, which is the diagonal over the square root of two |
 
 ### What is left out, and named
 
@@ -130,7 +131,10 @@ does not read. Each says so in the report, with the element's `id` when it has o
 * **A stroke under an uneven scale** is imported at the average of the two scales.
 * **`preserveAspectRatio` with `slice`** is imported as `meet`.
 * **An error in path data**: the path is drawn up to it, as SVG says to.
-* **A colour name outside the 40** reads as no colour and the shape keeps its inherited paint.
+* **A colour that is not one of the above** (a system colour, `currentcolor` aside, or `hwb()`,
+  `lab()`) reads as no colour and the shape keeps its inherited paint.
+* **`isolation` and `mix-blend-mode` are not read**: every imported group is isolated and every
+  imported shape is Normal.
 
 ### How reading was checked
 

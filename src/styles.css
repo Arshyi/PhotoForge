@@ -47,6 +47,10 @@ button { -webkit-tap-highlight-color: transparent; }
   width: 100%;
   height: 100%;
   display: grid;
+  /* One column that cannot be wider than the window. With none, the implicit column was as wide as
+     the header's content, so a window narrower than the header (anything under about 1,350px)
+     pushed the whole app, the right panel and the Settings button included, past its edge. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 56px minmax(0, 1fr) 42px 28px;
   background: var(--workspace);
 }
@@ -54,6 +58,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .topbar {
   position: relative;
   z-index: 5;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -179,6 +184,28 @@ aside > .scroll-panel { overflow: visible; }
 .raw-card label { display: grid; gap: 4px; color: var(--ink-soft); font-size: 0.6rem; font-weight: 700; }
 .raw-card select { min-width: 0; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: var(--surface-soft); font: inherit; font-size: 0.6rem; }
 .raw-card label:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 6px; font-weight: 400; }
+
+/*
+ * The editing panel's controls that no component styles for itself. The Layers, Transform and
+ * Selections panels were drawn with the browser's own controls (white buttons and inputs, a 16px
+ * select) on the dark panel. The card scale is the one used: 0.6rem for a control and its label.
+ * These are element selectors (a class a component uses for its own controls is more specific, so
+ * it still wins) and they come after `button, input { font: inherit }`, which they must beat.
+ */
+aside button,
+aside select,
+aside input:not([type='range'], [type='checkbox'], [type='radio'], [type='color'], [type='file'], [type='hidden']) {
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  font: inherit;
+  font-size: 0.6rem;
+}
+aside button { cursor: pointer; }
+aside button:hover:not(:disabled) { border-color: var(--accent); }
+aside button:disabled, aside select:disabled, aside input:disabled { opacity: 0.5; cursor: default; }
 
 /* Text, shapes and smart objects: the fieldset had no styles and was drawn with the browser's. */
 .semantic-tools { min-width: 0; display: grid; gap: 6px; margin: 0 10px 8px; padding: 8px 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.015); }
@@ -536,6 +563,12 @@ aside > .scroll-panel { overflow: visible; }
 .privacy-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 16px 21px; border-bottom: 1px solid var(--line); }
 .privacy-flow span { padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink-soft); background: var(--surface-soft); font-size: 0.58rem; }
 .privacy-flow b { color: var(--accent); }
+
+/* The header fits a 1,360px window with every label; below that the buttons keep their icons (the
+   name stays as the tooltip and the accessible name) and Open keeps its word. */
+@media (max-width: 1400px) {
+  .topbar button:not(.primary) .label { display: none; }
+}
 
 @media (max-width: 920px) {
   .brand { min-width: auto; }

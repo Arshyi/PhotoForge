@@ -5,7 +5,7 @@ PhotoForge is a lightweight, privacy-first desktop photo restoration and enhance
 This repository contains the Phase 0 foundation through Phase 15: interoperability
 (Photoshop, TIFF, OpenEXR, SVG, metadata, the clipboard and camera RAW), on top of
 Phase 14's extensibility, resource management, oversized images, safe automation and
-sandboxed plugin architecture. The target version is **0.15.0**. See
+sandboxed plugin architecture. The target version is **0.15.1**. See
 [Phase 15 results](docs/phase-15-results.md) for current verification, the packaged
 installers and what is not claimed, and [Phase 14 results](docs/phase-14-results.md) for
 the baseline before it; Phase 10 remains the precision and colour baseline, Phase 11 the
@@ -37,6 +37,11 @@ tiled-render baseline and Phase 13 the layer baseline.
   installed, run and uninstalled. **Not signed**, and the MSI registers per machine but
   installs per user, so the NSIS installer is the one to use. Everything that was not
   checked is listed in [Phase 15 results](docs/phase-15-results.md).
+* **Since 0.15.0** (on `main` as it merges; not yet a release): the clipboard driven in the
+  packaged window ([15.10](docs/phase-15-10-results.md)); highlights above white kept under
+  the blend modes, PSD import and export memory, four SVG round-trip gaps
+  ([15.11](docs/phase-15-11-results.md)); the editing panel's controls and the window at
+  widths from 760 to 1920 px and scales to 200 % ([15.12](docs/phase-15-12-results.md)).
 
 ## Extensibility, resources and oversized images (Phase 14)
 

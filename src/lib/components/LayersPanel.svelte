@@ -677,30 +677,31 @@
   .layers-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .layers-heading > div:first-child { display: flex; align-items: baseline; gap: 7px; }
   .layers-heading h2 { margin: 0; }
-  .layers-heading small { color: var(--ink-faint); font-size: .62rem; }
+  .layers-heading small { color: var(--ink-faint); font-size: .58rem; }
   .create-actions { display: flex; gap: 4px; }
   .create-actions button { min-width: 26px; padding: 5px 6px; }
   .target-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .target-row > span { color: var(--ink-soft); font-size: .64rem; font-weight: 700; }
+  .target-row > span { color: var(--ink-soft); font-size: .6rem; font-weight: 700; }
   .segmented { display: flex; }
-  .segmented button { min-width: 0; padding: 5px 9px; border-radius: 0; font-size: .58rem; }
+  .segmented button { min-width: 0; padding: 5px 9px; border-radius: 0; font-size: .6rem; }
   .segmented button:first-child { border-radius: 6px 0 0 6px; }
   .segmented button:last-child { border-radius: 0 6px 6px 0; }
   button.active { border-color: var(--accent); color: var(--accent); background: rgba(192,231,126,.1); }
-  .target-note { margin: 0; padding: 6px 8px; border-left: 2px solid var(--line); color: var(--ink-faint); font-size: .62rem; line-height: 1.4; }
+  .target-note { margin: 0; padding: 6px 8px; border-left: 2px solid var(--line); color: var(--ink-faint); font-size: .58rem; line-height: 1.4; }
   .target-note[data-target='mask'] { border-left-color: #e2b96f; color: #e8ca94; background: rgba(226,185,111,.06); }
   .target-note strong { color: var(--ink); }
   .adjustment-target { display: grid; gap: 4px; }
-  .adjustment-target label { color: var(--ink-soft); font-size: .64rem; }
-  select, .rename-input { min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface-raised); font: inherit; }
+  .adjustment-target label { color: var(--ink-soft); font-size: .6rem; font-weight: 700; }
+  /* font: inherit alone gave a select the panel's 16px; the cards' controls are 0.6rem. */
+  select, .rename-input { min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface-raised); font: inherit; font-size: .6rem; }
   .layer-properties { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.02); }
   .layer-properties.disabled { opacity: .6; }
-  .property-row { display: grid; grid-template-columns: 54px 1fr; align-items: center; gap: 7px; color: var(--ink-soft); font-size: .64rem; }
+  .property-row { display: grid; grid-template-columns: 54px 1fr; align-items: center; gap: 7px; color: var(--ink-soft); font-size: .6rem; }
   .property-row.range { grid-template-columns: 54px 1fr 42px; }
   .property-row.checkbox { grid-template-columns: 74px auto 1fr; }
-  .property-row.checkbox small { color: var(--ink-faint); font-size: .56rem; line-height: 1.3; }
+  .property-row.checkbox small { color: var(--ink-faint); font-size: .58rem; line-height: 1.3; }
   .property-row.checkbox input { justify-self: start; }
-  .property-row output { color: var(--ink); font-family: var(--font-mono); font-size: .62rem; text-align: right; }
+  .property-row output { color: var(--ink); font-family: var(--font-mono); font-size: .6rem; text-align: right; }
   .property-row input[type='range'] { width: 100%; }
   .layer-list { display: grid; gap: 3px; max-height: 340px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
   .layer-list li { position: relative; padding: 4px; border: 1px solid transparent; border-radius: 7px; background: rgba(255,255,255,.015); }
@@ -724,19 +725,19 @@
   .thumbnail img { width: 100%; height: 100%; object-fit: contain; }
   .thumbnail em { color: var(--ink-faint); font-size: .9rem; font-style: normal; }
   .row-text { display: grid; gap: 1px; min-width: 0; }
-  .row-text strong { overflow: hidden; color: var(--ink); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
-  .row-text small { display: flex; align-items: center; gap: 4px; overflow: hidden; color: var(--ink-faint); font-size: .55rem; text-overflow: ellipsis; white-space: nowrap; }
+  .row-text strong { overflow: hidden; color: var(--ink); font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
+  .row-text small { display: flex; align-items: center; gap: 4px; overflow: hidden; color: var(--ink-faint); font-size: .58rem; text-overflow: ellipsis; white-space: nowrap; }
   .plugin-missing { color: #e0795a; font-weight: 700; }
   .row-text small i { font-style: normal; }
-  .rename-input { width: 100%; padding: 3px 5px; font-size: .68rem; }
+  .rename-input { width: 100%; padding: 3px 5px; font-size: .66rem; }
   .mask-cell { display: grid; place-items: center; padding: 1px; border: 1px solid var(--line); border-radius: 4px; }
   .mask-cell.disabled-mask { opacity: .4; }
   .row-actions { display: flex; gap: 3px; margin-top: 4px; padding-left: calc(var(--layer-depth, 0) * 14px + 22px); }
-  .row-actions button { min-width: 24px; padding: 3px 5px; font-size: .58rem; }
+  .row-actions button { min-width: 24px; padding: 3px 5px; font-size: .6rem; }
   .empty-state { padding: 14px 8px; border: 1px dashed var(--line); border-radius: 7px; text-align: center; }
-  .empty-state p { margin: 0; color: var(--ink-faint); font-size: .64rem; }
+  .empty-state p { margin: 0; color: var(--ink-faint); font-size: .6rem; }
   .mask-actions { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; }
-  .mask-actions strong { color: var(--ink-soft); font-size: .62rem; }
+  .mask-actions strong { color: var(--ink-soft); font-size: .6rem; }
   .button-grid, .layer-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
-  .button-grid button, .layer-actions button { min-width: 0; padding: 6px 3px; font-size: .56rem; }
+  .button-grid button, .layer-actions button { min-width: 0; padding: 6px 3px; font-size: .6rem; }
 </style>
