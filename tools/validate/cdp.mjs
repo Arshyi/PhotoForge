@@ -14,6 +14,12 @@
 //   node cdp.mjs log                         the IPC log recorded since install (command, status, error)
 //   node cdp.mjs type x y <text>             click a field, select what is there, type
 //   node cdp.mjs key Enter|Tab|Escape        a key into the page's focused element
+//   node cdp.mjs chord ctrl+shift+c          a key with modifiers (ctrl, shift, alt) into the page
+//   node cdp.mjs insert "text"               type text into the page's focused element
+//   node cdp.mjs layout W H DPR out.png [probe.js]
+//                                            show the page at W x H CSS pixels and device pixel
+//                                            ratio DPR (1, 1.25, 1.5, 2), save a screenshot, and
+//                                            print what probe.js (default layout_probe.js) says
 //   node cdp.mjs evalfile <file.js>          evaluate the contents of a file in the page
 //
 // `install` wraps window.fetch (Tauri's invoke property cannot be reassigned): the native file
@@ -218,6 +224,54 @@ const main = async () => {
         await send('Input.dispatchKeyEvent', { type: 'keyDown', ...base });
         await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
         console.log('key', name);
+        break;
+      }
+      case 'chord': {
+        // chord ctrl+shift+c | ctrl+v | alt+f4 ...: a real key event with modifiers, into the page.
+        const parts = rest[0].toLowerCase().split('+');
+        const key = parts.pop();
+        let modifiers = 0;
+        for (const part of parts) {
+          if (part === 'alt') modifiers |= 1;
+          else if (part === 'ctrl') modifiers |= 2;
+          else if (part === 'shift') modifiers |= 8;
+          else throw new Error('unknown modifier ' + part);
+        }
+        const named = { enter: ['Enter', 'Enter', 13], escape: ['Escape', 'Escape', 27], tab: ['Tab', 'Tab', 9] };
+        let description;
+        if (named[key]) description = named[key];
+        else if (/^[a-z]$/.test(key)) {
+          description = [modifiers & 8 ? key.toUpperCase() : key, 'Key' + key.toUpperCase(), key.toUpperCase().charCodeAt(0)];
+        } else throw new Error('chord knows letters, Enter, Escape and Tab, not ' + key);
+        const base = { key: description[0], code: description[1], windowsVirtualKeyCode: description[2], modifiers };
+        await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+        console.log('chord', rest[0]);
+        break;
+      }
+      case 'insert':
+        await send('Input.insertText', { text: rest.join(' ') });
+        console.log('inserted', rest.join(' '));
+        break;
+      case 'layout': {
+        // The metrics override lives as long as this connection, so everything is done inside it.
+        const [width, height, ratio, out, probe] = rest;
+        const here = new URL('.', import.meta.url);
+        const source = fs.readFileSync(probe || new URL('layout_probe.js', here), 'utf8');
+        await send('Emulation.setDeviceMetricsOverride', {
+          width: Number(width),
+          height: Number(height),
+          deviceScaleFactor: Number(ratio),
+          mobile: false
+        });
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          const result = await send('Page.captureScreenshot', { format: 'png' });
+          fs.writeFileSync(out, Buffer.from(result.data, 'base64'));
+          console.log(await evaluate(source));
+        } finally {
+          await send('Emulation.clearDeviceMetricsOverride');
+        }
         break;
       }
       case 'log':
