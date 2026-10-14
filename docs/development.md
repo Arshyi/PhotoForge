@@ -41,6 +41,14 @@ cd src-tauri
 cargo build --release        # src-tauri\target\release\photoforge.exe (the interface is embedded)
 ```
 
+This direct-Cargo executable is a development candidate, not the distributed portable
+build. On the tested Windows toolchain it imports `VCRUNTIME140.dll` and
+`VCRUNTIME140_1.dll`. Use `npm run tauri -- build -- --locked --offline` for the final
+offline-capable packaging pass after dependencies and bundler tools have been fetched:
+the Tauri CLI enables its static Visual C++ runtime build. Inspect the final executable's
+imports rather than assuming the two build paths produce equivalent dependencies.
+The 0.15.1 final build has neither runtime DLL import; WebView2 is still required.
+
 A cold Rust build takes on the order of ten minutes and several gigabytes (wasmtime and wgpu are
 large); an incremental release build of the application crate is about three minutes. The debug and
 test targets for the four feature sets below are much larger, on the order of tens of gigabytes: set

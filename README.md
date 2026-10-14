@@ -5,9 +5,11 @@ PhotoForge is a lightweight, privacy-first desktop photo restoration and enhance
 This repository contains the Phase 0 foundation through Phase 15: interoperability
 (Photoshop, TIFF, OpenEXR, SVG, metadata, the clipboard and camera RAW), on top of
 Phase 14's extensibility, resource management, oversized images, safe automation and
-sandboxed plugin architecture. The target version is **0.15.1**. See
-[Phase 15 results](docs/phase-15-results.md) for current verification, the packaged
-installers and what is not claimed, and [Phase 14 results](docs/phase-14-results.md) for
+sandboxed plugin architecture. The current hardening version is **0.15.1**. See
+[0.15.1 checks and limitations](docs/release-0-15-1.md) and
+[Windows downloads](https://github.com/Arshyi/PhotoForge/releases/tag/v0.15.1),
+and [Phase 15 results](docs/phase-15-results.md) for the earlier verification ledger,
+packaged installers and what is not claimed, and [Phase 14 results](docs/phase-14-results.md) for
 the baseline before it; Phase 10 remains the precision and colour baseline, Phase 11 the
 tiled-render baseline and Phase 13 the layer baseline.
 
@@ -32,16 +34,21 @@ tiled-render baseline and Phase 13 the layer baseline.
   Only DNG is read. See [RAW development](docs/raw-development.md).
 * **The Windows clipboard.** Copy a layer or the merged picture; paste as a layer or as a
   document. See [Clipboard](docs/clipboard.md).
-* **Verified in the packaged window**, not only by tests: the release executable was
-  driven in a real window, which found and fixed three defects; both installers were
-  installed, run and uninstalled. **Not signed**, and the MSI registers per machine but
-  installs per user, so the NSIS installer is the one to use. Everything that was not
-  checked is listed in [Phase 15 results](docs/phase-15-results.md).
-* **Since 0.15.0** (on `main` as it merges; not yet a release): the clipboard driven in the
+* **Packaged-window checks**, not only unit tests: 0.15.1 passed 32 page-layout cells,
+  format open/export checks, and a per-user NSIS install/launch/uninstall. These use a
+  local DevTools regression harness, not a completed native hands-on/DPI matrix. The
+  final clipboard recheck safely refused to run because it could not back up the
+  clipboard; an earlier candidate passed all 14 checks. **Not signed**. MSI extraction
+  passed, but an elevated all-users lifecycle is not claimed and its directory-reuse
+  caveat remains, so use NSIS or the portable ZIP. See
+  [0.15.1 checks](docs/release-0-15-1.md); earlier checks remain in
+  [Phase 15 results](docs/phase-15-results.md).
+* **Since 0.15.0**: the clipboard driven in the
   packaged window ([15.10](docs/phase-15-10-results.md)); highlights above white kept under
   the blend modes, PSD import and export memory, four SVG round-trip gaps
   ([15.11](docs/phase-15-11-results.md)); the editing panel's controls and the window at
-  widths from 760 to 1920 px and scales to 200 % ([15.12](docs/phase-15-12-results.md)).
+  widths from 760 to 1920 px and emulated device pixel ratios to 200 %
+  ([15.12](docs/phase-15-12-results.md)).
 
 ## Extensibility, resources and oversized images (Phase 14)
 
