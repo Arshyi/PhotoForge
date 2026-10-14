@@ -33,8 +33,17 @@ repository documents. The cleanup was not a source-code change and is not repeat
 - Future packages refuse downgrades. The upstream template's MIT notice is retained
   and bundled separately; it is not an overall PhotoForge license.
 - Seven source-policy regressions catch hive/view/scope/upgrade-identity, shared-Desktop
-  removal, and unsafe
-  migration changes. This is source lint, not built-MSI or native lifecycle proof.
+  removal, and unsafe migration changes. This is source lint, not built-MSI or native
+  lifecycle proof.
+- The old MSI lifecycle harness was replaced with a read-only default preflight and
+  explicit install/verify/uninstall stages. It refuses existing installations, shortcuts
+  and running apps, records exact package/product ownership, preserves per-user NSIS
+  state and checks the Program Files default. Cancellation, timeouts, failed exit codes
+  and uncertain ownership cannot be counted as a pass. It never force-closes another
+  session or deletes a directory to make a test succeed.
+- 26 isolated harness regressions passed in Windows PowerShell 5.1 and PowerShell 7.
+  They mock registry, process, filesystem and UAC boundaries; they do not prove an
+  actual elevated install or GUI launch. The harness keeps those claims explicitly false.
 
 Built MSI table inspection, installer lifecycle, native display-scaling and
 cross-application verification are pending. The upstream WebView2 prerequisite handling

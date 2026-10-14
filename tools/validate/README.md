@@ -49,7 +49,8 @@ amount; `PF_BUDGET_BYTES=0` leaves the profile alone, and the application then p
 | --- | --- |
 | `drive_formats.ps1` | Opens and exports EXR, SVG and PSD through the real buttons; records each report dialog, the IPC commands and errors. Needs the samples from `tools/fetch_exr_samples.py`, `fetch_svg_samples.py`, `fetch_psd_samples.py`. Then `python tools\validate\check_formats.py` reads the outputs with OpenEXR, resvg and psd-tools. |
 | `nsis_lifecycle.ps1` | Installs the NSIS installer silently, opens a RAW region in the installed app, closes it, uninstalls; reports files, registration, shortcuts and what is left. **Installs to and removes `%LOCALAPPDATA%\PhotoForge`**: do not run it on a machine where you use an installed PhotoForge. |
-| `msi_lifecycle.ps1` | The same for the MSI, which needs UAC elevation twice (install and uninstall): somebody has to click Yes. |
+| `check_msi.ps1` | Read-only built MSI table inspection: scope, registry view, directory search, migration refusal, payload and shared-Desktop protection. No installation or custom actions. |
+| `msi_lifecycle.ps1` | Guarded, staged all-users validation. Explicit package, read-only preflight by default, refusal of existing installs/shortcuts/processes, exact product/run ownership. Install/removal each need a person's UAC consent. No app launching, forced closing or directory deletion. |
 | `clipboard_window.ps1` | Copies and pastes with real key events (Ctrl+C, Ctrl+Shift+C, Ctrl+V, the palette) and reads and writes the clipboard from outside with `clipboard_probe.py` (Pillow): what a copy puts there, pixel for pixel, and what a paste reads. 14 checks. **Replaces the clipboard**: saves the whole of it first with `tools\clipboard_backup.ps1` and puts it back at the end (refuses if something on it cannot be put back; `-AllowLoss`). Needs `.work\venv` (Pillow) and `node tools\validate\make_pictures.mjs` (run on demand). |
 | `layout_matrix.ps1` | Shows the window at 8 sizes (the minimum 760 x 560 to 1920 x 1080) and 4 device pixel ratios with a document open and reports, per cell, a sideways-scrolling page, a header button past the edge, panel controls outside the panel or clipping, and controls in the browser's own look (`layout_probe.js`, `cdp.mjs layout`). Screenshots in `<work>\validate\shots`. The page is shown at a size and ratio with DevTools' override; the display's own scale is a system setting and is not changed. |
 | `close_repro.ps1` | Opens a portrait region with the render commands made to fail and asks the window to close, repeatedly; prints `close.log` (the application's own record of close requests). `-Runs n`; `-NoInject` for a healthy document (nothing made to fail); `-Observe` also records what the page saw. |
@@ -58,6 +59,26 @@ The helper files `listen_close.js`, `close_state.js` and `aside_layout.js` are s
 the scenarios (and you, with `node cdp.mjs evalfile`) use.
 
 ## Doing it by hand
+
+Use 64-bit PowerShell and an explicit candidate MSI. The default preflight makes no
+changes. `Install` creates a fresh receipt directory under `.work\msi-lifecycle`:
+
+```powershell
+.\tools\validate\msi_lifecycle.ps1 -Msi C:\candidate\PhotoForge_0.15.2_x64_en-US.msi
+.\tools\validate\msi_lifecycle.ps1 -Action Install -Msi C:\candidate\PhotoForge_0.15.2_x64_en-US.msi
+# A person answers UAC. Use this run's printed RunDirectory for later actions:
+.\tools\validate\msi_lifecycle.ps1 -Action Verify -RunDirectory C:\repo\.work\msi-lifecycle\run-PRINTED_ID
+# Launch the verified Program Files executable with launch.ps1's isolated data,
+# test it separately, then close that test window normally yourself.
+.\tools\validate\msi_lifecycle.ps1 -Action Uninstall -RunDirectory C:\repo\.work\msi-lifecycle\run-PRINTED_ID
+```
+
+UAC cancellation, nonzero MSI results and timeouts are failures/pending outcomes,
+never passes. A timed-out msiexec is not killed: let it finish and inspect before
+proceeding. Uncertain ownership or a changed executable blocks automatic removal.
+Receipts and logs are retained; projects and application data are not removed. The
+harness checks installation/removal only: `launchVerified` and `nativeLifecycleVerified`
+stay false, requiring separate launch/GUI evidence.
 
 ```powershell
 $p = .\tools\validate\launch.ps1                    # prints PID n; wait ~8 s for the window
