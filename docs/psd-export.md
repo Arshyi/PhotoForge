@@ -72,8 +72,18 @@ PhotoForge does not write CMYK, Lab, indexed or greyscale files.
 
 8- and 16-bit channels are compressed with PackBits (RLE), which every Photoshop reader accepts;
 32-bit channels are stored raw. A file is written as PSB when a side is over 30,000 pixels or the
-data would pass 2 GiB. The pixel memory needed is checked against the same budget as opening a
-file, before anything is written, and a file that would not fit is refused with the numbers.
+data would pass 2 GiB. The memory needed is checked against the same budget as opening a
+file, before anything is written, and a file that would not fit is refused with the numbers. What
+is checked is the **peak**, not the size of the file: while the layers are written, the layers
+already encoded and the planes of the one being written (the largest layer counts twice); while
+the flattened picture is made, the layers encoded, the picture as rendered (16 bytes a pixel in a
+high-precision document, 4 in an 8-bit one), its planes at the file's depth, and its encoding. The
+file is written from those pieces and is never copied into one buffer first (before Phase 15.11 it was
+copied three or four times, and the check counted the size of the file once). The estimate is
+counted from what is held, not measured. The 0.15.1 preflight follows the export tree:
+semantic layers and transformed pixel layers count at canvas size, transformed groups count as
+one baked raster, and masks count toward the estimate. Smart-source registry entries are not
+counted as separate exported layers.
 
 The file is written beside its destination and then renamed, so a failed export leaves what was
 there. PhotoForge will not write over a file that a layer in the document is linked to, or over the

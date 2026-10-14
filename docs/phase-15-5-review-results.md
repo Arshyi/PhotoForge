@@ -45,6 +45,9 @@ the IPC tests use. All pass here.)
 
 ## Recorded, not fixed
 
+*(Of these, the highlights under the blend modes, the PSD memory and the SVG items were fixed
+afterwards: [Phase 15.11](phase-15-11-results.md).)*
+
 * **High-dynamic-range values are clipped by most blend modes** (everything but Normal, Multiply,
   Screen, Darken, Lighten, Difference, Exclusion). Written into `docs/layers.md` and
   `docs/openexr.md`; a real fix is a design decision about what Overlay and its relatives mean above

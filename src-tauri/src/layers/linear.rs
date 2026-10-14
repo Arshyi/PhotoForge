@@ -235,25 +235,63 @@ fn channels(p: FloatRgba) -> [f32; 3] {
     [p.red, p.green, p.blue]
 }
 
-/// Extended linear arithmetic is defined for unbounded modes. SDR-only modes
-/// explicitly bound their blend operands (not the whole image) to [0,1].
+/// A blend of linear light, for operands that may lie outside 0 to 1.
+///
+/// **Seven modes have no ceiling**: Normal, Multiply, Screen, Darken, Lighten, Difference and
+/// Exclusion map the unit square into itself, so their arithmetic is the same inside it and is
+/// extended to any value, and a highlight under them is kept exactly.
+///
+/// **Every other mode is defined on 0 to 1** (it pivots on mid-grey, or clamps its own result as
+/// part of its definition, so applying it to a value above white would change what it does to
+/// values below). It is applied to the operands clamped to that range, as it always was, and then
+/// **what the backdrop held above white is added back**: `result = f(clamp(b), clamp(s)) +
+/// max(b - 1, 0)`. So
+///
+/// * with both operands in range, and for anything below 0, the result is exactly what it was;
+/// * a backdrop highlight is never flattened to white by these modes: it passes through, and the
+///   mode still acts on the part of the picture that is in range (a neutral source leaves any
+///   backdrop alone, above white too);
+/// * the result is continuous at white and never lower than the clamped one;
+/// * a **source** above white counts as white: it is clamped, and its excess is not added (the
+///   modes disagree about what a source highlight should do, and a wrong guess is worse than none).
+///
 /// W3C component modes are evaluated in encoded float sRGB, never linear HSL.
 pub fn blend_linear(mode: BlendMode, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
-    if !mode.is_separable() {
-        return mode
-            .blend(b.map(srgb_encode), s.map(srgb_encode))
-            .map(srgb_decode);
-    }
     match mode {
-        BlendMode::Normal => s,
-        BlendMode::Multiply => std::array::from_fn(|i| b[i] * s[i]),
-        BlendMode::Screen => std::array::from_fn(|i| b[i] + s[i] - b[i] * s[i]),
-        BlendMode::Darken => std::array::from_fn(|i| b[i].min(s[i])),
-        BlendMode::Lighten => std::array::from_fn(|i| b[i].max(s[i])),
-        BlendMode::Difference => std::array::from_fn(|i| (b[i] - s[i]).abs()),
-        BlendMode::Exclusion => std::array::from_fn(|i| b[i] + s[i] - 2.0 * b[i] * s[i]),
-        _ => mode.blend(b, s),
+        BlendMode::Normal => return s,
+        BlendMode::Multiply => return std::array::from_fn(|i| b[i] * s[i]),
+        BlendMode::Screen => return std::array::from_fn(|i| b[i] + s[i] - b[i] * s[i]),
+        BlendMode::Darken => return std::array::from_fn(|i| b[i].min(s[i])),
+        BlendMode::Lighten => return std::array::from_fn(|i| b[i].max(s[i])),
+        BlendMode::Difference => return std::array::from_fn(|i| (b[i] - s[i]).abs()),
+        BlendMode::Exclusion => {
+            return std::array::from_fn(|i| b[i] + s[i] - 2.0 * b[i] * s[i]);
+        }
+        _ => {}
     }
+    let within = |value: f32| {
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let (inside_b, inside_s) = (b.map(within), s.map(within));
+    let blended = if mode.is_separable() {
+        mode.blend(inside_b, inside_s)
+    } else {
+        mode.blend(inside_b.map(srgb_encode), inside_s.map(srgb_encode))
+            .map(srgb_decode)
+    };
+    // What the backdrop held above white.
+    std::array::from_fn(|i| {
+        let highlight = if b[i].is_finite() {
+            (b[i] - 1.0).max(0.0)
+        } else {
+            0.0
+        };
+        blended[i] + highlight
+    })
 }
 
 pub fn source_over(back: FloatRgba, source: FloatRgba, mode: BlendMode) -> FloatRgba {
@@ -566,5 +604,164 @@ mod tests {
             ),
             Err(AppError::RenderCancelled)
         ));
+    }
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    const UNBOUNDED: [BlendMode; 7] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+    ];
+
+    /// What `blend_linear` did before highlights were passed through: the mode on the clamped
+    /// operands (through encoded sRGB for the component modes), with nothing added back.
+    fn clamped_reference(mode: BlendMode, b: [f32; 3], s: [f32; 3]) -> [f32; 3] {
+        if !mode.is_separable() {
+            return mode
+                .blend(b.map(srgb_encode), s.map(srgb_encode))
+                .map(srgb_decode);
+        }
+        mode.blend(b, s)
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-5)
+    }
+
+    #[test]
+    fn in_range_operands_give_exactly_what_every_mode_always_gave() {
+        let levels = [0.0_f32, 0.07, 0.25, 0.5, 0.5001, 0.8, 1.0];
+        for mode in BlendMode::ALL {
+            if UNBOUNDED.contains(&mode) {
+                continue;
+            }
+            for &r in &levels {
+                for &g in &levels {
+                    for &s in &levels {
+                        let b = [r, g, 1.0 - r];
+                        let src = [s, 1.0 - g, g];
+                        assert_eq!(
+                            blend_linear(mode, b, src),
+                            clamped_reference(mode, b, src),
+                            "{mode:?} {b:?} {src:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_backdrop_highlight_passes_through_the_modes_defined_on_zero_to_one() {
+        for mode in BlendMode::ALL {
+            if UNBOUNDED.contains(&mode) {
+                continue;
+            }
+            for source in [[0.0, 0.0, 0.0], [0.3, 0.5, 0.9], [1.0, 1.0, 1.0]] {
+                let backdrop = [4.0, 1.25, 0.4];
+                let got = blend_linear(mode, backdrop, source);
+                let inside = clamped_reference(mode, [1.0, 1.0, 0.4], source);
+                let want = [inside[0] + 3.0, inside[1] + 0.25, inside[2]];
+                assert!(
+                    close(got, want),
+                    "{mode:?} {source:?}: {got:?} against {want:?}"
+                );
+                // never below what the clamped mode gave: a highlight is not made darker
+                assert!(got[0] >= inside[0] && got[1] >= inside[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_neutral_source_leaves_a_highlight_alone() {
+        // Mid-grey is the neutral operand of these three, so a backdrop of any brightness is
+        // returned as it was, above white included.
+        for mode in [
+            BlendMode::Overlay,
+            BlendMode::SoftLight,
+            BlendMode::HardLight,
+        ] {
+            let backdrop = [6.0, 0.2, 1.0];
+            let got = blend_linear(mode, backdrop, [0.5, 0.5, 0.5]);
+            assert!(close(got, backdrop), "{mode:?}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_source_above_white_counts_as_white_under_those_modes() {
+        for mode in BlendMode::ALL {
+            if UNBOUNDED.contains(&mode) {
+                continue;
+            }
+            let backdrop = [0.3, 0.7, 2.0];
+            assert_eq!(
+                blend_linear(mode, backdrop, [9.0, 1.5, 1.0]),
+                blend_linear(mode, backdrop, [1.0, 1.0, 1.0]),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seven_unbounded_modes_keep_their_highlights_exactly() {
+        let (b, s) = ([4.0, 0.5, 2.0], [0.5, 3.0, 2.0]);
+        assert_eq!(blend_linear(BlendMode::Normal, b, s), s);
+        assert_eq!(blend_linear(BlendMode::Multiply, b, s), [2.0, 1.5, 4.0]);
+        assert_eq!(
+            blend_linear(BlendMode::Screen, b, s),
+            [4.0 + 0.5 - 2.0, 0.5 + 3.0 - 1.5, 2.0 + 2.0 - 4.0]
+        );
+        assert_eq!(blend_linear(BlendMode::Darken, b, s), [0.5, 0.5, 2.0]);
+        assert_eq!(blend_linear(BlendMode::Lighten, b, s), [4.0, 3.0, 2.0]);
+        assert_eq!(blend_linear(BlendMode::Difference, b, s), [3.5, 2.5, 0.0]);
+    }
+
+    #[test]
+    fn every_mode_stays_finite_for_extreme_operands() {
+        let extremes = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -3.0,
+            0.0,
+            1.0,
+            1e30,
+        ];
+        for mode in BlendMode::ALL {
+            for &x in &extremes {
+                for &y in &extremes {
+                    let out = blend_linear(mode, [x, y, 0.5], [y, x, 2.0]);
+                    // the seven unbounded modes are plain arithmetic, and may be as large as the
+                    // inputs; the others must never turn a finite backdrop into a non-finite
+                    if !UNBOUNDED.contains(&mode) && x.is_finite() && y.is_finite() {
+                        assert!(
+                            out.iter().all(|v| v.is_finite()),
+                            "{mode:?} {x} {y}: {out:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_with_a_highlight_keeps_it_through_an_overlay_layer() {
+        // Source-over of a half-grey Overlay layer, fully opaque, on a backdrop of 8.0: the
+        // highlight is what it was (it used to come out as 1.0).
+        let back = FloatRgba::new(8.0, 8.0, 8.0, 1.0);
+        let source = FloatRgba::new(0.5, 0.5, 0.5, 1.0);
+        let out = source_over(back, source, BlendMode::Overlay);
+        assert!((out.red - 8.0).abs() < 1e-4 && (out.green - 8.0).abs() < 1e-4);
+        // and at half coverage it is a mix of what it was and what the mode gives, still 8.0
+        let half = source_over(back, FloatRgba::new(0.5, 0.5, 0.5, 0.5), BlendMode::Overlay);
+        assert!((half.red - 8.0).abs() < 1e-4);
     }
 }

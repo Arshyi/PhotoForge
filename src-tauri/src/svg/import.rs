@@ -669,47 +669,156 @@ fn transformed(commands: &[PathCommand], matrix: &Affine) -> Vec<PathCommand> {
 /// A colour as written: encoded sRGB, 0 to 1, with alpha.
 type Srgba = [f32; 4];
 
-const NAMED: [(&str, u32); 40] = [
-    ("black", 0x000000),
-    ("white", 0xffffff),
-    ("red", 0xff0000),
-    ("green", 0x008000),
-    ("blue", 0x0000ff),
-    ("yellow", 0xffff00),
-    ("cyan", 0x00ffff),
+/// Every colour name CSS defines (the 147 of SVG 1.1 and `rebeccapurple`), as 0xRRGGBB.
+const NAMED: [(&str, u32); 148] = [
+    ("aliceblue", 0xf0f8ff),
+    ("antiquewhite", 0xfaebd7),
     ("aqua", 0x00ffff),
-    ("magenta", 0xff00ff),
-    ("fuchsia", 0xff00ff),
-    ("gray", 0x808080),
-    ("grey", 0x808080),
-    ("silver", 0xc0c0c0),
-    ("maroon", 0x800000),
-    ("olive", 0x808000),
-    ("lime", 0x00ff00),
-    ("teal", 0x008080),
-    ("navy", 0x000080),
-    ("purple", 0x800080),
-    ("orange", 0xffa500),
-    ("pink", 0xffc0cb),
+    ("aquamarine", 0x7fffd4),
+    ("azure", 0xf0ffff),
+    ("beige", 0xf5f5dc),
+    ("bisque", 0xffe4c4),
+    ("black", 0x000000),
+    ("blanchedalmond", 0xffebcd),
+    ("blue", 0x0000ff),
+    ("blueviolet", 0x8a2be2),
     ("brown", 0xa52a2a),
-    ("gold", 0xffd700),
-    ("indigo", 0x4b0082),
-    ("violet", 0xee82ee),
-    ("turquoise", 0x40e0d0),
-    ("tan", 0xd2b48c),
-    ("khaki", 0xf0e68c),
-    ("crimson", 0xdc143c),
+    ("burlywood", 0xdeb887),
+    ("cadetblue", 0x5f9ea0),
+    ("chartreuse", 0x7fff00),
+    ("chocolate", 0xd2691e),
     ("coral", 0xff7f50),
-    ("salmon", 0xfa8072),
-    ("skyblue", 0x87ceeb),
-    ("steelblue", 0x4682b4),
-    ("royalblue", 0x4169e1),
-    ("darkgray", 0xa9a9a9),
-    ("darkgrey", 0xa9a9a9),
-    ("lightgray", 0xd3d3d3),
-    ("lightgrey", 0xd3d3d3),
-    ("darkgreen", 0x006400),
+    ("cornflowerblue", 0x6495ed),
+    ("cornsilk", 0xfff8dc),
+    ("crimson", 0xdc143c),
+    ("cyan", 0x00ffff),
     ("darkblue", 0x00008b),
+    ("darkcyan", 0x008b8b),
+    ("darkgoldenrod", 0xb8860b),
+    ("darkgray", 0xa9a9a9),
+    ("darkgreen", 0x006400),
+    ("darkgrey", 0xa9a9a9),
+    ("darkkhaki", 0xbdb76b),
+    ("darkmagenta", 0x8b008b),
+    ("darkolivegreen", 0x556b2f),
+    ("darkorange", 0xff8c00),
+    ("darkorchid", 0x9932cc),
+    ("darkred", 0x8b0000),
+    ("darksalmon", 0xe9967a),
+    ("darkseagreen", 0x8fbc8f),
+    ("darkslateblue", 0x483d8b),
+    ("darkslategray", 0x2f4f4f),
+    ("darkslategrey", 0x2f4f4f),
+    ("darkturquoise", 0x00ced1),
+    ("darkviolet", 0x9400d3),
+    ("deeppink", 0xff1493),
+    ("deepskyblue", 0x00bfff),
+    ("dimgray", 0x696969),
+    ("dimgrey", 0x696969),
+    ("dodgerblue", 0x1e90ff),
+    ("firebrick", 0xb22222),
+    ("floralwhite", 0xfffaf0),
+    ("forestgreen", 0x228b22),
+    ("fuchsia", 0xff00ff),
+    ("gainsboro", 0xdcdcdc),
+    ("ghostwhite", 0xf8f8ff),
+    ("gold", 0xffd700),
+    ("goldenrod", 0xdaa520),
+    ("gray", 0x808080),
+    ("green", 0x008000),
+    ("greenyellow", 0xadff2f),
+    ("grey", 0x808080),
+    ("honeydew", 0xf0fff0),
+    ("hotpink", 0xff69b4),
+    ("indianred", 0xcd5c5c),
+    ("indigo", 0x4b0082),
+    ("ivory", 0xfffff0),
+    ("khaki", 0xf0e68c),
+    ("lavender", 0xe6e6fa),
+    ("lavenderblush", 0xfff0f5),
+    ("lawngreen", 0x7cfc00),
+    ("lemonchiffon", 0xfffacd),
+    ("lightblue", 0xadd8e6),
+    ("lightcoral", 0xf08080),
+    ("lightcyan", 0xe0ffff),
+    ("lightgoldenrodyellow", 0xfafad2),
+    ("lightgray", 0xd3d3d3),
+    ("lightgreen", 0x90ee90),
+    ("lightgrey", 0xd3d3d3),
+    ("lightpink", 0xffb6c1),
+    ("lightsalmon", 0xffa07a),
+    ("lightseagreen", 0x20b2aa),
+    ("lightskyblue", 0x87cefa),
+    ("lightslategray", 0x778899),
+    ("lightslategrey", 0x778899),
+    ("lightsteelblue", 0xb0c4de),
+    ("lightyellow", 0xffffe0),
+    ("lime", 0x00ff00),
+    ("limegreen", 0x32cd32),
+    ("linen", 0xfaf0e6),
+    ("magenta", 0xff00ff),
+    ("maroon", 0x800000),
+    ("mediumaquamarine", 0x66cdaa),
+    ("mediumblue", 0x0000cd),
+    ("mediumorchid", 0xba55d3),
+    ("mediumpurple", 0x9370db),
+    ("mediumseagreen", 0x3cb371),
+    ("mediumslateblue", 0x7b68ee),
+    ("mediumspringgreen", 0x00fa9a),
+    ("mediumturquoise", 0x48d1cc),
+    ("mediumvioletred", 0xc71585),
+    ("midnightblue", 0x191970),
+    ("mintcream", 0xf5fffa),
+    ("mistyrose", 0xffe4e1),
+    ("moccasin", 0xffe4b5),
+    ("navajowhite", 0xffdead),
+    ("navy", 0x000080),
+    ("oldlace", 0xfdf5e6),
+    ("olive", 0x808000),
+    ("olivedrab", 0x6b8e23),
+    ("orange", 0xffa500),
+    ("orangered", 0xff4500),
+    ("orchid", 0xda70d6),
+    ("palegoldenrod", 0xeee8aa),
+    ("palegreen", 0x98fb98),
+    ("paleturquoise", 0xafeeee),
+    ("palevioletred", 0xdb7093),
+    ("papayawhip", 0xffefd5),
+    ("peachpuff", 0xffdab9),
+    ("peru", 0xcd853f),
+    ("pink", 0xffc0cb),
+    ("plum", 0xdda0dd),
+    ("powderblue", 0xb0e0e6),
+    ("purple", 0x800080),
+    ("rebeccapurple", 0x663399),
+    ("red", 0xff0000),
+    ("rosybrown", 0xbc8f8f),
+    ("royalblue", 0x4169e1),
+    ("saddlebrown", 0x8b4513),
+    ("salmon", 0xfa8072),
+    ("sandybrown", 0xf4a460),
+    ("seagreen", 0x2e8b57),
+    ("seashell", 0xfff5ee),
+    ("sienna", 0xa0522d),
+    ("silver", 0xc0c0c0),
+    ("skyblue", 0x87ceeb),
+    ("slateblue", 0x6a5acd),
+    ("slategray", 0x708090),
+    ("slategrey", 0x708090),
+    ("snow", 0xfffafa),
+    ("springgreen", 0x00ff7f),
+    ("steelblue", 0x4682b4),
+    ("tan", 0xd2b48c),
+    ("teal", 0x008080),
+    ("thistle", 0xd8bfd8),
+    ("tomato", 0xff6347),
+    ("turquoise", 0x40e0d0),
+    ("violet", 0xee82ee),
+    ("wheat", 0xf5deb3),
+    ("white", 0xffffff),
+    ("whitesmoke", 0xf5f5f5),
+    ("yellow", 0xffff00),
+    ("yellowgreen", 0x9acd32),
 ];
 
 fn parse_colour(text: &str) -> Option<Srgba> {
@@ -760,22 +869,39 @@ fn parse_colour(text: &str) -> Option<Srgba> {
                 Some(percent) => percent.parse::<f32>().ok().map(|v| v / 100.0),
                 None => part.parse::<f32>().ok().map(|v| v / 255.0),
             }
+            .filter(|v| v.is_finite())
             .map(|v| v.clamp(0.0, 1.0))
-        };
-        let alpha = match parts.get(3) {
-            Some(part) => match part.strip_suffix('%') {
-                Some(percent) => percent.parse::<f32>().ok()? / 100.0,
-                None => part.parse::<f32>().ok()?,
-            }
-            .clamp(0.0, 1.0),
-            None => 1.0,
         };
         return Some([
             channel(parts[0])?,
             channel(parts[1])?,
             channel(parts[2])?,
-            alpha,
+            parse_alpha(parts.get(3).copied())?,
         ]);
+    }
+    if let Some(body) = lower
+        .strip_prefix("hsla(")
+        .or_else(|| lower.strip_prefix("hsl("))
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = body
+            .split([',', ' ', '/'])
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.len() != 3 && parts.len() != 4 {
+            return None;
+        }
+        let hue = parse_hue(parts[0])?;
+        let fraction = |part: &str| -> Option<f32> {
+            part.strip_suffix('%')?
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(|v| (v / 100.0).clamp(0.0, 1.0))
+        };
+        let (saturation, lightness) = (fraction(parts[1])?, fraction(parts[2])?);
+        let [r, g, b] = hsl_to_rgb(hue, saturation, lightness);
+        return Some([r, g, b, parse_alpha(parts.get(3).copied())?]);
     }
     NAMED
         .iter()
@@ -788,6 +914,44 @@ fn parse_colour(text: &str) -> Option<Srgba> {
                 1.0,
             ]
         })
+}
+
+/// An alpha as CSS writes it: a number, or a percentage; absent is opaque.
+fn parse_alpha(part: Option<&str>) -> Option<f32> {
+    let Some(part) = part else { return Some(1.0) };
+    let value = match part.strip_suffix('%') {
+        Some(percent) => percent.parse::<f32>().ok()? / 100.0,
+        None => part.parse::<f32>().ok()?,
+    };
+    value.is_finite().then(|| value.clamp(0.0, 1.0))
+}
+
+/// A hue in degrees, from a number or a number with `deg`, `grad`, `rad` or `turn`.
+fn parse_hue(part: &str) -> Option<f32> {
+    let (number, per_unit) = if let Some(n) = part.strip_suffix("deg") {
+        (n, 1.0)
+    } else if let Some(n) = part.strip_suffix("grad") {
+        (n, 0.9)
+    } else if let Some(n) = part.strip_suffix("rad") {
+        (n, 180.0 / std::f32::consts::PI)
+    } else if let Some(n) = part.strip_suffix("turn") {
+        (n, 360.0)
+    } else {
+        (part, 1.0)
+    };
+    let degrees = number.parse::<f32>().ok()? * per_unit;
+    degrees.is_finite().then_some(degrees)
+}
+
+/// CSS Color 4's conversion: hue in degrees, saturation and lightness 0 to 1.
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> [f32; 3] {
+    let hue = hue.rem_euclid(360.0);
+    let channel = |offset: f32| -> f32 {
+        let k = (offset + hue / 30.0).rem_euclid(12.0);
+        let a = saturation * lightness.min(1.0 - lightness);
+        lightness - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    };
+    [channel(0.0), channel(8.0), channel(4.0)]
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -885,11 +1049,18 @@ struct Resolved {
     display: bool,
 }
 
+/// The reference of a percentage that is of neither the width nor the height: the viewport's
+/// diagonal over the square root of two, which SVG calls the normalised diagonal.
+fn normalised_diagonal(viewport: (f64, f64)) -> f64 {
+    ((viewport.0 * viewport.0 + viewport.1 * viewport.1) / 2.0).sqrt()
+}
+
 fn resolve(
     node: Node<'_, '_>,
     parent: &Style,
     gradient_colour: &dyn Fn(&str) -> Option<Srgba>,
     unused: &mut Unused,
+    diagonal: f64,
 ) -> Resolved {
     let mut style = parent.clone();
     let mut opacity = 1.0_f32;
@@ -965,7 +1136,7 @@ fn resolve(
                 }
             }
             "stroke-width" => {
-                if let Some(v) = parse_length(value, 0.0) {
+                if let Some(v) = parse_length(value, diagonal) {
                     style.stroke_width = v.max(0.0);
                 }
             }
@@ -1013,6 +1184,25 @@ fn resolve(
     }
 }
 
+/// What a layer is called: the text of the element's own `<title>` child (SVG's accessible name,
+/// and what PhotoForge writes), else its `id`.
+fn element_name(node: Node<'_, '_>) -> Option<String> {
+    let title = node
+        .children()
+        .filter(Node::is_element)
+        .find(|child| child.tag_name().name() == "title")
+        .map(|title| {
+            title
+                .descendants()
+                .filter(Node::is_text)
+                .filter_map(|text| text.text())
+                .collect::<String>()
+        })
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    title.or_else(|| node.attribute("id").map(str::to_string))
+}
+
 /// A length in user units. A percentage is of `reference` (0 when there is none).
 fn parse_length(text: &str, reference: f64) -> Option<f32> {
     let text = text.trim();
@@ -1054,8 +1244,9 @@ struct Importer<'a, 'input> {
     report: SvgImportReport,
     layers: usize,
     counter: usize,
-    /// The stroke width and other lengths are measured in user units of the root.
-    canvas: (f64, f64),
+    /// The viewport in user units, which is what a percentage is of: the view box, or the
+    /// canvas in pixels when there is none.
+    viewport: (f64, f64),
 }
 
 impl Importer<'_, '_> {
@@ -1161,7 +1352,7 @@ impl Importer<'_, '_> {
                 return;
             }
             let tag = child.tag_name().name();
-            let id_name = child.attribute("id").map(str::to_string);
+            let id_name = element_name(child);
             let label = || id_name.clone().unwrap_or_else(|| tag.to_string());
             match tag {
                 // Containers and metadata that draw nothing themselves.
@@ -1228,7 +1419,13 @@ impl Importer<'_, '_> {
     ) {
         let mut unused = Unused::default();
         let lookup = |id: &str| self.gradient_colour(id);
-        let resolved = resolve(node, parent_style, &lookup, &mut unused);
+        let resolved = resolve(
+            node,
+            parent_style,
+            &lookup,
+            &mut unused,
+            normalised_diagonal(self.viewport),
+        );
         let name = id_name.unwrap_or_else(|| "Group".to_string());
         for message in unused.messages {
             self.note(ReportKind::Approximated, Some(&name), message);
@@ -1292,7 +1489,13 @@ impl Importer<'_, '_> {
     ) {
         let mut unused = Unused::default();
         let lookup = |id: &str| self.gradient_colour(id);
-        let resolved = resolve(node, parent_style, &lookup, &mut unused);
+        let resolved = resolve(
+            node,
+            parent_style,
+            &lookup,
+            &mut unused,
+            normalised_diagonal(self.viewport),
+        );
         let kind_name = match tag {
             "rect" => "Rectangle",
             "circle" => "Circle",
@@ -1323,13 +1526,13 @@ impl Importer<'_, '_> {
                 }
             },
         };
-        let reference = self.canvas.0.max(self.canvas.1);
+        let reference = normalised_diagonal(self.viewport);
         let length = |attribute: &str, of: f64| -> Option<f64> {
             node.attribute(attribute)
                 .map(|text| parse_length(text, of).map(f64::from))
                 .unwrap_or(Some(0.0))
         };
-        let (cx, cy) = (self.canvas.0, self.canvas.1);
+        let (cx, cy) = self.viewport;
         let geometry: Option<ShapeGeometry> = match tag {
             "rect" => {
                 let (x, y) = (length("x", cx), length("y", cy));
@@ -1758,7 +1961,10 @@ pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
         },
         layers: 0,
         counter: 0,
-        canvas: (f64::from(canvas_width), f64::from(canvas_height)),
+        viewport: view_box.map_or(
+            (f64::from(canvas_width), f64::from(canvas_height)),
+            |(_, _, w, h)| (w, h),
+        ),
     };
 
     // The view box mapped onto the canvas, as `preserveAspectRatio` says (the default is meet,
@@ -1804,7 +2010,16 @@ pub fn import_svg_text(text: &str) -> Result<ImportedSvg, AppError> {
     let root_style = Style::default();
     let mut unused = Unused::default();
     let lookup = |id: &str| importer.gradient_colour(id);
-    let resolved_root = resolve(root, &root_style, &lookup, &mut unused);
+    let resolved_root = resolve(
+        root,
+        &root_style,
+        &lookup,
+        &mut unused,
+        normalised_diagonal(view_box.map_or(
+            (f64::from(canvas_width), f64::from(canvas_height)),
+            |(_, _, w, h)| (w, h),
+        )),
+    );
     importer.walk(root, &resolved_root.style, &root_matrix, 0, &mut layers);
 
     let mut canvas = LayerDocument::new(canvas_width, canvas_height);
@@ -2214,6 +2429,201 @@ mod tests {
         }
     }
 
+    fn colour_of(text: &str) -> Option<[f32; 4]> {
+        parse_colour(text)
+    }
+
+    #[test]
+    fn every_css_colour_name_reads() {
+        // The 147 names of SVG 1.1 and rebeccapurple, checked against Pillow's own table when
+        // the list was written (tools: all 148 names and values equal).
+        assert_eq!(NAMED.len(), 148);
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in NAMED {
+            assert!(seen.insert(name), "{name} twice");
+        }
+        for (name, rgb) in [
+            ("aliceblue", 0xf0f8ff_u32),
+            ("lightgoldenrodyellow", 0xfafad2),
+            ("rebeccapurple", 0x663399),
+            ("yellowgreen", 0x9acd32),
+            ("DarkSlateGrey", 0x2f4f4f),
+            ("  Tomato ", 0xff6347),
+        ] {
+            let got = colour_of(name).unwrap_or_else(|| panic!("{name} not read"));
+            let want = [
+                ((rgb >> 16) & 255) as f32 / 255.0,
+                ((rgb >> 8) & 255) as f32 / 255.0,
+                (rgb & 255) as f32 / 255.0,
+                1.0,
+            ];
+            assert_eq!(got, want, "{name}");
+        }
+        assert!(colour_of("notacolour").is_none());
+    }
+
+    #[test]
+    fn hsl_reads_as_the_colour_it_names() {
+        let close =
+            |got: [f32; 4], want: [f32; 4]| got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5);
+        for (text, want) in [
+            ("hsl(0, 100%, 50%)", [1.0, 0.0, 0.0, 1.0]),
+            ("hsl(120, 100%, 25%)", [0.0, 0.5, 0.0, 1.0]),
+            ("hsl(240 100% 50%)", [0.0, 0.0, 1.0, 1.0]),
+            ("hsl(360, 100%, 50%)", [1.0, 0.0, 0.0, 1.0]),
+            ("hsl(-120deg, 100%, 50%)", [0.0, 0.0, 1.0, 1.0]),
+            ("hsl(0.5turn, 100%, 50%)", [0.0, 1.0, 1.0, 1.0]),
+            ("hsl(200grad, 100%, 50%)", [0.0, 1.0, 1.0, 1.0]),
+            ("hsl(0, 0%, 100%)", [1.0, 1.0, 1.0, 1.0]),
+            ("hsl(90, 0%, 40%)", [0.4, 0.4, 0.4, 1.0]),
+            ("hsla(0, 100%, 50%, 0.5)", [1.0, 0.0, 0.0, 0.5]),
+            ("hsl(60 100% 50% / 25%)", [1.0, 1.0, 0.0, 0.25]),
+            // 30 degrees, 100%, 50%: orange-ish, (1, 0.5, 0)
+            ("hsl(30, 100%, 50%)", [1.0, 0.5, 0.0, 1.0]),
+        ] {
+            let got = colour_of(text).unwrap_or_else(|| panic!("{text} not read"));
+            assert!(close(got, want), "{text}: {got:?} against {want:?}");
+        }
+        for bad in [
+            "hsl(0, 100%)",
+            "hsl(x, 1%, 1%)",
+            "hsl(0, 100, 50)",
+            "hsl(NaN, 1%, 1%)",
+        ] {
+            assert!(colour_of(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_percentage_is_of_the_view_box_not_of_the_canvas() {
+        // A 400 x 200 canvas showing a 100 x 50 view box (a scale of 4): 10% of the view box's
+        // width is 10 user units, which is 40 canvas pixels (the shape is held in canvas pixels).
+        // Measured against the canvas it would have been 10% of 400.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 100 50">
+            <rect x="10%" y="20%" width="50%" height="40%"/></svg>"#;
+        let imported = import(svg);
+        match &shapes(&imported)[0].geometry {
+            ShapeGeometry::Rectangle {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                // 10% of 100 and 20% of 50 user units, at a scale of 4: canvas pixels
+                assert_eq!((*x, *y), (40.0, 40.0), "of the view box");
+                assert_eq!((*width, *height), (200.0, 80.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        // With no view box the canvas is the viewport.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+            <rect x="10%" width="50%" height="50%"/></svg>"#;
+        match &shapes(&import(svg))[0].geometry {
+            ShapeGeometry::Rectangle {
+                x, width, height, ..
+            } => assert_eq!((*x, *width, *height), (20.0, 100.0, 50.0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_radius_and_a_stroke_width_in_percent_are_of_the_normalised_diagonal() {
+        // 100 x 50: the normalised diagonal is sqrt((100^2 + 50^2) / 2) = 79.0569...
+        let diagonal = ((100.0_f32 * 100.0 + 50.0 * 50.0) / 2.0).sqrt();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+            <circle cx="50%" cy="50%" r="10%" stroke="#000" stroke-width="2%"/></svg>"##;
+        let imported = import(svg);
+        let shape = shapes(&imported)[0];
+        match &shape.geometry {
+            ShapeGeometry::Ellipse { cx, cy, rx, ry } => {
+                assert_eq!((*cx, *cy), (50.0, 25.0));
+                assert!((rx - diagonal * 0.1).abs() < 1e-3, "{rx}");
+                assert!((ry - diagonal * 0.1).abs() < 1e-3);
+            }
+            other => panic!("{other:?}"),
+        }
+        let width = shape.stroke_style.expect("stroked").width;
+        assert!((width - diagonal * 0.02).abs() < 1e-3, "{width}");
+    }
+
+    #[test]
+    fn a_layer_is_called_by_its_title_before_its_id() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+            <rect id="r1" width="5" height="5"><title> Sky &amp; sea </title></rect>
+            <g id="g1"><title>Folder</title><circle id="c1" cx="5" cy="5" r="2"/></g>
+            <rect id="only-an-id" width="3" height="3"/>
+            <rect width="3" height="3"><title>   </title></rect></svg>"#;
+        let imported = import(svg);
+        let layers = &imported.project.document.layers;
+        assert_eq!(layers[0].name, "Sky & sea");
+        assert_eq!(layers[1].name, "Folder");
+        match &layers[1].content {
+            LayerContent::Group { children, .. } => assert_eq!(children[0].name, "c1"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(layers[2].name, "only-an-id");
+        assert_eq!(layers[3].name, "Rectangle", "an empty title is no name");
+    }
+
+    /// With `PHOTOFORGE_SVG_SAMPLES` (a directory of .svg files) and `PHOTOFORGE_SVG_IMPORT_DUMP`
+    /// set, imports each file, renders it, and leaves `<name>.png` and `summary.tsv` (name, ok or
+    /// error, layers imported, approximated, not imported) for `tools/svg_import_compare.py`, which
+    /// renders the same file with resvg and compares. The files are data: they are only parsed.
+    #[test]
+    fn real_svg_files_can_be_left_for_an_independent_renderer() {
+        let (Some(samples), Some(dump)) = (
+            std::env::var_os("PHOTOFORGE_SVG_SAMPLES"),
+            std::env::var_os("PHOTOFORGE_SVG_IMPORT_DUMP"),
+        ) else {
+            return;
+        };
+        let (samples, dump) = (
+            std::path::PathBuf::from(samples),
+            std::path::PathBuf::from(dump),
+        );
+        std::fs::create_dir_all(&dump).unwrap();
+        let mut files: Vec<_> = std::fs::read_dir(&samples)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "svg"))
+            .collect();
+        files.sort();
+        let mut summary = String::new();
+        for path in files {
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let text = std::fs::read_to_string(&path).unwrap();
+            match import_svg_text(&text) {
+                Ok(imported) => {
+                    rendered(&imported.project.document)
+                        .save(dump.join(format!("{stem}.png")))
+                        .unwrap();
+                    let count = |kind: ReportKind| {
+                        imported
+                            .report
+                            .entries
+                            .iter()
+                            .filter(|entry| entry.kind == kind)
+                            .count()
+                    };
+                    summary.push_str(&format!(
+                        "{stem}	ok	{}	{}	{}
+",
+                        imported.report.layers_imported,
+                        count(ReportKind::Approximated),
+                        count(ReportKind::NotImported)
+                    ));
+                }
+                Err(error) => summary.push_str(&format!(
+                    "{stem}	error	{error:?}
+"
+                )),
+            }
+        }
+        std::fs::write(dump.join("summary.tsv"), summary).unwrap();
+    }
+
     #[test]
     fn nesting_past_the_limit_is_flattened_not_refused() {
         let mut svg =
@@ -2613,7 +3023,7 @@ mod tests {
             report: SvgImportReport::default(),
             layers: 0,
             counter: 0,
-            canvas: (20.0, 20.0),
+            viewport: (20.0, 20.0),
         };
         let mut layers = Vec::new();
         importer.walk(

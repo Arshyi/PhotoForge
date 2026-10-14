@@ -745,9 +745,13 @@ impl<'a> Importer<'a> {
         let version = header.version;
         let max_plane = width * height * u64::from(depth / 8).max(1);
         let mut planes: HashMap<i16, Vec<u8>> = HashMap::new();
+        let gray = document.header.mode == ColorMode::Grayscale;
+        // Colour (0..), transparency (-1); the mask channels are read with the mask. Anything
+        // else (a spot or alpha channel, ids beyond the colour ones) is never drawn, so it is
+        // never decoded: each is a plane as large as the layer, and a file can carry dozens.
+        let colour_planes: i16 = if gray { 1 } else { 3 };
         for channel in &record.channels {
-            // Colour (0..), transparency (-1); the mask channels are read with the mask.
-            if channel.id < -1 {
+            if channel.id < -1 || channel.id >= colour_planes {
                 continue;
             }
             let spec = ChannelSpec {
@@ -769,7 +773,6 @@ impl<'a> Importer<'a> {
         let own_mask = self.build_mask_bitmap(reader, record, record.rect)?;
 
         let channel = |id: i16| planes.get(&id);
-        let gray = document.header.mode == ColorMode::Grayscale;
         let red = channel(0);
         let (green, blue) = if gray {
             (red, red)
