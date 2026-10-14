@@ -14,7 +14,7 @@ for f in files:
     if not f or f in seen:
         continue
     seen.add(f)
-    if not f.endswith(('.rs', '.ts', '.svelte', '.md', '.json', '.js', '.mjs', '.toml', '.html', '.css', '.py', '.sh', '.ps1', '.yml', '.yaml')):
+    if not f.endswith(('.rs', '.ts', '.svelte', '.md', '.json', '.js', '.mjs', '.toml', '.html', '.css', '.py', '.sh', '.ps1', '.yml', '.yaml', '.wxs', '.wxl', '.xml', '.txt')):
         continue
     try:
         data = open(os.path.join(root, f), 'rb').read()
