@@ -1,0 +1,99 @@
+name: Windows checks
+
+on:
+  push:
+    branches: [main, phase-15-10-clipboard-window, 'release-*', 'phase-16-*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  frontend:
+    name: Frontend and gate-runner tests
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --fund=false
+      - run: npm run test:tools
+      - run: python tools/scan_control.py
+      - run: npx tsc --noEmit
+      - run: npm run check
+      - name: Frontend tests (bounded workers on the hosted runner)
+        run: npm test -- --maxWorkers=2 --testTimeout=15000 --hookTimeout=15000
+      - run: npm run build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  rust:
+    name: Rust (${{ matrix.name }})
+    needs: frontend
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all
+            features: custom-protocol,gpu,inference,plugins
+          - name: no GPU
+            features: custom-protocol,inference,plugins
+          - name: no inference
+            features: custom-protocol,gpu,plugins
+          - name: no plugins
+            features: custom-protocol,gpu,inference
+    env:
+      RUSTUP_TOOLCHAIN: '1.97.1'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ runner.temp }}\photoforge-target
+      PHOTOFORGE_RAW_FIXTURES: ${{ github.workspace }}\raw-fixtures
+      PF_FEATURES: ${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frontend-dist
+          path: dist
+      - name: Install the tested Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: windows-cargo-registry-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-registry-
+      - name: Fetch the three public RAW fixtures
+        run: ./scripts/fetch-raw-fixtures.ps1
+      - name: Formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Clippy
+        shell: bash
+        run: bash scripts/cargo-ext.sh clippy --locked --all-targets --no-default-features --features "$PF_FEATURES" -- -D warnings
+      - name: Tests, including the real RAW fixtures
+        shell: bash
+        run: bash scripts/cargo-ext.sh test --locked --all-targets --no-default-features --features "$PF_FEATURES" --no-fail-fast -- --test-threads=2

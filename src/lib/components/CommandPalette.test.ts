@@ -116,10 +116,22 @@ describe('the command palette', () => {
   });
 
   it('survives a command that throws, closing first', async () => {
-    const failing = command('core.bad', 'Bad', { run: () => { throw new Error('boom'); } });
+    const run = vi.fn(() => { throw new Error('boom'); });
+    const failing = command('core.bad', 'Bad', { run });
     const { input, onclose } = mount([failing]);
     await fireEvent.keyDown(input, { key: 'Enter' });
-    expect(onclose).toHaveBeenCalled();
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(onclose).toHaveBeenCalledTimes(1);
+    expect(onclose.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0]);
+  });
+
+  it('survives a command that rejects asynchronously, closing first', async () => {
+    const run = vi.fn(async () => { throw new Error('async boom'); });
+    const { input, onclose } = mount([command('core.bad_async', 'Bad async', { run })]);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(onclose).toHaveBeenCalledTimes(1);
+    expect(onclose.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0]);
   });
 
   it('offers plugin commands beside built-in ones, labelled with their plugin', () => {

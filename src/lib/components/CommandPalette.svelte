@@ -43,7 +43,9 @@
     // A command that cannot run says why and stays open: closing would hide the reason.
     if (reasons.get(command.id)) return;
     onclose();
-    void Promise.resolve(command.run()).catch(() => undefined);
+    // Invoke inside the promise so synchronous throws and asynchronous
+    // rejections both take the same error path after the palette closes.
+    void Promise.resolve().then(() => command.run()).catch(() => undefined);
   }
 
   function keys(event: KeyboardEvent) {

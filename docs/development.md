@@ -77,9 +77,12 @@ scripts/gates.sh                     # logs under .work/gates ; about 25 minutes
 ```
 
 At the 0.15.0 release: **1,993 / 1,986 / 1,985 / 1,954** Rust tests passed (60 test binaries), 0
-failed; **1,389** frontend tests in 93 files; clippy clean in all four sets. One unhandled error
-from `CommandPalette.test.ts` is **known and expected** (a test that makes a command throw on
-purpose); it has been there since before Phase 15.
+failed; **1,389** frontend tests in 93 files; clippy clean in all four sets. That historical run
+contained an unhandled command-palette error. It was a synchronous command escaping the promise
+handler and is fixed for 0.15.1. Current gates require zero unhandled errors; 1,393 frontend tests
+in 94 files now pass. `npm run test:tools` also checks the Rust gate runner's exit status with
+successful, failed, and missing-output commands. The runner finishes all configurations and exits
+nonzero if any check fails or produces no test results.
 
 Run the frontend suite on a quiet machine. The heavy `App*.test.ts` files time out under CPU load
 (a cargo build running at the same time is enough), and a timeout is not a defect.
@@ -97,8 +100,11 @@ names a directory:
 | `PHOTOFORGE_EXR_SAMPLES` | `tests/exr_real_files.rs` | `python tools/fetch_exr_samples.py` |
 | `PHOTOFORGE_PSD_SAMPLES` | `tests/psd_real_files.rs`, `psd_import_real.rs`, `psd_export_real.rs` (a file or a directory, searched recursively) | `python tools/fetch_psd_samples.py` |
 | `PHOTOFORGE_TIFF_CORPUS` | `tests/tiff_real_files.rs` | `python tools/make_tiff_corpus.py` |
-| `PHOTOFORGE_CLIPBOARD_TESTS=1` | `tests/clipboard_real.rs` | none: **these replace the clipboard**; back it up first |
+| `PHOTOFORGE_CLIPBOARD_TESTS=1` | `tests/clipboard_real.rs` | none: **these replace the clipboard**; `tools\clipboard_backup.ps1 -Action save` first and `-Action restore` after |
 | `PHOTOFORGE_*_DUMP` | the same real-file tests | a directory to leave outputs in for the oracles in `tools/` |
+| `PHOTOFORGE_PSD_EXPORT_DUMP` | `psd::tests::exporter` (a unit test) | a directory: the exported PSDs are left there, to compare two builds' bytes |
+| `PHOTOFORGE_SVG_DUMP` | `svg::export::tests` (a unit test) | a directory: SVGs and PhotoForge's render of each, for `tools/svg_compare.py` (resvg) |
+| `PHOTOFORGE_SVG_SAMPLES` + `PHOTOFORGE_SVG_IMPORT_DUMP` | `svg::import::tests` (a unit test) | `python tools/fetch_svg_samples.py` then `prep_svg_samples.py` into `.work/svg-samples-256`; the dump directory is read by `tools/svg_import_compare.py` (resvg) |
 
 Do not set one of these to an empty string: an empty value counts as "set" and the test then fails
 (unset it instead).
@@ -145,8 +151,8 @@ python -m venv .work\venv; .work\venv\Scripts\pip install -r tools\requirements.
 (`PF_TARGET_DIR` and `PF_WORK` move the build output and the scratch space; set them in the same
 shell first if the repository is on a small drive.) What to expect:
 
-* the frontend: 523 files, 0 errors, 0 warnings in `npm run check`; 1,389 tests in 93 files, plus the
-  one known unhandled error;
+* the frontend: 0 errors and 0 warnings in `npm run check`; 1,393 tests in 94 files with no
+  unhandled errors; four gate-runner regression tests in `npm run test:tools`;
 * `close_repro.ps1`: each run opens a RAW region (the harness writes a 512 MiB manual memory budget
   so that the region chooser is offered) and the window exits at once on a close request; `close.log`
   shows `close requested`, `the page decided: close`, `the window was destroyed` for each run. An

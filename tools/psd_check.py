@@ -140,3 +140,4 @@ if __name__ == '__main__':
             print('FAIL', name, type(error).__name__, error)
             bad += 1
     print(f'{ok} ok, {bad} failed')
+    sys.exit(1 if bad else 0)

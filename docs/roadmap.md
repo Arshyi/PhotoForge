@@ -32,19 +32,17 @@ security and privacy, capability, performance, interface, storage. No claim with
 
 Each of these is written up where it was found; they are small and independent.
 
-* **High-dynamic-range values are clipped by most blend modes** (everything but Normal, Multiply,
-  Screen, Darken, Lighten, Difference, Exclusion). A design decision about what Overlay and its
-  relatives mean above white. ([layers.md](layers.md), [openexr.md](openexr.md))
-* **PSD memory**: import decodes every channel (up to about 14 times the per-layer estimate with extra
-  channels); export's peak is about three times what is guarded.
-  ([phase-15-5-review-results.md](phase-15-5-review-results.md))
-* **SVG round trip**: isolated groups written as plain `<g>`; colour names outside 40, `hsl()` and
-  percentage lengths read wrongly; `<title>` not read back. ([svg.md](svg.md))
+* **Fixed since 0.15.0** ([Phase 15.11](phase-15-11-results.md)): highlights above white under the
+  blend modes defined on 0 to 1 (they pass through; a source above white still counts as white);
+  PSD import decoding channels it does not draw, and export's guard and copies; four gaps in the
+  SVG round trip (isolation, colour names and `hsl()`, percentage lengths, `<title>`).
 * **RAW**: DefaultScale and non-square pixels are not applied; the masked photosites are not used to
   measure the black level; only DNG is read. ([raw-development.md](raw-development.md))
-* **Packaged window**: the Layers panel's controls use a different type scale from the cards; the
-  clipboard has not been driven in the packaged window; other widths and display scales are
-  unchecked. ([phase-15-9-1-results.md](phase-15-9-1-results.md))
+* **Packaged window**: the clipboard has been driven there
+  ([Phase 15.10](phase-15-10-results.md)); the panel's controls and the window at other widths
+  have been fixed and checked at 8 sizes and 4 device pixel ratios
+  ([Phase 15.12](phase-15-12-results.md)). Not checked: Windows' own display scaling and a second
+  monitor, the high-contrast theme, every dialog.
 * **A window that did not close** was seen once and not explained; since 0.15.0 a local log
   (`close.log`, [phase-15-9-3-results.md](phase-15-9-3-results.md)) records what happens if it recurs.
 * **Installers**: the MSI is registered per machine but installs per user; upgrade over an older
