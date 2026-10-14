@@ -66,13 +66,14 @@ jobs:
       RUSTUP_TOOLCHAIN: '1.97.1'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
-      CARGO_TARGET_DIR: ${{ runner.temp }}\photoforge-target
       PHOTOFORGE_RAW_FIXTURES: ${{ github.workspace }}\raw-fixtures
       PF_FEATURES: ${{ matrix.features }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Set the runner-local build directory
+        run: Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$env:RUNNER_TEMP\photoforge-target"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: frontend-dist
