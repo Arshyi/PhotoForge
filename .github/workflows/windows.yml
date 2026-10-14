@@ -35,6 +35,8 @@ jobs:
       - run: node scripts/installer-policy.mjs
       - name: Guarded MSI harness unit tests (no install or UAC)
         run: .\tools\validate\msi_lifecycle.test.ps1
+      - name: Clipboard backup integrity unit tests (no clipboard access)
+        run: .\tools\clipboard_backup.test.ps1
       - run: python tools/scan_control.py
       - run: npx tsc --noEmit
       - run: npm run check

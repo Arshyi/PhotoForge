@@ -44,6 +44,12 @@ repository documents. The cleanup was not a source-code change and is not repeat
 - 26 isolated harness regressions passed in Windows PowerShell 5.1 and PowerShell 7.
   They mock registry, process, filesystem and UAC boundaries; they do not prove an
   actual elevated install or GUI launch. The harness keeps those claims explicitly false.
+- Clipboard-backup restoration now uses a valid message-only window owner and checks
+  failed writes instead of ignoring them. Existing backups cannot be overwritten;
+  malformed, redirected, truncated or checksum-mismatched backup data is refused before
+  restoration. Nine serialization/integrity regressions passed in both PowerShell versions
+  without touching the clipboard. A real canary round trip then passed, restoring all
+  seven original formats byte-for-byte; private backup contents are not committed.
 
 Built MSI table inspection, installer lifecycle, native display-scaling and
 cross-application verification are pending. The upstream WebView2 prerequisite handling

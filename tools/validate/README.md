@@ -13,8 +13,8 @@ WebView2 profile under `<work>\validate`.
 
 * `launch.ps1` starts the executable with its own data folders and a **local-only remote-debugging
   port** (127.0.0.1:9333, `PF_CDP_PORT` to change), and prints `PID <n>`.
-* `cdp.mjs` is a small DevTools-protocol client (Node 22+, no dependencies). It sends **real pointer
-  events into the page** (never to the desktop, so they cannot reach another program), takes
+* `cdp.mjs` is a small DevTools-protocol client (Node 22+, no dependencies). It sends pointer
+  events into the page through CDP (not native desktop input), takes
   screenshots, reads the page's text, and `install`s a wrapper around `window.fetch` that
   (a) answers the native file dialogs, which cannot be automated, with a path you give it
   (`window.__pf.nextOpen` / `nextSave`), and (b) logs every other IPC command with its outcome, so a
@@ -57,6 +57,10 @@ amount; `PF_BUDGET_BYTES=0` leaves the profile alone, and the application then p
 
 The helper files `listen_close.js`, `close_state.js` and `aside_layout.js` are small page snippets
 the scenarios (and you, with `node cdp.mjs evalfile`) use.
+
+Clipboard runs require a fresh backup directory. The backup helper refuses to overwrite
+an existing nonempty backup and verifies its contents before restoration. Do not use
+`-AllowLoss` for release acceptance. A passing CDP scenario is not a native hands-on pass.
 
 ## Doing it by hand
 

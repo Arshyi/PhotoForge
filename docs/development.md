@@ -191,7 +191,10 @@ python -m venv .work\venv; .work\venv\Scripts\pip install -r tools\requirements.
 shell first if the repository is on a small drive.) What to expect:
 
 * the frontend: 0 errors and 0 warnings in `npm run check`; 1,393 tests in 94 files with no
-  unhandled errors; four gate-runner regression tests in `npm run test:tools`;
+  unhandled errors; 29 storage/profile/gate/installer-source regressions in
+  `npm run test:tools`, plus 26 mocked MSI harness guards in
+  `tools/validate/msi_lifecycle.test.ps1` (no real installation or UAC), and nine
+  serialization/integrity checks in `tools/clipboard_backup.test.ps1` (no clipboard access);
 * `close_repro.ps1`: each run opens a RAW region (the harness writes a 512 MiB manual memory budget
   so that the region chooser is offered) and the window exits at once on a close request; `close.log`
   shows `close requested`, `the page decided: close`, `the window was destroyed` for each run. An
@@ -227,8 +230,11 @@ gh release create v0.15.0 <files> --prerelease --title "PhotoForge 0.15.0" --not
 ```
 
 The installers are **not signed** (no code-signing identity exists), and the release notes say so;
-Windows SmartScreen warns. The NSIS installer is per-user. The MSI is registered per machine but
-installs into the installing user's profile; this is documented, not fixed.
+Windows SmartScreen can warn. The NSIS installer is per-user. Published MSI versions through
+0.15.1 are registered per machine but can install into the installing user's profile. The
+0.15.2 candidate isolates machine state and defaults to Program Files, with explicit refusal
+of unsafe legacy MSI migration. Built-table and elevated lifecycle evidence are required
+before treating that candidate policy as validated (see `docs/release-0-15-2.md`).
 
 ## Layout of the repository
 
