@@ -73,7 +73,12 @@ pub async fn import_inference_model(
         license: request.license,
         source: request.source,
     };
-    state.models.import(&path, descriptor)
+    // Hashing and copying a model of up to half a gigabyte is blocking work and
+    // does not belong on the async executor, which other commands share.
+    let models = state.models.clone();
+    tauri::async_runtime::spawn_blocking(move || models.import(&path, descriptor))
+        .await
+        .map_err(|_| AppError::ProcessingFailure("the model import worker stopped".into()))?
 }
 
 /// Removes an installed model and its file from PhotoForge's model directory.
@@ -85,6 +90,11 @@ pub async fn remove_inference_model(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<InferenceStatus, AppError> {
-    state.models.remove(&id)?;
-    Ok(state.models.status())
+    let models = state.models.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<InferenceStatus, AppError> {
+        models.remove(&id)?;
+        Ok(models.status())
+    })
+    .await
+    .map_err(|_| AppError::ProcessingFailure("the model removal worker stopped".into()))?
 }

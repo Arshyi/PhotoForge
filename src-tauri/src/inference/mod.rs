@@ -25,6 +25,7 @@ pub mod runtime;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -95,6 +96,42 @@ pub struct InferenceStatus {
 pub struct ModelRegistry {
     directory: PathBuf,
     inner: Mutex<BTreeMap<String, ModelDescriptor>>,
+    /// Set while an import is running. Each import hashes and copies a file of
+    /// up to `MAX_FILE_BYTES`, and two of them would share one staging file, so
+    /// at most one runs at a time and a second is refused rather than queued.
+    importing: AtomicBool,
+}
+
+/// The one-import-at-a-time claim, released when it goes out of scope.
+struct ImportSlot<'a>(&'a AtomicBool);
+
+impl<'a> ImportSlot<'a> {
+    fn claim(flag: &'a AtomicBool) -> Result<Self, AppError> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                AppError::InvalidOperation(
+                    "another model import is still running; wait for it to finish".into(),
+                )
+            })?;
+        Ok(Self(flag))
+    }
+}
+
+impl Drop for ImportSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// A staging file that is removed when the import that made it ends, however
+/// it ends. After a successful rename the path no longer exists and this does
+/// nothing, so it needs no separate "committed" state.
+struct StagedFile<'a>(&'a Path);
+
+impl Drop for StagedFile<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
 }
 
 impl Default for ModelRegistry {
@@ -111,7 +148,11 @@ impl ModelRegistry {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
         let inner = Mutex::new(read_manifest(&directory).unwrap_or_default());
-        Self { directory, inner }
+        Self {
+            directory,
+            inner,
+            importing: AtomicBool::new(false),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ModelDescriptor>> {
@@ -194,8 +235,21 @@ impl ModelRegistry {
     pub fn import(
         &self,
         source: &Path,
-        mut descriptor: ModelDescriptor,
+        descriptor: ModelDescriptor,
     ) -> Result<ModelDescriptor, AppError> {
+        self.import_with(source, descriptor, &|| {})
+    }
+
+    /// The import itself. `after_inspection` runs between inspecting the source
+    /// and copying it, which is where a file that changes under the import
+    /// would be caught; production passes a no-op and a test changes the file.
+    fn import_with(
+        &self,
+        source: &Path,
+        mut descriptor: ModelDescriptor,
+        after_inspection: &dyn Fn(),
+    ) -> Result<ModelDescriptor, AppError> {
+        let _slot = ImportSlot::claim(&self.importing)?;
         if self.lock().len() >= MAX_INSTALLED_MODELS {
             return Err(AppError::InvalidOperation(format!(
                 "PhotoForge holds at most {MAX_INSTALLED_MODELS} models; remove one first"
@@ -208,12 +262,24 @@ impl ModelRegistry {
         descriptor.sha256 = inspection.sha256;
         descriptor.format = inspection.format;
         descriptor.validate()?;
-        if self.lock().contains_key(&descriptor.id) {
-            return Err(AppError::InvalidOperation(format!(
-                "a model with the id {} is already installed",
-                descriptor.id
-            )));
+        if let Some(existing) = self
+            .lock()
+            .values()
+            .find(|existing| existing.id == descriptor.id || existing.shares_file_with(&descriptor))
+        {
+            return Err(AppError::InvalidOperation(
+                if existing.id == descriptor.id {
+                    format!("a model with the id {} is already installed", descriptor.id)
+                } else {
+                    format!(
+                        "the id {} differs from the installed model {} only in letter case, \
+                     and both would be one file; choose another id",
+                        descriptor.id, existing.id
+                    )
+                },
+            ));
         }
+        after_inspection();
 
         std::fs::create_dir_all(&self.directory).map_err(|error| {
             AppError::ProjectIo(format!("could not create the model directory: {error}"))
@@ -222,16 +288,30 @@ impl ModelRegistry {
         // Staged then renamed, so an interrupted import cannot leave a
         // half-copied file that looks installed.
         let staged = self.directory.join(format!(".{}.part", descriptor.id));
+        let _staged_cleanup = StagedFile(&staged);
         std::fs::copy(source, &staged)
             .map_err(|error| AppError::ProjectIo(format!("could not copy the model: {error}")))?;
+        // The source was read once to describe it and is read again to copy
+        // it; if it changed in between, the description is of other bytes.
+        let copied = model::digest_file(&staged)?;
+        if copied.bytes != descriptor.file_bytes || copied.sha256 != descriptor.sha256 {
+            return Err(AppError::InvalidOperation(
+                "the model file changed while it was being imported; choose it again".into(),
+            ));
+        }
         std::fs::rename(&staged, &target).map_err(|error| {
-            let _ = std::fs::remove_file(&staged);
             AppError::ProjectIo(format!("could not install the model: {error}"))
         })?;
 
         self.lock()
             .insert(descriptor.id.clone(), descriptor.clone());
-        self.write_manifest()?;
+        if let Err(error) = self.write_manifest() {
+            // Not in the manifest means not installed after a restart, so it is
+            // not installed now either, and no orphan file is left behind.
+            self.lock().remove(&descriptor.id);
+            let _ = std::fs::remove_file(&target);
+            return Err(error);
+        }
         Ok(descriptor)
     }
 
@@ -239,19 +319,29 @@ impl ModelRegistry {
     ///
     /// Only ever touches the file this registry installed, inside its own
     /// directory. A model that is in the manifest but whose file is already
-    /// gone is still removed from the manifest, so the two cannot drift.
+    /// gone is still removed from the manifest, so the two cannot drift. If the
+    /// file cannot be removed the model stays installed, so the registry never
+    /// claims a removal that did not happen.
     pub fn remove(&self, id: &str) -> Result<(), AppError> {
-        let Some(descriptor) = self.lock().remove(id) else {
+        let Some(descriptor) = self.get(id) else {
             return Err(AppError::InvalidOperation(format!(
                 "no model with the id {id} is installed"
             )));
         };
         let target = self.directory.join(descriptor.file_name());
-        if target.exists() {
+        // A manifest written before ids were compared without regard to case
+        // can hold two ids that are one file on Windows; deleting it for one
+        // would delete the other's model.
+        let shared = self
+            .lock()
+            .values()
+            .any(|other| other.id != descriptor.id && other.shares_file_with(&descriptor));
+        if target.exists() && !shared {
             std::fs::remove_file(&target).map_err(|error| {
                 AppError::ProjectIo(format!("could not remove the model file: {error}"))
             })?;
         }
+        self.lock().remove(id);
         self.write_manifest()
     }
 
@@ -565,6 +655,175 @@ mod tests {
         assert!(registry
             .import(&source, descriptor("one-too-many", Capability::Denoise))
             .is_err());
+    }
+
+    /// `Upscale` and `upscale` are one file on the default Windows file system,
+    /// so the second import would have replaced the first's bytes while the
+    /// manifest went on describing the old ones.
+    #[test]
+    fn ids_that_differ_only_in_case_are_refused_and_the_first_is_untouched() {
+        let folder = tempfile::tempdir().unwrap();
+        let first = model_file(folder.path(), "first.onnx");
+        let second = model_file(folder.path(), "second.onnx");
+        let registry = ModelRegistry::new(folder.path().join("store"));
+        registry
+            .import(
+                &first,
+                descriptor("Upscale-2x", Capability::SuperResolution),
+            )
+            .unwrap();
+        let error = registry
+            .import(
+                &second,
+                descriptor("upscale-2x", Capability::SuperResolution),
+            )
+            .expect_err("a case-only difference must be refused");
+        assert!(format!("{error}").contains("letter case"), "{error}");
+        assert_eq!(registry.installed().len(), 1);
+        // The first model's bytes are still the ones it was installed with.
+        assert!(registry.resolve_file("Upscale-2x").is_ok());
+    }
+
+    /// A manifest from before case was compared can name two ids that are one
+    /// file; removing either must not delete the file the other still needs.
+    #[test]
+    fn removing_one_of_two_ids_that_share_a_file_keeps_the_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = folder.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let mut first = descriptor("Upscale", Capability::Denoise);
+        first.file_bytes = 4096;
+        first.sha256 = "d".repeat(64);
+        let mut second = first.clone();
+        second.id = "upscale".into();
+        std::fs::write(
+            store.join(MANIFEST),
+            serde_json::to_vec(&vec![first, second]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(store.join("Upscale.onnx"), b"\x08shared").unwrap();
+
+        let registry = ModelRegistry::new(&store);
+        assert_eq!(registry.installed().len(), 2);
+        registry.remove("Upscale").unwrap();
+        assert!(registry.get("Upscale").is_none());
+        assert!(
+            store.join("Upscale.onnx").exists(),
+            "removing one id deleted the file the other still uses"
+        );
+        // Alone, the last one owns the file and takes it with it (where the file
+        // system folds case; elsewhere the two names were two files all along).
+        registry.remove("upscale").unwrap();
+        if cfg!(windows) {
+            assert!(!store.join("Upscale.onnx").exists());
+        }
+    }
+
+    /// An import that cannot be recorded is not an install: no entry in memory
+    /// that would vanish at the next start, and no orphan file.
+    #[test]
+    fn an_import_whose_manifest_cannot_be_written_leaves_nothing_installed() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = model_file(folder.path(), "source.onnx");
+        let store = folder.path().join("store");
+        std::fs::create_dir_all(store.join(MANIFEST)).unwrap();
+        let registry = ModelRegistry::new(&store);
+
+        let error = registry
+            .import(&source, descriptor("denoise-1", Capability::Denoise))
+            .expect_err("the manifest cannot be published over a directory");
+        assert!(format!("{error}").contains("manifest"), "{error}");
+        assert!(registry.get("denoise-1").is_none());
+        assert!(!store.join("denoise-1.onnx").exists());
+        assert!(!store.join(".denoise-1.part").exists());
+    }
+
+    /// A removal that did not happen must not be reported as one.
+    #[test]
+    fn a_model_whose_file_cannot_be_removed_stays_installed() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = model_file(folder.path(), "source.onnx");
+        let store = folder.path().join("store");
+        let registry = ModelRegistry::new(&store);
+        registry
+            .import(&source, descriptor("denoise-1", Capability::Denoise))
+            .unwrap();
+        // A non-empty directory where the file was: remove_file refuses it.
+        let target = store.join("denoise-1.onnx");
+        std::fs::remove_file(&target).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("occupant"), b"x").unwrap();
+
+        assert!(registry.remove("denoise-1").is_err());
+        assert!(
+            registry.get("denoise-1").is_some(),
+            "the registry claimed a removal that failed"
+        );
+    }
+
+    /// Two imports would share one staging file and double the copying.
+    #[test]
+    fn only_one_import_runs_at_a_time_and_the_slot_is_released() {
+        let folder = tempfile::tempdir().unwrap();
+        let first = model_file(folder.path(), "first.onnx");
+        let second = model_file(folder.path(), "second.onnx");
+        let registry = ModelRegistry::new(folder.path().join("store"));
+
+        let during = std::cell::RefCell::new(None);
+        registry
+            .import_with(&first, descriptor("model-a", Capability::Denoise), &|| {
+                *during.borrow_mut() =
+                    Some(registry.import(&second, descriptor("model-b", Capability::Denoise)));
+            })
+            .expect("the outer import");
+        let nested = during.into_inner().expect("the hook ran");
+        let message = format!("{}", nested.expect_err("a second import was allowed"));
+        assert!(message.contains("another model import"), "{message}");
+        assert!(registry.get("model-b").is_none());
+
+        // Released: the next import goes through.
+        registry
+            .import(&second, descriptor("model-b", Capability::Denoise))
+            .expect("the slot was not released");
+    }
+
+    /// The description (size, hash) must be of the bytes installed, so a source
+    /// that changes after it was described is refused and nothing is left.
+    #[test]
+    fn a_source_that_changes_during_import_is_refused_and_leaves_nothing() {
+        let folder = tempfile::tempdir().unwrap();
+        let source = model_file(folder.path(), "source.onnx");
+        let store = folder.path().join("store");
+        let registry = ModelRegistry::new(&store);
+
+        let error = registry
+            .import_with(
+                &source,
+                descriptor("denoise-1", Capability::Denoise),
+                &|| {
+                    let mut other = vec![0x08u8];
+                    other.extend_from_slice(&[0x55; 3000]);
+                    std::fs::write(&source, other).unwrap();
+                },
+            )
+            .expect_err("a changed source must be refused");
+        assert!(format!("{error}").contains("changed"), "{error}");
+        assert!(registry.installed().is_empty());
+        assert!(!store.join("denoise-1.onnx").exists());
+        assert!(
+            !store.join(".denoise-1.part").exists(),
+            "the staging file was left behind"
+        );
+        // And the failed import released its slot.
+        std::fs::write(&source, {
+            let mut again = vec![0x08u8];
+            again.extend_from_slice(&[0x66; 3000]);
+            again
+        })
+        .unwrap();
+        registry
+            .import(&source, descriptor("denoise-1", Capability::Denoise))
+            .expect("a retry after the refusal");
     }
 
     /// Whether a runtime is compiled in is a different question from whether a

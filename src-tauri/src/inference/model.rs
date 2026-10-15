@@ -166,6 +166,34 @@ impl ModelLimits {
     pub const MAX_CHANNELS: u32 = 4;
     /// Longest identifier, name or licence string kept.
     pub const MAX_TEXT: usize = 200;
+    /// What one output pixel costs while a run is in progress: the colour
+    /// accumulator (three f32), the blend weight (one f32) and the finished
+    /// pixel (four f32).
+    pub const BYTES_PER_OUTPUT_PIXEL: u64 = 32;
+    /// The most working memory one run over an image may ask for. A hard
+    /// ceiling that applies before any allocation, not a budget: the resource
+    /// policy's own admission is separate and applies on top of it.
+    pub const MAX_RUN_WORKING_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+}
+
+/// Whether a name is, on Windows, a device rather than a file.
+///
+/// The reservation covers the part before the first dot, so `nul.onnx` and
+/// `com1.backup` are devices too. Refused on every platform so that a model
+/// store means the same thing on whichever machine it is copied to.
+pub fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_lowercase();
+    if matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") {
+        return true;
+    }
+    for prefix in ["com", "lpt"] {
+        if let Some(rest) = stem.strip_prefix(prefix) {
+            if rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl ModelDescriptor {
@@ -198,6 +226,13 @@ impl ModelDescriptor {
         {
             return Err(AppError::InvalidOperation(
                 "a model id may contain only letters, digits, dash, underscore and dot".into(),
+            ));
+        }
+        // The id becomes `<id>.onnx`; a reserved device name stays a device
+        // whatever the extension, so the "file" would be written to a device.
+        if is_reserved_device_name(&self.id) {
+            return Err(AppError::InvalidOperation(
+                "a model id may not be a reserved device name such as con, nul or com1".into(),
             ));
         }
         if self.sha256.len() != 64 || !self.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -270,6 +305,38 @@ impl ModelDescriptor {
             .saturating_add(activations)
     }
 
+    /// Working memory for running this model over a `width` by `height` image.
+    ///
+    /// The output accumulators dominate: every output pixel costs
+    /// `BYTES_PER_OUTPUT_PIXEL`, and the output is `scale` times larger on each
+    /// side. Computed in u64 with checked arithmetic so that a large image or a
+    /// large scale is an error before it is an allocation, which in Rust
+    /// aborts the process instead of failing.
+    pub fn run_working_bytes(&self, width: u32, height: u32) -> Result<u64, AppError> {
+        let scale = u64::from(self.scale);
+        let pixels = u64::from(width)
+            .checked_mul(scale)
+            .and_then(|w| {
+                u64::from(height)
+                    .checked_mul(scale)
+                    .and_then(|h| w.checked_mul(h))
+            })
+            .ok_or(AppError::OutOfMemoryRisk)?;
+        pixels
+            .checked_mul(ModelLimits::BYTES_PER_OUTPUT_PIXEL)
+            .and_then(|bytes| bytes.checked_add(self.estimated_bytes()))
+            .ok_or(AppError::OutOfMemoryRisk)
+    }
+
+    /// Whether two models would be stored in the same file.
+    ///
+    /// File names are compared without regard to case: the default Windows file
+    /// system folds it, so `Upscale` and `upscale` are one file there and an
+    /// import of the second would silently replace the first's bytes.
+    pub fn shares_file_with(&self, other: &ModelDescriptor) -> bool {
+        self.file_name().eq_ignore_ascii_case(&other.file_name())
+    }
+
     /// Where this model's file lives inside the store.
     pub fn file_name(&self) -> String {
         format!("{}.{}", self.id, self.format.extension())
@@ -336,8 +403,33 @@ pub fn inspect_model_file(path: &Path) -> Result<ModelInspection, AppError> {
         )));
     }
 
-    // Hashed in chunks: the size is bounded above, but not so far above that
-    // reading it whole into memory is reasonable.
+    let digest = digest_file(path)?;
+    if digest.first_byte != Some(ModelFormat::Onnx.leading_byte()) {
+        return Err(AppError::InvalidOperation(
+            "the file does not begin like an ONNX graph".into(),
+        ));
+    }
+
+    Ok(ModelInspection {
+        bytes: digest.bytes,
+        sha256: digest.sha256,
+        format: ModelFormat::Onnx,
+    })
+}
+
+/// What reading a file once tells us about it.
+pub(super) struct FileDigest {
+    pub bytes: u64,
+    pub sha256: String,
+    pub first_byte: Option<u8>,
+}
+
+/// Reads a file in chunks, hashing it, never reading past `MAX_FILE_BYTES`.
+///
+/// Chunked because the size is bounded above, but not so far above that
+/// reading it whole into memory is reasonable. Also used on the staged copy of
+/// an import, so the recorded identity is that of the bytes actually installed.
+pub(super) fn digest_file(path: &Path) -> Result<FileDigest, AppError> {
     let file = std::fs::File::open(path)
         .map_err(|error| AppError::ProjectIo(format!("could not open the model file: {error}")))?;
     let mut reader = std::io::BufReader::new(file);
@@ -364,16 +456,10 @@ pub fn inspect_model_file(path: &Path) -> Result<ModelInspection, AppError> {
         }
         hasher.update(&buffer[..read]);
     }
-    if first != Some(ModelFormat::Onnx.leading_byte()) {
-        return Err(AppError::InvalidOperation(
-            "the file does not begin like an ONNX graph".into(),
-        ));
-    }
-
-    Ok(ModelInspection {
+    Ok(FileDigest {
         bytes: total,
         sha256: format!("{:x}", hasher.finalize()),
-        format: ModelFormat::Onnx,
+        first_byte: first,
     })
 }
 
@@ -592,6 +678,87 @@ mod tests {
         assert_eq!(inspection.format, ModelFormat::Onnx);
         let expected = format!("{:x}", Sha256::digest(&content));
         assert_eq!(inspection.sha256, expected);
+    }
+
+    /// Windows treats these as devices whatever extension follows, so an id
+    /// that spells one would make the "file" a write to a device.
+    #[test]
+    fn reserved_device_names_are_refused_as_ids() {
+        for id in [
+            "con",
+            "CON",
+            "nul",
+            "Aux",
+            "prn",
+            "com1",
+            "COM9",
+            "lpt3",
+            "nul.v2",
+            "com1.backup",
+        ] {
+            let mut candidate = descriptor();
+            candidate.id = id.into();
+            assert!(
+                candidate.validate().is_err(),
+                "{id} was accepted as a model id"
+            );
+        }
+        // Names that merely begin like a device are ordinary.
+        for id in [
+            "console",
+            "comet",
+            "com10",
+            "lpt",
+            "null-model",
+            "aux-2x",
+            "a.nul",
+        ] {
+            let mut candidate = descriptor();
+            candidate.id = id.into();
+            assert!(
+                candidate.validate().is_ok(),
+                "{id} was refused although it is not a device name"
+            );
+        }
+    }
+
+    #[test]
+    fn ids_that_differ_only_in_case_share_a_file() {
+        let mut lower = descriptor();
+        lower.id = "upscale".into();
+        let mut upper = descriptor();
+        upper.id = "UPSCALE".into();
+        let mut other = descriptor();
+        other.id = "upscale-4x".into();
+        assert!(lower.shares_file_with(&upper));
+        assert!(!lower.shares_file_with(&other));
+    }
+
+    /// The working-memory figure is what a run is admitted against, so it has
+    /// to grow with the output and never wrap into a small number.
+    #[test]
+    fn the_run_working_estimate_follows_the_output_and_never_wraps() {
+        let base = descriptor();
+        let small = base.run_working_bytes(100, 100).unwrap();
+        // 100 x 100 at 2x is 40,000 output pixels at 32 bytes each, plus the tile.
+        assert_eq!(
+            small,
+            40_000 * ModelLimits::BYTES_PER_OUTPUT_PIXEL + base.estimated_bytes()
+        );
+        assert!(base.run_working_bytes(200, 100).unwrap() > small);
+
+        let mut four = descriptor();
+        four.scale = 4;
+        assert!(four.run_working_bytes(100, 100).unwrap() > small);
+
+        // A hostile size is an error, not a small number.
+        assert!(matches!(
+            base.run_working_bytes(u32::MAX, u32::MAX),
+            Err(AppError::OutOfMemoryRisk)
+        ));
+        let mut eight = descriptor();
+        eight.scale = 8;
+        assert!(eight.run_working_bytes(u32::MAX, u32::MAX).is_err());
     }
 
     #[test]

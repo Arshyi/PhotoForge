@@ -25,7 +25,7 @@ use std::sync::atomic::AtomicBool;
 
 use tract_onnx::prelude::*;
 
-use super::model::{ModelColorSpace, ModelDescriptor, Normalization};
+use super::model::{ModelColorSpace, ModelDescriptor, ModelLimits, Normalization};
 use crate::color::{srgb_decode, srgb_encode, FloatImage, FloatRgba};
 use crate::error::AppError;
 use crate::image_processing::high_precision::check_cancel;
@@ -135,9 +135,25 @@ impl LoadedModel {
         image: &FloatImage,
         cancel: Option<&AtomicBool>,
     ) -> Result<FloatImage, AppError> {
+        self.run_image_within(image, cancel, ModelLimits::MAX_RUN_WORKING_BYTES)
+    }
+
+    /// `run_image` with an explicit ceiling on the working memory it may ask
+    /// for, checked before anything is allocated. A caller with a resource
+    /// budget passes it here; a run that does not fit is `OutOfMemoryRisk`
+    /// rather than an allocation failure, which would end the process.
+    pub fn run_image_within(
+        &self,
+        image: &FloatImage,
+        cancel: Option<&AtomicBool>,
+        max_working_bytes: u64,
+    ) -> Result<FloatImage, AppError> {
         let descriptor = &self.descriptor;
         let (width, height) = image.dimensions();
         let scale = descriptor.scale;
+        if descriptor.run_working_bytes(width, height)? > max_working_bytes {
+            return Err(AppError::OutOfMemoryRisk);
+        }
         let out_width = width.checked_mul(scale).ok_or(AppError::OutOfMemoryRisk)?;
         let out_height = height.checked_mul(scale).ok_or(AppError::OutOfMemoryRisk)?;
 
@@ -487,6 +503,27 @@ mod tests {
         let mut descriptor = descriptor(32, 8, 1);
         descriptor.file_bytes = bytes.len() as u64 + 1;
         assert!(load(&path, descriptor).is_err());
+    }
+
+    /// The output is allocated up front, and a failed allocation ends the
+    /// process, so a run that does not fit its ceiling is refused first.
+    #[test]
+    fn a_run_over_its_working_limit_is_refused_before_it_starts() {
+        let folder = tempfile::tempdir().unwrap();
+        let bytes = onnx_fixture::scale_and_offset(32, 32, 0.5, 0.25);
+        let path = write(&bytes, folder.path(), "fixture.onnx");
+        let mut descriptor = descriptor(32, 8, 1);
+        descriptor.file_bytes = bytes.len() as u64;
+        let model = load(&path, descriptor).unwrap();
+        let source = gradient(64, 64);
+
+        let needed = model.descriptor().run_working_bytes(64, 64).unwrap();
+        let error = model
+            .run_image_within(&source, None, needed - 1)
+            .expect_err("one byte short of the need must be refused");
+        assert!(matches!(error, AppError::OutOfMemoryRisk), "{error}");
+        // Exactly the need is enough, so the limit is not off by anything.
+        assert!(model.run_image_within(&source, None, needed).is_ok());
     }
 
     /// Inference over a large image must be interruptible.
