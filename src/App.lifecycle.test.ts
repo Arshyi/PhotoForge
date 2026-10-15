@@ -277,6 +277,38 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
   }
 
+  it('cancels the host reload keys and its right-click menu, which would drop the open document', async () => {
+    render(App);
+    await openImage();
+    // F5 and Ctrl+R reload the page in the packaged window (found by pressing F5 there): the
+    // document and everything unsaved in it went, with no question. They must be cancelled.
+    for (const init of [
+      { key: 'F5' },
+      { key: 'F5', ctrlKey: true },
+      { key: 'r', ctrlKey: true },
+      { key: 'R', ctrlKey: true, shiftKey: true }
+    ]) {
+      const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(true);
+    }
+    // an ordinary key is left alone
+    const plain = new KeyboardEvent('keydown', { key: 'F6', bubbles: true, cancelable: true });
+    document.body.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false);
+    // the right-click menu is cancelled on the picture and kept in a text field
+    const onPage = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(onPage);
+    expect(onPage.defaultPrevented).toBe(true);
+    const field = document.createElement('input');
+    field.type = 'text';
+    document.body.appendChild(field);
+    const inField = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    field.dispatchEvent(inField);
+    expect(inField.defaultPrevented).toBe(false);
+    field.remove();
+  });
+
   it('asks, in the page, before unsaved work is replaced, and keeps it when told to', async () => {
     render(App);
     await makeUnsavedEdit();

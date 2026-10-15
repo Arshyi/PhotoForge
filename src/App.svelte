@@ -183,7 +183,12 @@
     NUDGE_STEP,
     NUDGE_STEP_LARGE
   } from './lib/layers/transformTool';
-  import { resolveShortcut, type ShortcutIntent } from './lib/utils/shortcuts';
+  import {
+    allowsNativeContextMenu,
+    isPageReloadKey,
+    resolveShortcut,
+    type ShortcutIntent
+  } from './lib/utils/shortcuts';
   import AdjustmentLayerDialog from './lib/components/AdjustmentLayerDialog.svelte';
   import { LayerHistory } from './lib/layers/history';
   import { executeLayerWorkflow } from './lib/layers/workflowExecution';
@@ -639,12 +644,28 @@
       event.preventDefault();
       runShortcut(intent);
     };
+    // The host's own accelerators are on in the packaged window: F5 and Ctrl+R reload the page,
+    // and with it the open document and everything unsaved in it, with no question asked (found by
+    // pressing F5 there; the page's `beforeunload` raised no dialog). Cancelled before the host
+    // sees them, in the capture phase so that nothing below can let one through. The page's own
+    // handlers still run: Ctrl+Shift+R is also a layer shortcut.
+    const blockReload = (event: KeyboardEvent) => {
+      if (isPageReloadKey(event)) event.preventDefault();
+    };
+    // The host's own right-click menu (Back, Refresh, Save as, Print) is only for text fields.
+    const blockHostMenu = (event: MouseEvent) => {
+      if (!allowsNativeContextMenu(event.target)) event.preventDefault();
+    };
+    window.addEventListener('keydown', blockReload, true);
+    window.addEventListener('contextmenu', blockHostMenu, true);
     window.addEventListener('keydown', handleKeys);
     window.addEventListener('beforeunload', persistBeforeClose);
 
     return () => {
       unlisten?.();
       unlistenClose?.();
+      window.removeEventListener('keydown', blockReload, true);
+      window.removeEventListener('contextmenu', blockHostMenu, true);
       window.removeEventListener('keydown', handleKeys);
       window.removeEventListener('beforeunload', persistBeforeClose);
       if (renderTimer) clearTimeout(renderTimer);

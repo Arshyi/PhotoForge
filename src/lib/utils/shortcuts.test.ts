@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allowsNativeContextMenu,
   bindingAction,
+  isPageReloadKey,
   isTextEntryTarget,
   ownsArrowKeys,
   resolveShortcut,
@@ -371,5 +373,37 @@ describe('configurable bindings', () => {
       type: 'binding',
       action: 'Compare'
     });
+  });
+});
+
+describe('the host page-level accelerators', () => {
+  const key = (name: string, extra: Partial<{ ctrlKey: boolean; metaKey: boolean }> = {}) => ({
+    key: name, ctrlKey: false, metaKey: false, ...extra
+  });
+
+  it('reload keys are recognised: F5, Ctrl+F5, Ctrl+R, Ctrl+Shift+R', () => {
+    expect(isPageReloadKey(key('F5'))).toBe(true);
+    expect(isPageReloadKey(key('F5', { ctrlKey: true }))).toBe(true);
+    expect(isPageReloadKey(key('r', { ctrlKey: true }))).toBe(true);
+    expect(isPageReloadKey(key('R', { ctrlKey: true }))).toBe(true);
+    expect(isPageReloadKey(key('r', { metaKey: true }))).toBe(true);
+  });
+
+  it('a plain R, other function keys and other Ctrl keys are not reload keys', () => {
+    expect(isPageReloadKey(key('r'))).toBe(false);
+    expect(isPageReloadKey(key('F4'))).toBe(false);
+    expect(isPageReloadKey(key('F6'))).toBe(false);
+    expect(isPageReloadKey(key('e', { ctrlKey: true }))).toBe(false);
+  });
+
+  it('the host context menu is left to text fields only', () => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    const button = document.createElement('button');
+    const canvas = document.createElement('div');
+    expect(allowsNativeContextMenu(input)).toBe(true);
+    expect(allowsNativeContextMenu(button)).toBe(false);
+    expect(allowsNativeContextMenu(canvas)).toBe(false);
+    expect(allowsNativeContextMenu(null)).toBe(false);
   });
 });
