@@ -1,6 +1,6 @@
 # Roadmap
 
-## Now: after 0.15.0
+## Now: 0.15.2 hardening, before Phase 16
 
 The sections below this one are the history of what each phase delivered, in the order they
 were written; this one is where the project stands and where it is going.
@@ -10,15 +10,32 @@ promise: nothing here is claimed until a results page says it was run.
 
 ### Where it is
 
-**0.15.0 (Phase 15, interoperability) is released**: the tag `v0.15.0` and a GitHub pre-release
-with unsigned installers. [Phase 15 results](phase-15-results.md) is the ledger of what it holds and
-what is not claimed.
+**0.15.1 is the frozen published release.** **0.15.2 is an unreleased hardening candidate** on
+`release-0.15.2-hardening`, not a completed release or an expansion into Phase 16.
+[The 0.15.2 ledger](release-0-15-2.md) separates the passing code/build checks, completed
+machine-MSI lifecycle, partial native acceptance and still-pending work. Older phase pages
+below are historical records; their open findings must be rechecked against current code.
+
+### Immediate priority, in order
+
+1. Keep the exact candidate's source/storage/installer guards passing, inspect hosted CI,
+   and audit data-loss/privacy boundaries. Source and unit work can stay in the background.
+2. Finish candidate/package consistency, NSIS and portable verification, and the remaining
+   native selections/masks/undo/workflow/export/clipboard checks in scheduled interactive
+   blocks. Do not replace native evidence with CDP results or count an unrun case as passed.
+3. Reconcile results, artifact checksums and known limitations, then review/merge/tag/publish
+   only after the agreed acceptance scope is met. No signing identity or project licence is
+   invented; unsigned status and any explicit waivers remain visible.
+4. Start 0.16 development with optional model import/provenance, checksum/path/resource
+   boundaries and a bounded worker before adding semantic-mask/inpainting UI. Keep the
+   deterministic editor and offline defaults independent of optional models.
 
 ### The sequence
 
 | Version | Theme | Notes |
 | --- | --- | --- |
-| 0.15 | Interoperability: PSD / PSB, TIFF, OpenEXR, SVG, metadata, clipboard, DNG picture handling | **done** |
+| 0.15.1 | Interoperability: PSD / PSB, TIFF, OpenEXR, SVG, metadata, clipboard, DNG picture handling | Published baseline, with documented fidelity/format limits |
+| 0.15.2 | Storage, installer safety and release acceptance | In progress; partial native acceptance is not a completed matrix |
 | 0.16 | Local semantic selection, object understanding, inpainting and generative restoration | Models are packages the user supplies through the model manager, never in the installer or the repository |
 | 0.17 | GPU renderer parity and CPU/GPU scheduling | Only where measured to help (Phase 11 is the precedent) |
 | 0.18 | Colour, print, proofing and HDR, and the remaining professional gaps | Includes what Phase 15 recorded as not fixed (below) |
@@ -28,9 +45,11 @@ what is not claimed.
 Principles, in order when they conflict: correctness, image fidelity, non-destructive editing,
 security and privacy, capability, performance, interface, storage. No claim without a run.
 
-### Open work, from the 0.15.0 ledger
+### Retained limits and acceptance work
 
-Each of these is written up where it was found; they are small and independent.
+The phase links preserve where findings originated; the current release ledger qualifies
+what has since been fixed or exercised. A passing default test run does not establish optional
+external-corpus, cross-application or physical-device acceptance.
 
 * **Fixed since 0.15.0** ([Phase 15.11](phase-15-11-results.md)): highlights above white under the
   blend modes defined on 0 to 1 (they pass through; a source above white still counts as white);
@@ -41,13 +60,17 @@ Each of these is written up where it was found; they are small and independent.
 * **Packaged window**: the clipboard has been driven there
   ([Phase 15.10](phase-15-10-results.md)); the panel's controls and the window at other widths
   have been fixed and checked at 8 sizes and 4 device pixel ratios
-  ([Phase 15.12](phase-15-12-results.md)). Not checked: Windows' own display scaling and a second
-  monitor, the high-contrast theme, every dialog.
+  ([Phase 15.12](phase-15-12-results.md)). The 0.15.2 MSI candidate has now passed actual Windows
+  125% / 150% / 175% layout/rectangle/refine checks and the native 760 x 560 minimum window;
+  100% was restored. The user waived 200% (not passed). The full 73-case matrix remains partial;
+  second-monitor, high-contrast and every-dialog acceptance are not claimed.
 * **A window that did not close** was seen once and not explained; since 0.15.0 a local log
   (`close.log`, [phase-15-9-3-results.md](phase-15-9-3-results.md)) records what happens if it recurs.
-* **Installers**: the MSI is registered per machine but installs per user; upgrade over an older
-  version, repair and a machine without WebView2 have not been tried.
-  ([phase-15-results.md](phase-15-results.md))
+* **Installers**: published MSI versions through 0.15.1 had machine registration with a per-user
+  install path. The 0.15.2 candidate uses machine-only state/Program Files and refuses unsafe
+  automatic legacy migration; its actual consented install/ordinary-user launch/removal passed.
+  Current NSIS/portable, repair/upgrade and absent-WebView2/other-account acceptance remain
+  separate pending work. Neither staged installer harness launches the application.
 
 ### Decisions made
 
@@ -58,6 +81,9 @@ Each of these is written up where it was found; they are small and independent.
 * **Windows only.** The platform layers (WebView2, the clipboard) are not abstracted.
 * **No telemetry, no cloud, no model in the installer.** The optional local planner (Ollama) is
   text-only and loopback-only.
+  This is not a zero-network claim for the complete WebView2 process tree: Microsoft TLS
+  connections were observed in prior observation; the Rust app's narrower socket observation
+  does not establish network silence for its children.
 
 ### Working here
 
