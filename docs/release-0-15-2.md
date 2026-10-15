@@ -212,6 +212,85 @@ The NSIS and portable packages; PSD, EXR, SVG and TIFF through the native dialog
 brush/eraser and lasso tools with the pointer; workflows and batch; the 175 %/150 %/125 %
 scales again on the new build; a second monitor; another account.
 
+## Second defect pass and candidate 2, 2026-10-15 (no native input)
+
+### Packaged-only divergences found (the class of the `confirm` defect)
+
+What the packaged window does differently from jsdom and from CDP-driven pages, found by reading
+the page's own state and by posting targeted key messages to the window (no clipboard, no global
+keystrokes):
+
+| Finding | Evidence | Change |
+| --- | --- | --- |
+| **F5 / Ctrl+F5 / Shift+F5 / Ctrl+R / Ctrl+Shift+R reloaded the page**, dropping the open document and everything unsaved in it, with no question. The page's `beforeunload` handler did not help (`Page.javascriptDialogOpening` never fired). CDP key events do not trigger WebView2's host accelerators, so a CDP-only check would have passed. | Reproduced with a targeted F5 message to the render widget window: navigation type `reload`, document gone. On a build with the change the page's `timeOrigin` was unchanged and the document intact. | `3414fbf`: capture-phase cancel of those keys (`isPageReloadKey`), and of the host's right-click menu (Back, Refresh, Save as, Print) outside text fields (`allowsNativeContextMenu`). Unit tests for both predicates and an App-level test. |
+| **Selection sessions filled the page's storage.** Each document's session is stored in `localStorage` (up to 3.5 million characters); nothing removed any, so the third large one hit the quota, every later save failed and the person was told persistence was off. | Reproduced against a quota-limited storage in the unit test (the cause is in the code, not in a packaged-only API). | `221ca4d`: the 12 most recently saved sessions are kept (index key, older sessions adopted), and the oldest are given up one at a time when the storage refuses. Four tests; mutation checks 4 of 4 caught. |
+
+Not verified: Ctrl+R and the right-click-menu suppression natively (the menu change is by
+reasoning about the host's defaults; a targeted right-click raised no detectable menu window);
+the retention in the packaged window, where the quota is WebView2's own; other host accelerators
+(Ctrl+P, Ctrl+F, F7, Ctrl+wheel zoom) are left to the host.
+
+### Suspected, not changed
+
+* **Layers panel drag-to-reorder.** The rows use HTML5 drag and drop (`draggable`, `dataTransfer`,
+  `LayersPanel.svelte`), and the window is created with `dragDropEnabled: true`
+  (`src-tauri/tauri.conf.json`) because `App.svelte` opens dropped files through the native
+  `onDragDropEvent`. Tauri documents that on Windows the native handler stops HTML5 drag events
+  reaching the page. If so, drag-reorder does nothing in the packaged app and the *Move layer
+  up / down* buttons are the working path. This is unconfirmed: it needs one native drag of a
+  layer row in the packaged executable. A fix is a pointer-event reorder (no `dataTransfer`),
+  not turning the native file drop off.
+* **Several instances.** Recovery snapshots are limited to three in one shared folder; with
+  two instances running, one could prune the other's. Suspected from the design, not
+  reproduced.
+
+### Candidate 2 (built from `221ca4d`, supersedes candidate 1)
+
+`npm run tauri build` finished with exit 0 in the compact profile
+(`C:\PFBuild\target-compact`); the product source differs from candidate 1's (`eed7238`) by the
+page-level discard question, the reload/menu guard, the selection retention and their tests.
+Copies are kept in the ignored `release/0.15.2-candidate-2/`; candidate 1's are untouched in
+`release/0.15.2-candidate-1/`.
+
+| Artifact | SHA-256 | Bytes | Authenticode |
+| --- | --- | --- | --- |
+| `PhotoForge_0.15.2_x64_en-US.msi` | `4574f02f577faf88ac5c5c3dda1353c23ee91e53e6550e9855e8d68bee6331fb` | 20,025,344 | NotSigned |
+| `PhotoForge_0.15.2_x64-setup.exe` (NSIS, per user) | `1efcbc7d6390fd8ca6c70a2d0c9070e4885306bf4a1e4b907bab105282f313b6` | 13,696,043 | NotSigned |
+| `photoforge.exe` (build output, bundle tag `UNK`; the portable executable) | `2de5a3f71dd5644c49d902128c1dee3b5a06d499ebe25d0cec98007f953cb7f1` | 61,609,984 | NotSigned |
+
+Read-only inspection (nothing installed, launched, or written outside `release/` and a scratch
+folder):
+
+* `tools/validate/check_msi.ps1` on the MSI: `pass`, version 0.15.2, product code
+  `{C3891216-3C77-4659-A650-09B7F44B925A}`, scope `perMachine`, `ProgramFiles64Folder`, two
+  machine registry entries, legacy migration "explicit uninstall required through 0.15.1".
+  `nativeLifecycleVerified` is `false`.
+* The MSI's embedded cabinet was copied out through the Windows Installer database (read-only
+  open) and expanded: its `photoforge.exe` is
+  `1f347b813f0271b56382e61f481e5aa1a210d34b8073670df4aa488b417c2bed` and equals the build
+  output with only the three-byte bundle tag changed from `UNK` to `MSI`. Its notices file
+  equals the repository's `THIRD_PARTY_NOTICES.md` (`ae81b511…`).
+* The build log shows `candle` and `light` completing and contains no ICE lines, so the three
+  upstream-template warnings recorded earlier (ICE03/40/61) are neither reproduced nor ruled
+  out for this build.
+* NSIS preflight (`nsis_lifecycle.ps1`, default action, Windows PowerShell 5.1, pinned setup hash
+  above): the package assertions (hash, `PhotoForge` 0.15.2 identity, `asInvoker` manifest), the
+  `currentUser` scope and the reference's `NSS` marker all passed; the **pristine-state guard
+  then refused**, as before, at the stale per-user key
+  `HKCU:\Software\photoforge\PhotoForge` in this account. That is a refusal, not a pass, and
+  nothing was removed.
+* The NSS reference used there is **derived**, not extracted: the build leaves only the
+  unmarked and (inside the MSI) the MSI-marked executable, and Tauri patches the tag in place,
+  so the NSS-tagged copy
+  (`a8620f3efccc27eab77681893c48c7d106d71fdcd5eb182d08984ec17d7a8d14`) is the build output with
+  `UNK` replaced by `NSS`. The same substitution reproduced the MSI payload byte for byte, but
+  that the NSIS payload equals this copy is established only by the harness's Install stage,
+  which has not been run.
+
+Still required for this candidate, none of it run: MSI install under UAC and its scaling checks
+on these bytes, the NSIS Install/Verify/Uninstall stages in a pristine account, the portable
+executable launched natively, and the remaining native feature checks listed above.
+
 ## Executed native acceptance (partial)
 
 The frozen MSI candidate was built from `eed7238`, before subsequent evidence-only
