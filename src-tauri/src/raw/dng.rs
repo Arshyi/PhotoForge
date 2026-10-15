@@ -56,6 +56,7 @@ const TAG_COLOR_MATRIX_1: u16 = 50721;
 const TAG_COLOR_MATRIX_2: u16 = 50722;
 const TAG_AS_SHOT_NEUTRAL: u16 = 50728;
 const TAG_ACTIVE_AREA: u16 = 50829;
+const TAG_DEFAULT_SCALE: u16 = 50718;
 
 const PHOTOMETRIC_CFA: u32 = 32803;
 const PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
@@ -175,6 +176,11 @@ pub struct SensorImage {
     pub camera_to_srgb: Option<[[f32; 3]; 3]>,
     pub orientation: u16,
     pub metadata: RawCaptureMetadata,
+    /// The factors, horizontal then vertical, that make this sensor's pixels square, from
+    /// `DefaultScale`. `(1.0, 1.0)` when the file declares none or declares something that is not
+    /// believed. **Read and kept, not applied**: a picture from a sensor with non-square pixels is
+    /// still developed at the sensor's own pixel grid.
+    pub default_scale: (f32, f32),
     /// Whether the file was already demosaiced (LinearRaw) rather than CFA.
     pub linear: bool,
 }
@@ -610,6 +616,7 @@ fn decode_inner(data: &[u8], window: Option<Rect>) -> Result<SensorImage, RawErr
         camera_to_srgb,
         orientation: read_orientation(&file),
         metadata: read_metadata(&file),
+        default_scale: read_default_scale(raw),
         linear,
     })
 }
@@ -728,6 +735,28 @@ fn read_default_crop(ifd: &Ifd) -> Option<(u32, u32, u32, u32)> {
         values[2] as u32,
         values[3] as u32,
     ))
+}
+
+/// The widest ratio between a sensor's two pixel dimensions that is believed. Real non-square
+/// sensors (a Super CCD, a 2:1 binned readout) are within a factor of two; this is generous and
+/// still refuses a value that would turn a photograph into a sliver.
+const MAX_DEFAULT_SCALE: f64 = 16.0;
+
+/// `DefaultScale`: two rationals, the horizontal and vertical factors that make the pixels
+/// square. Anything that is not two finite factors in `1/16..=16` is "square".
+fn read_default_scale(ifd: &Ifd) -> (f32, f32) {
+    let Some(values) = ifd.f64_vec(TAG_DEFAULT_SCALE) else {
+        return (1.0, 1.0);
+    };
+    let believed = |value: f64| {
+        value.is_finite() && (1.0 / MAX_DEFAULT_SCALE..=MAX_DEFAULT_SCALE).contains(&value)
+    };
+    match values.as_slice() {
+        [horizontal, vertical] if believed(*horizontal) && believed(*vertical) => {
+            (*horizontal as f32, *vertical as f32)
+        }
+        _ => (1.0, 1.0),
+    }
 }
 
 fn read_orientation(file: &TiffFile) -> u16 {
@@ -2166,6 +2195,53 @@ mod tests {
                     "offset {offset}"
                 );
             }
+        }
+    }
+
+    /// `DefaultScale` as two RATIONALs, each over a denominator of 1000.
+    fn default_scale(horizontal: u32, vertical: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for numerator in [horizontal, vertical] {
+            bytes.extend_from_slice(&numerator.to_le_bytes());
+            bytes.extend_from_slice(&1000u32.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn square_pixels_are_the_default() {
+        let data = DngBuilder::new(4, 4, ramp(4, 4)).build();
+        assert_eq!(decode(&data).unwrap().default_scale, (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_declared_default_scale_is_read_and_kept() {
+        let data = DngBuilder::new(4, 4, ramp(4, 4))
+            .entry(TAG_DEFAULT_SCALE, 5, default_scale(1000, 2000))
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.default_scale, (1.0, 2.0));
+        // Kept, not applied: the sensor and the samples are the file's own.
+        assert_eq!((sensor.width, sensor.height), (4, 4));
+    }
+
+    #[test]
+    fn a_default_scale_that_is_not_believed_means_square_pixels() {
+        for (name, bytes) in [
+            ("zero", default_scale(0, 1000)),
+            ("a sliver", default_scale(1, 1000)),
+            ("enormous", default_scale(1000, 40_000_000)),
+            ("one value", default_scale(1000, 1000)[..8].to_vec()),
+            ("three values", {
+                let mut bytes = default_scale(1000, 2000);
+                bytes.extend_from_slice(&default_scale(1000, 1000)[..8]);
+                bytes
+            }),
+        ] {
+            let data = DngBuilder::new(4, 4, ramp(4, 4))
+                .entry(TAG_DEFAULT_SCALE, 5, bytes)
+                .build();
+            assert_eq!(decode(&data).unwrap().default_scale, (1.0, 1.0), "{name}");
         }
     }
 }
