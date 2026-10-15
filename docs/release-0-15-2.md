@@ -115,6 +115,103 @@ repository documents. The cleanup was not a source-code change and is not repeat
   without touching the clipboard. A real canary round trip then passed, restoring all
   seven original formats byte-for-byte; private backup contents are not committed.
 
+## Candidate consistency (read-only, 2026-10-15)
+
+- No product-affecting path differs between `eed7238` (the source the frozen candidate was built
+  from) and the branch head `31b9f37`: nothing under `src/`, `src-tauri/` (including the installer
+  template, `tauri.conf.json` and the Cargo files), `package.json` or `package-lock.json`. The nine
+  files that changed are the CI workflow, documents, the validation README and the two lifecycle
+  harnesses with their tests. The candidate is therefore the build of the current product source.
+- SHA-256 recomputed from the candidate artifacts on the build machine
+  (`C:\PFBuild\target-compact\release`): the MSI and the executable equal the values above. The
+  NSIS setup of the same build is
+  `e8d32f1edb10a46d3b9b6661ef68b79ce86d106ec114b0d05b260ed9255e47f7` (13,699,460 bytes), recorded
+  here for the first time. Hashing only: no installer and no PhotoForge process was started.
+- The local tooling regressions were reproduced on the maintainer's machine: 30 Node, 47 NSIS,
+  29 MSI and nine backup-integrity tests passed (the three PowerShell suites in Windows
+  PowerShell 5.1; PowerShell 7 was not re-run in this check).
+
+## Native input block, 2026-10-15 (frozen candidate, then the fix)
+
+Run in an agreed interactive block with the operating system's own mouse and keyboard input
+and the real Windows file dialogs (no picker substitution). The candidate executable
+(`6f38c3df…`, hash recomputed first) ran under an isolated `LOCALAPPDATA` and WebView data
+folder. The page's own state was read through the local debugging port **read-only** (page
+text, the source of `window.confirm`); no input came from it. The clipboard was backed up
+first with `tools/clipboard_backup.ps1` into a fresh directory and verified identical at the
+end of each run (the harness's `type` action also uses the clipboard, which the backup covers).
+
+| Check | Result |
+| --- | --- |
+| Open a PNG through the native Open dialog | opened |
+| **Ctrl+C**, layer (80 x 48 of a 96 x 64 picture with a transparent border) | the `PNG` form and `CF_DIBV5` are the trimmed layer pixel for pixel; cloud opt-out 0 |
+| **Ctrl+Shift+C**, merged | 96 x 64, both forms pixel for pixel |
+| **Ctrl+V** of a 40 x 30 picture another program put there (`PNG` + 24-bit `CF_DIB`) | "Pasted a 40 x 30 picture ... as a new layer"; copied back out, it is that picture exactly |
+| **Ctrl+V** with only text | "The clipboard does not hold a picture." |
+| **Ctrl+C** with the caret in the command palette's text field | copies the field's text (`CF_UNICODETEXT`), not the picture |
+| Palette: **New document from clipboard** (keys only) | "Opened the 40 x 30 picture ... as a new document" |
+| Rectangle selection dragged over 200 x 150 of a 400 x 300 picture | 25.0 % average coverage, 30,049 pixels (30,000 expected; 0.16 % rounding of the pointer position) |
+| **Ctrl+Shift+I** invert; Undo; Redo | 75.0 % / 89,951 px (exactly the complement); Undo 25.0 % / 30,049; Redo 75.0 % / 89,951 |
+| **Ctrl+D**, **Ctrl+A** | "No active selection"; 100.0 % / 120,000 px |
+| Layer mask *From selection*, mask *Invert* | the picture shows only inside the rectangle, then only outside it |
+| *Save project* through the native Save As dialog, then *Open project* through the native Open dialog | the saved project (7,505 bytes) reopens with the mask and its inversion |
+| *Export* (PNG) through the native Save dialog | 400 x 300 RGBA; the 30,049 masked pixels are transparent (bbox x 100-298, y 75-225); the 89,951 others are byte-identical to the source with alpha 255 |
+| Export dialog cancelled with Escape | nothing written, document unchanged |
+| Unsaved-work **recovery offer** at start-up after a previous session | offered; *Recover* restored both layers ("Recovered ... Save it to keep the recovered work.") |
+| Window closed with its X button | exits at once; `close.log` shows the three expected lines |
+
+### Defect found: the unsaved-changes question never appeared
+
+With an unsaved edit (a pasted layer, or recovered work marked unsaved), opening another file,
+opening a project, or *New document from clipboard* **replaced the document with no question**.
+Cause: `confirmDiscardChanges()` called `window.confirm`, which in the packaged application is
+replaced by the dialog plugin's `async function(i){return await ...("plugin:dialog|confirm",...)}`
+(read from the running page). It returns a Promise, which is always truthy, and the command it
+calls is not in the window's permissions, so `if (!confirm(...)) return` never returned. Every
+component test mocked `window.confirm`, and jsdom has the browser's own, so none could see it.
+It is present in 0.15.1 and the frozen 0.15.2 candidate (and earlier).
+
+Fix (`src/App.svelte`): the question is asked in the page (*Discard the changes to this
+document?* with *Keep working* focused, and *Discard and continue*; Escape keeps the work;
+nothing else runs while it is open), awaited at all nine places that ask. Tests: four
+lifecycle tests (asks and keeps; replaces only after *Discard and continue*; Escape keeps; no
+question when nothing is unsaved), a source test that no page `confirm`/`alert`/`prompt` is
+used, and one that every ask is awaited. Mutation checks: four of five caught (the fifth, the
+extra `allowWorkspaceMutation` guard, is redundant with "one question at a time"). Frontend
+gates after the change: TypeScript clean, Svelte check 524 files 0 errors and 0 warnings, 1,399
+tests in 94 files, no unhandled errors.
+
+Verified natively on a build with the fix (`ef88c067…`, built from the working tree into a
+separate target so the frozen candidate was not overwritten): with an unsaved pasted layer,
+choosing another file shows the question; *Keep working* leaves the two-layer document intact;
+Escape does the same; *Discard and continue* opens the file.
+
+**Consequence for the candidate:** `src/App.svelte` is a product-affecting file, so the frozen
+candidate (`eed7238`, MSI `2ecde95b…`) does not contain the fix and is superseded for release
+purposes; a new candidate has to be built, frozen and hashed. The earlier native evidence
+(Program Files install/uninstall, 125/150/175 % scaling, the 760 x 560 minimum window) was
+taken on the old candidate; the change is confined to the page's discard question and its
+tests, but that evidence is for the old binary and is not relabelled.
+
+### Observed, not changed
+
+* A recovered document's file card shows the snapshot's internal name
+  (`session-...photoforge`) while the notification says the original name.
+* Choosing the *High JPEG* profile and then Export still opened the Save dialog with
+  "PNG image" as the type (the dialog was cancelled; not investigated).
+* A snapshot of work the person deliberately replaced persists and is offered at the next start
+  (by design: the close dialog says "some work may be recoverable"). With the question now
+  real, the person has been asked first.
+* The harness's `open_application` launches a **second instance on the real profile** for a
+  portable executable; bring an isolated window forward by its handle instead. (One such
+  instance was started by mistake and closed gracefully.)
+
+### Not verified in this block
+
+The NSIS and portable packages; PSD, EXR, SVG and TIFF through the native dialogs; the
+brush/eraser and lasso tools with the pointer; workflows and batch; the 175 %/150 %/125 %
+scales again on the new build; a second monitor; another account.
+
 ## Executed native acceptance (partial)
 
 The frozen MSI candidate was built from `eed7238`, before subsequent evidence-only

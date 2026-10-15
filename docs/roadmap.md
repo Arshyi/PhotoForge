@@ -23,6 +23,9 @@ below are historical records; their open findings must be rechecked against curr
 2. Finish candidate/package consistency, NSIS and portable verification, and the remaining
    native selections/masks/undo/workflow/export/clipboard checks in scheduled interactive
    blocks. Do not replace native evidence with CDP results or count an unrun case as passed.
+   A native block on 2026-10-15 found that the unsaved-changes question never appeared in the
+   packaged app (`window.confirm` returns a Promise there); it is fixed in the page and the
+   frozen candidate is superseded by a rebuild ([the ledger](release-0-15-2.md)).
 3. Reconcile results, artifact checksums and known limitations, then review/merge/tag/publish
    only after the agreed acceptance scope is met. No signing identity or project licence is
    invented; unsigned status and any explicit waivers remain visible.
