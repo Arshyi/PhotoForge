@@ -243,6 +243,12 @@ the retention in the packaged window, where the quota is WebView2's own; other h
 * **Several instances.** Recovery snapshots are limited to three in one shared folder; with
   two instances running, one could prune the other's. Suspected from the design, not
   reproduced.
+* **Workspace settings export/import.** *Export layouts & shortcuts* saves through an
+  `<a download>` on a blob URL and *Import settings* uses `<input type="file">`
+  (`WorkspaceSettings.svelte`); every other export goes through the native dialogs. How
+  WebView2 handles that download in the packaged window (where the file lands, whether a
+  dialog or the host's download bar appears) is untested. Check natively with one export and
+  one import.
 
 ### Candidate 2 (built from `221ca4d`, supersedes candidate 1)
 
@@ -290,6 +296,29 @@ folder):
 Still required for this candidate, none of it run: MSI install under UAC and its scaling checks
 on these bytes, the NSIS Install/Verify/Uninstall stages in a pristine account, the portable
 executable launched natively, and the remaining native feature checks listed above.
+
+## Groundwork branches (0.16 and DNG), 2026-10-15, local and unpushed
+
+Three branches were cut from `2c99c6f` and are **not part of candidate 2**: each changes
+product source, so merging any of them before release would make candidate 2 a different
+build. They are source and unit-test work only; nothing was run in the packaged application.
+Each passed `cargo fmt`, `clippy --all-targets -D warnings` and its module's tests in the
+compact profile, and each fix was mutation-checked (a mutant that survived was a gap in a test,
+which was closed and the mutant re-run).
+
+| Branch | Change | Tests | Mutants |
+| --- | --- | --- | --- |
+| `groundwork-0.16-model-store` (`962ef7f`, docs `b646d07`) | Model store: ids that differ only in case, or spell a Windows device, are refused; the installed copy is re-hashed so a source that changes during import is refused; staging file removed however the import ends; a manifest that cannot be written rolls the import back; a failed removal leaves the model installed; one import at a time; `run_image` refuses a run whose output accumulators exceed 4 GiB (`run_image_within` takes a budget) before allocating; import/remove run on a blocking thread. | 10 new; 38 inference tests pass | 12 of 12 caught |
+| `dng-masked-black-level` (`3b2d24b`) | `MaskedAreas` is read; the black level is measured on the masked photosites, recorded as `masked_black_level`, and used only when the file declares no `BlackLevel` (a declared level stays authoritative); a window decode measures what a whole decode does. | 7 new; 118 raw tests pass | 5 of 5 caught (the `counts.contains(&0)` guard is redundant with the finite check and has no distinguishing mutant) |
+| `dng-default-scale` (`59a29ac`) | `DefaultScale` is read and kept as `SensorImage::default_scale`; **not applied** (applying it also changes region mapping, orientation, previews and the recorded cut, and no non-square-pixel DNG is available to check against). | 3 new; 114 raw tests pass | 4 of 4 caught |
+
+Not verified: any of it against a production model or a real camera DNG that exercises the
+changed path (the Canon sample declares a black level, so it takes the unchanged "declared wins"
+route); the blocking-thread wrapper of the model commands has no unit test of its own; the
+interface does not show the measured black level or the source of a model, and no run command
+exists yet. `docs/local-inference.md` on the model-store branch lists what 0.16 still needs.
+The two RAW limits in the roadmap ("DefaultScale and non-square pixels", "masked photosites")
+stay as written until those branches are merged and, for the first, until it is applied.
 
 ## Executed native acceptance (partial)
 
