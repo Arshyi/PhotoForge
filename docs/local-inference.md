@@ -78,6 +78,41 @@ importing it.
    single value is read out, so a model that does not scale by the factor it
    claims is refused rather than producing a partly filled image.
 
+## The model store
+
+Models live in one directory PhotoForge owns (`%LOCALAPPDATA%\PhotoForge\inference-models`),
+described by a manifest inside it. A stray file there is not a model until it has been imported.
+An import and a removal are written so that what is installed is always what the manifest says,
+and so that a hostile or merely unlucky input fails closed:
+
+- **The file decides its identity.** Size and SHA-256 come from the bytes, not from the request,
+  and they are those of the *installed copy*: the copy is hashed again and compared, so a source
+  that changes between being inspected and being copied is refused with nothing left behind.
+- **The id is a file name, so it is constrained like one.** Letters, digits, dash, underscore and
+  dot; no leading dot; not a Windows device name (`con`, `nul`, `aux`, `prn`, `com1`-`com9`,
+  `lpt1`-`lpt9`, with or without an extension); and two ids that differ only in letter case count
+  as the same id, because the default Windows file system would store them as one file.
+- **One import at a time.** Each hashes and copies up to 512 MB; a second one is refused with a
+  message rather than queued, and the slot is released however the first ends. The commands run
+  the work on a blocking thread, not on the async executor the other commands share.
+- **No half states.** The copy is staged and renamed, the staging file is removed however the
+  import ends, a manifest that cannot be written rolls the import back (no entry in memory, no
+  orphan file), and a model whose file cannot be deleted stays installed instead of being
+  reported removed.
+- **A run is sized before it is allocated.** A run over a `w` x `h` image needs about 32 bytes
+  per *output* pixel plus the tile; `run_working_bytes` computes it with checked arithmetic and
+  `run_image` refuses (`OutOfMemoryRisk`) above 4 GiB, because a failed allocation ends the
+  process instead of returning an error. `run_image_within` takes a caller's own budget.
+
+What this does **not** include, and what 0.16 still needs before a model can be run from the
+interface: a run command that admits the job through the resource policy
+(`resources::acquire_job`) and passes its budget to `run_image_within`; cancellation and
+per-tile progress surfaced to the page, with the same stale-request guard the RAW commands use;
+registering the result as a layer buffer; and provenance in the Model Manager (it shows the
+licence, as "not stated" when empty, but neither asks for nor shows the `source` the descriptor
+can record). None of that is exercised against a production model, and none has been run in the
+packaged window.
+
 ## What PhotoForge will not do
 
 - **No downloads.** Not on first run, not on first use of a capability, not
