@@ -113,7 +113,6 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     nativeEvents.drop = undefined;
     vi.mocked(open).mockReset();
     vi.mocked(save).mockReset();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({
       createImageData: (width: number, height: number) => ({
         data: new Uint8ClampedArray(width * height * 4), width, height
@@ -265,6 +264,62 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     expect(argsFor('render_layer_composite').operations).toEqual([{ type: 'grayscale' }]);
     expect((argsFor('render_layer_composite').document as LayerDocument).precision).toBe('linear_srgb_f32');
     expect(calls('render_preview')).toHaveLength(0);
+  });
+
+  async function makeUnsavedEdit() {
+    await openImage();
+    await fireEvent.click(screen.getByRole('button', { name: '◐ Grayscale' }));
+    await waitFor(() => expect(calls('render_layer_composite').length).toBeGreaterThan(0));
+  }
+
+  async function chooseAnotherFile() {
+    vi.mocked(open).mockResolvedValueOnce('C:\fixtures\second.png');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+  }
+
+  it('asks, in the page, before unsaved work is replaced, and keeps it when told to', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    // A question on screen, and nothing replaced behind it. (The page's own confirm is not
+    // usable in the packaged app: Tauri swaps it for a function that returns a Promise.)
+    await screen.findByRole('heading', { name: 'Discard the changes to this document?' });
+    expect(calls('open_image')).toHaveLength(opened);
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep working' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull());
+    expect(calls('open_image')).toHaveLength(opened);
+    expect(screen.getByAltText('Edited preview of fixture.png')).toBeTruthy();
+  });
+
+  it('replaces the unsaved work only after "Discard and continue"', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await fireEvent.click(await screen.findByRole('button', { name: 'Discard and continue' }));
+    await waitFor(() => expect(calls('open_image').length).toBe(opened + 1));
+    expect(argsFor('open_image').path).toBe('C:\fixtures\second.png');
+  });
+
+  it('keeps the unsaved work when the question is closed with Escape', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await screen.findByRole('heading', { name: 'Discard the changes to this document?' });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull());
+    expect(calls('open_image')).toHaveLength(opened);
+  });
+
+  it('does not ask when there is nothing unsaved', async () => {
+    render(App);
+    await openImage();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await waitFor(() => expect(calls('open_image').length).toBe(opened + 1));
+    expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull();
   });
 
   it('keeps recovered work until a successful save and deletes only its own snapshot', async () => {

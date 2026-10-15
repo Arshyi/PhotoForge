@@ -47,6 +47,27 @@ describe('what the window is allowed to ask of Tauri', () => {
     ]);
   });
 
+  it('never relies on the page own confirm, alert or prompt', () => {
+    // Found by running the packaged application: Tauri's dialog plugin replaces `window.confirm`
+    // with an `async function` that returns a Promise, which is always truthy, and the command it
+    // calls is not in this window's permissions. `if (!confirm(...)) return` therefore never
+    // stopped anything, and unsaved work was replaced with no question asked. jsdom has the
+    // browser's own confirm, so no component test could see it. A question is asked in the page.
+    const stripped = code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const uses = [...stripped.matchAll(/(?<![A-Za-z0-9_$.])(?:window\.|globalThis\.)?(confirm|alert|prompt)\s*\(/g)];
+    expect(uses.map((match) => match[0]), 'the page own dialogs are not usable in the packaged app').toEqual([]);
+  });
+
+  it('awaits the in-page discard question at every place that asks it', () => {
+    // The question is a Promise. `if (!confirmDiscardChanges()) return` is `if (!Promise)`: false
+    // for ever, which is the bug the in-page question replaced, only quieter.
+    const app = readFileSync(join(root, 'src/App.svelte'), 'utf-8');
+    const asks = [...app.matchAll(/confirmDiscardChanges\(\)/g)].length - 1; // the definition
+    const awaited = [...app.matchAll(/await confirmDiscardChanges\(\)/g)].length;
+    expect(asks).toBeGreaterThan(5);
+    expect(awaited).toBe(asks);
+  });
+
   it('uses only window calls whose permission it has, or has been given', () => {
     // Every method called on the current window, found in the source. Those that are read-only
     // are in the default set; `destroy` is granted explicitly; anything else would be refused

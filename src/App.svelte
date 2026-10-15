@@ -375,11 +375,20 @@
    *
    * Tauri vetoes the window close as soon as the frontend registers a
    * close-requested listener and hands the decision entirely to us, so the
-   * confirmation has to be in-app. A native `window.confirm()` here is a modal
-   * raised from inside the close handler: if it fails to surface, the close
-   * button silently does nothing and there is no way out but Task Manager.
+   * confirmation has to be in-app. A native dialog raised from inside the close
+   * handler could fail to surface, and then the close button would silently do
+   * nothing and there would be no way out but Task Manager.
    */
   let closePrompt: 'dirty' | 'busy' | null = null;
+  /**
+   * The in-page question "discard the unsaved changes?", while it is on screen: the function that
+   * takes the answer. It is in the page because the page's own `confirm` cannot be used: in the
+   * packaged app Tauri's dialog plugin replaces it with a function that returns a Promise (always
+   * truthy), and this window is not permitted that plugin command. A guard written as
+   * `if (!confirm(...)) return` therefore never stopped anything, and unsaved work was replaced
+   * with no question asked (found by running the packaged window; no unit test could see it).
+   */
+  let discardPrompt: ((discard: boolean) => void) | null = null;
   /** Whether a close has already been refused because an operation was busy. */
   let closeWarned = false;
   let newDocumentWidth = 1920;
@@ -593,6 +602,14 @@
     void refreshPlugins();
 
     const handleKeys = (event: KeyboardEvent) => {
+      // The discard question owns the keyboard: Escape keeps the work, nothing else runs.
+      if (discardPrompt) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          answerDiscard(false);
+        }
+        return;
+      }
       const intent = resolveShortcut(
         {
           key: event.key,
@@ -792,7 +809,7 @@
       notify('Canvas width and height must be positive whole numbers.', 'error');
       return;
     }
-    if (!confirmDiscardChanges()) return;
+    if (!(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     newDocumentOpen = false;
     cancelTransformGesture();
     persistSelectionState();
@@ -1228,7 +1245,7 @@
         return;
       }
     }
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     persistSelectionState();
     closeRefineState();
@@ -1790,6 +1807,7 @@
    */
   function allowWorkspaceMutation(allowGeometryCoalescing = false, queuedPanelEdit = false): boolean {
     if (smartEditing) { notify('Save or cancel smart contents before editing the parent document.', 'error'); return false; }
+    if (discardPrompt) return false;
     if (opening || exporting || layerBusy || recoveryBusy || (engineInFlight > 0 && !queuedPanelEdit)) {
       notify('Wait for the current file or layer operation to finish.', 'error');
       return false;
@@ -2964,7 +2982,7 @@
    * what was approximated or left out. The file itself is never changed.
    */
   async function importPhotoshop(path: string) {
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     opening = true;
     try {
@@ -2987,7 +3005,7 @@
 
   /** Opens an SVG as a document of shape layers, with a report of what was left out. */
   async function importSvg(path: string) {
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     opening = true;
     try {
@@ -3013,7 +3031,7 @@
    * premultiplied alpha made straight and the file's primaries converted to sRGB's.
    */
   async function importExr(path: string) {
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     opening = true;
     try {
@@ -3039,7 +3057,7 @@
    * wider-gamut pictures become high-precision documents converted through their profile.
    */
   async function importTiff(path: string) {
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     opening = true;
     try {
@@ -3120,7 +3138,7 @@
 
   /** Opens the picture on the clipboard as a new, unsaved document. */
   async function newFromClipboard() {
-    if (!allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     cancelTransformGesture();
     opening = true;
     try {
@@ -3148,7 +3166,7 @@
         multiple: false,
         filters: [{ name: 'PhotoForge project', extensions: ['photoforge'] }]
       });
-      if (typeof chosen !== 'string' || !confirmDiscardChanges()) return;
+      if (typeof chosen !== 'string' || !(await confirmDiscardChanges())) return;
       const ownRequest = ++requestId;
       activeOpenRequest = ownRequest;
       const result = await loadLayerProject(chosen, ownRequest);
@@ -3217,11 +3235,27 @@
     }
   }
 
-  function confirmDiscardChanges(): boolean {
-    if (!projectDirty) return true;
-    return window.confirm(
-      'This document has unsaved changes. Continue and discard them?'
-    );
+  /**
+   * Asks, in the page, before unsaved work is let go. Resolves true at once when there is nothing
+   * unsaved. One question at a time: a second ask while one is open is answered "no".
+   */
+  function confirmDiscardChanges(): Promise<boolean> {
+    if (!projectDirty) return Promise.resolve(true);
+    if (discardPrompt) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      discardPrompt = resolve;
+    });
+  }
+
+  function answerDiscard(discard: boolean) {
+    const answer = discardPrompt;
+    discardPrompt = null;
+    answer?.(discard);
+  }
+
+  /** Focuses the safe choice of a question when it appears. */
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
   }
 
   /** How often an unsaved document is snapshotted to the local recovery folder. */
@@ -3283,7 +3317,7 @@
 
   async function acceptRecovery() {
     const offer = recoveryOffer;
-    if (!offer || !allowWorkspaceMutation() || !confirmDiscardChanges()) return;
+    if (!offer || !allowWorkspaceMutation() || !(await confirmDiscardChanges()) || !allowWorkspaceMutation()) return;
     opening = true;
     try {
       const ownRequest = ++requestId;
@@ -5028,6 +5062,29 @@
         <button type="button" class="primary" on:click={confirmClose}>
           {closePrompt === 'busy' ? 'Close anyway' : 'Discard and close'}
         </button>
+      </div>
+    </dialog>
+  </div>
+{/if}
+
+{#if discardPrompt}
+  <div class="modal-backdrop" role="presentation">
+    <dialog open class="modal close-modal" aria-labelledby="discard-prompt-title">
+      <div class="modal-heading">
+        <div>
+          <span>Unsaved changes</span>
+          <h1 id="discard-prompt-title">Discard the changes to this document?</h1>
+        </div>
+        <button type="button" aria-label="Dismiss this question and keep working" on:click={() => answerDiscard(false)}>×</button>
+      </div>
+      <p class="modal-footnote">
+        This document has changes that are not saved to a project. Continuing replaces it, and
+        they are gone. Recovery snapshots are taken periodically, so some work may be
+        recoverable, but the document itself is not kept.
+      </p>
+      <div class="modal-actions">
+        <button type="button" use:focusOnMount on:click={() => answerDiscard(false)}>Keep working</button>
+        <button type="button" class="primary" on:click={() => answerDiscard(true)}>Discard and continue</button>
       </div>
     </dialog>
   </div>

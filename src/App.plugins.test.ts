@@ -51,7 +51,6 @@ beforeEach(() => {
   });
   vi.mocked(open).mockReset();
   vi.mocked(save).mockReset();
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
     () =>
       ({
