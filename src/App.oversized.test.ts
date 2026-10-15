@@ -74,7 +74,6 @@ beforeEach(() => {
   originState = 'available';
   vi.mocked(open).mockReset();
   vi.mocked(save).mockReset();
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
     () =>
       ({
@@ -268,7 +267,7 @@ describe('opening an image too large to open whole', { timeout: 30_000 }, () => 
     expect(calls('open_image_selection')).toHaveLength(0);
     expect(screen.getByAltText('Edited preview of fixture.png')).toBeTruthy();
     // And the user was not asked to discard anything, since nothing was replaced.
-    expect(window.confirm).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull();
   });
 
   it('does not interrupt an image that opens whole', async () => {

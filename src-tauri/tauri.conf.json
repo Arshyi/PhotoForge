@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PhotoForge",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "identifier": "com.photoforge.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -29,12 +29,23 @@
     }
   },
   "bundle": {
-    "resources": { "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md" },
+    "resources": {
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "installer/Tauri-MIT.txt": "licenses/Tauri-MIT.txt"
+    },
     "active": true,
     "targets": ["nsis", "msi"],
     "category": "GraphicsAndDesign",
     "shortDescription": "Private, local photo enhancement",
     "longDescription": "PhotoForge restores and enhances photos locally without uploading images.",
+    "windows": {
+      "allowDowngrades": false,
+      "nsis": { "installMode": "currentUser" },
+      "wix": {
+        "template": "installer/photoforge.wxs",
+        "upgradeCode": "da34c5f7-e5bb-583b-93f8-1f4e4065dc14"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -7,6 +7,7 @@ import {
   documentSelectionKey,
   legacyDocumentSelectionKey,
   loadSelectionSession,
+  MAX_STORED_SESSIONS,
   saveSelectionSession,
   validSnapshot
 } from './serialization';
@@ -28,11 +29,21 @@ function snapshot(width = 2, height = 2): MaskSnapshot {
 class MemoryStorage {
   values = new Map<string, string>();
   setCalls = 0;
+  /** A storage quota in characters (keys and values), or none. */
+  quota: number | null = null;
   getItem(key: string) { return this.values.get(key) ?? null; }
   setItem(key: string, value: string) {
     this.setCalls += 1;
+    if (this.quota !== null) {
+      let used = 0;
+      for (const [name, text] of this.values) if (name !== key) used += name.length + text.length;
+      if (used + key.length + value.length > this.quota) throw new Error('QuotaExceededError');
+    }
     this.values.set(key, value);
   }
+  removeItem(key: string) { this.values.delete(key); }
+  key(index: number) { return [...this.values.keys()][index] ?? null; }
+  get length() { return this.values.size; }
 }
 
 const legacySettings = {
@@ -209,5 +220,64 @@ describe('selection session serialization', () => {
       name: 'Subject',
       metadata: { sourceTool: 'rectangle' }
     });
+  });
+});
+
+describe('how many selection sessions are kept', () => {
+  const stateFor = (key: string) => createSelectionState(key, 2, 2);
+  const prefix = 'photoforge.selection-session.v2:';
+  const stored = (storage: MemoryStorage) =>
+    [...storage.values.keys()].filter((name) => name.startsWith(prefix));
+
+  it('keeps the most recently saved documents and gives up the oldest', () => {
+    const storage = new MemoryStorage();
+    storage.values.set('unrelated', 'kept');
+    for (let index = 0; index < MAX_STORED_SESSIONS + 3; index += 1) {
+      expect(saveSelectionSession(stateFor(`doc-${index}`), storage)).toBe(true);
+    }
+    const kept = stored(storage);
+    expect(kept).toHaveLength(MAX_STORED_SESSIONS);
+    expect(kept).not.toContain(`${prefix}doc-0`);
+    expect(kept).not.toContain(`${prefix}doc-2`);
+    expect(kept).toContain(`${prefix}doc-3`);
+    expect(kept).toContain(`${prefix}doc-${MAX_STORED_SESSIONS + 2}`);
+    expect(storage.values.get('unrelated')).toBe('kept');
+  });
+
+  it('a document saved again is the newest, not the next to go', () => {
+    const storage = new MemoryStorage();
+    for (let index = 0; index < MAX_STORED_SESSIONS; index += 1) saveSelectionSession(stateFor(`doc-${index}`), storage);
+    saveSelectionSession(stateFor('doc-0'), storage);
+    saveSelectionSession(stateFor('another'), storage);
+    const kept = stored(storage);
+    expect(kept).toContain(`${prefix}doc-0`);
+    expect(kept).not.toContain(`${prefix}doc-1`);
+  });
+
+  it('gives up older sessions, not the current one, when the storage is full', () => {
+    const storage = new MemoryStorage();
+    for (let index = 0; index < 4; index += 1) saveSelectionSession(stateFor(`doc-${index}`), storage);
+    const one = storage.values.get(`${prefix}doc-0`)!.length + `${prefix}doc-0`.length;
+    // room for two sessions and the index, not for a third
+    storage.quota = one * 2 + 400;
+    expect(saveSelectionSession(stateFor('doc-new'), storage)).toBe(true);
+    const kept = stored(storage);
+    expect(kept).toContain(`${prefix}doc-new`);
+    expect(kept.length).toBeLessThan(5);
+    expect(kept).not.toContain(`${prefix}doc-0`);
+  });
+
+  it('adopts sessions saved before there was an index, and a storage that cannot remove', () => {
+    const storage = new MemoryStorage();
+    for (let index = 0; index < MAX_STORED_SESSIONS + 4; index += 1) {
+      storage.values.set(`${prefix}old-${index}`, '{}');
+    }
+    expect(saveSelectionSession(stateFor('fresh'), storage)).toBe(true);
+    expect(stored(storage)).toHaveLength(MAX_STORED_SESSIONS);
+    expect(stored(storage)).toContain(`${prefix}fresh`);
+    // a storage with only setItem (as the first tests use) still saves
+    const writes: string[] = [];
+    expect(saveSelectionSession(stateFor('plain'), { setItem: (key: string) => { writes.push(key); } })).toBe(true);
+    expect(writes[0]).toBe(`${prefix}plain`);
   });
 });

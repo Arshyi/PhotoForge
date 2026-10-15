@@ -1,5 +1,8 @@
 # PhotoForge
 
+Development branch: **0.15.2 hardening**, not yet released. See
+[current implementation/verification status](docs/release-0-15-2.md).
+
 PhotoForge is a lightweight, privacy-first desktop photo restoration and enhancement tool. It opens and saves PNG, JPEG, WebP, TIFF, OpenEXR, SVG and Photoshop (PSD / PSB) files, and develops camera RAW (DNG), locally with a typed, non-destructive edit pipeline and never uploads photos.
 
 This repository contains the Phase 0 foundation through Phase 15: interoperability

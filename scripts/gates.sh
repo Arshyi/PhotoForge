@@ -11,6 +11,8 @@
 # <log-dir>/progress.txt as it goes, and a summary is printed at the end.
 # Every configuration runs even after a failure. Any failed step or missing
 # test summary makes the final exit status nonzero.
+# Storage checks (Node.js 20+) precede/follow every command: default 20 GiB free,
+# at most 64 GiB retained logical output. Refusals fail the gate; nothing is deleted.
 #
 # Usage:  scripts/gates.sh [log-dir]        (default: ${PF_WORK:-<repo>/.work}/gates)
 # Optional real-file inputs are read from the environment (see docs/development.md); with none set
@@ -24,12 +26,30 @@ mkdir -p "$logs" || exit 1
 progress="$logs/progress.txt"
 echo "START $(date +%T)" > "$progress" || exit 1
 failed=0
+export PF_TARGET_DIR="${PF_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/src-tauri/target}}"
+export CARGO_TARGET_DIR="$PF_TARGET_DIR"
+# Pin intermediate and final output to the same budgeted root, even if a user's
+# global Cargo configuration otherwise separates them (Cargo 1.91+).
+export CARGO_BUILD_BUILD_DIR="$PF_TARGET_DIR"
+
+storage() {
+  node "$here/build-cache.mjs" check --target-dir "$PF_TARGET_DIR" --base-dir "$repo/src-tauri" > "$logs/storage-$1.json" 2>&1
+}
 
 run() {
   local name="$1" rc=0
   shift
   echo "BEGIN $name $(date +%T)" >> "$progress" || exit 1
-  "$here/cargo-ext.sh" "$@" > "$logs/gate-$name.log" 2>&1 || rc=$?
+  if storage "$name-before"; then
+    bash "$here/cargo-ext.sh" "$@" > "$logs/gate-$name.log" 2>&1 || rc=$?
+    if ! storage "$name-after"; then
+      echo "Storage check failed after $name; inspect storage-$name-after.json" >> "$logs/gate-$name.log"
+      if [ "$rc" -eq 0 ]; then rc=86; fi
+    fi
+  else
+    echo "Storage check refused $name; inspect storage-$name-before.json" > "$logs/gate-$name.log"
+    rc=86
+  fi
   echo "END $name rc=$rc $(date +%T)" >> "$progress" || exit 1
   if [ "$rc" -ne 0 ]; then failed=1; fi
 }

@@ -24,6 +24,9 @@
     list      print what the clipboard holds
     selftest  prove save/restore on a canary, then on the real clipboard, and leave it as it was
 
+    Use a fresh backup directory for each save/selftest. Existing nonempty backups are
+    never overwritten. Restoration checks manifest filenames, lengths and checksum first.
+
 .EXAMPLE
     .\tools\clipboard_backup.ps1 save
     ... a test that replaces the clipboard ...
@@ -45,6 +48,7 @@ $Path = [System.IO.Path]::GetFullPath($Path)
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -68,6 +72,11 @@ public static class PfClip
     [DllImport("user32.dll")] static extern uint EnumClipboardFormats(uint format);
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetClipboardData(uint format);
     [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetClipboardData(uint format, IntPtr memory);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateWindowEx(uint extendedStyle, string className, string name, uint style,
+        int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool DestroyWindow(IntPtr window);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern int GetClipboardFormatName(uint format, StringBuilder name, int max);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -106,11 +115,11 @@ public static class PfClip
 
     public static uint Register(string name) { return RegisterClipboardFormat(name); }
 
-    static void Open()
+    static void Open(IntPtr owner = default(IntPtr))
     {
         for (int attempt = 0; attempt < 40; attempt++)
         {
-            if (OpenClipboard(IntPtr.Zero)) return;
+            if (OpenClipboard(owner)) return;
             Thread.Sleep(50);
         }
         throw new InvalidOperationException("the clipboard is held by another program");
@@ -218,6 +227,7 @@ public static class PfClip
     {
         // Memory first, so that a failure to allocate costs nothing that was on the clipboard.
         List<KeyValuePair<uint, IntPtr>> blocks = new List<KeyValuePair<uint, IntPtr>>();
+        IntPtr owner = IntPtr.Zero;
         try
         {
             foreach (PfClipItem item in items)
@@ -226,21 +236,31 @@ public static class PfClip
                 IntPtr memory = GlobalAlloc(0x0002, new UIntPtr((uint)item.Data.Length));
                 if (memory == IntPtr.Zero) throw new OutOfMemoryException("GlobalAlloc failed");
                 IntPtr pointer = GlobalLock(memory);
+                if (pointer == IntPtr.Zero)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    GlobalFree(memory);
+                    throw new Win32Exception(error, "GlobalLock failed before clipboard replacement");
+                }
                 Marshal.Copy(item.Data, 0, pointer, item.Data.Length);
                 GlobalUnlock(memory);
                 blocks.Add(new KeyValuePair<uint, IntPtr>(item.Id, memory));
             }
-            Open();
+            // OpenClipboard(NULL) + EmptyClipboard leaves no owner: SetClipboardData can fail.
+            // A message-only system-class window owns these immediate (not delayed) writes.
+            owner = CreateWindowEx(0, "STATIC", "PhotoForge clipboard backup", 0,
+                0, 0, 0, 0, new IntPtr(-3), IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+            if (owner == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot create clipboard owner");
+            Open(owner);
             try
             {
-                EmptyClipboard();
+                if (!EmptyClipboard()) throw new Win32Exception(Marshal.GetLastWin32Error(), "EmptyClipboard failed");
                 for (int index = 0; index < blocks.Count; index++)
                 {
-                    if (SetClipboardData(blocks[index].Key, blocks[index].Value) != IntPtr.Zero)
-                    {
-                        // the clipboard owns it now
-                        blocks[index] = new KeyValuePair<uint, IntPtr>(blocks[index].Key, IntPtr.Zero);
-                    }
+                    if (SetClipboardData(blocks[index].Key, blocks[index].Value) == IntPtr.Zero)
+                        throw new Win32Exception(Marshal.GetLastWin32Error(), "SetClipboardData failed for format " + blocks[index].Key);
+                    // the clipboard owns it now
+                    blocks[index] = new KeyValuePair<uint, IntPtr>(blocks[index].Key, IntPtr.Zero);
                 }
             }
             finally
@@ -250,6 +270,7 @@ public static class PfClip
         }
         finally
         {
+            if (owner != IntPtr.Zero) DestroyWindow(owner);
             foreach (KeyValuePair<uint, IntPtr> block in blocks)
             {
                 if (block.Value != IntPtr.Zero) GlobalFree(block.Value);
@@ -259,8 +280,7 @@ public static class PfClip
 
     public static void Empty()
     {
-        Open();
-        try { EmptyClipboard(); } finally { CloseClipboard(); }
+        Put(new PfClipItem[0]);
     }
 
     public static string Hash(List<PfClipItem> items)
@@ -285,7 +305,8 @@ public static class PfClip
     {
         if (Directory.Exists(directory))
         {
-            foreach (string file in Directory.GetFiles(directory, "format-*.bin")) File.Delete(file);
+            if (Directory.GetFileSystemEntries(directory).Length != 0)
+                throw new IOException("Refusing to replace an existing clipboard backup: " + directory);
         }
         Directory.CreateDirectory(directory);
         List<string> lines = new List<string>();
@@ -312,18 +333,37 @@ public static class PfClip
         List<PfClipItem> items = new List<PfClipItem>();
         string manifest = Path.Combine(directory, "manifest.txt");
         if (!File.Exists(manifest)) throw new FileNotFoundException("no backup at " + directory);
+        string expectedHash = null;
+        HashSet<uint> formats = new HashSet<uint>();
         foreach (string line in File.ReadAllLines(manifest, Encoding.UTF8))
         {
             string[] fields = line.Split('\t');
-            if (fields.Length < 5) continue;
+            if (fields.Length == 2 && fields[0] == "sha256")
+            {
+                if (expectedHash != null) throw new InvalidDataException("Duplicate backup checksum");
+                expectedHash = fields[1];
+                continue;
+            }
+            if (fields.Length != 5) throw new InvalidDataException("Malformed backup manifest");
             PfClipItem item = new PfClipItem();
             item.Id = uint.Parse(fields[0]);
+            if (item.Id == 0 || item.Id > 65535 || !formats.Add(item.Id))
+                throw new InvalidDataException("Invalid or duplicate clipboard format");
             item.Name = fields[1];
-            if (fields[3].Length > 0) item.Data = File.ReadAllBytes(Path.Combine(directory, fields[3]));
+            if (fields[3].Length > 0)
+            {
+                if (fields[3] != "format-" + item.Id + ".bin")
+                    throw new InvalidDataException("Backup data filename does not match its format");
+                item.Data = File.ReadAllBytes(Path.Combine(directory, fields[3]));
+                if (item.Data.LongLength != long.Parse(fields[2]))
+                    throw new InvalidDataException("Backup data length mismatch");
+            }
             else item.Skipped = fields[4];
             item.Synthesized = fields[4] == "synthesized";
             items.Add(item);
         }
+        if (expectedHash == null || !String.Equals(expectedHash, Hash(items), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Backup checksum mismatch; clipboard will not be replaced");
         return items;
     }
 

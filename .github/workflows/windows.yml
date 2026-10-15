@@ -2,7 +2,7 @@ name: Windows checks
 
 on:
   push:
-    branches: [main, phase-15-10-clipboard-window, 'release-*', 'phase-16-*']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -32,6 +32,13 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --fund=false
       - run: npm run test:tools
+      - run: node scripts/installer-policy.mjs
+      - name: Guarded MSI harness unit tests (no install or UAC)
+        run: .\tools\validate\msi_lifecycle.test.ps1
+      - name: Guarded NSIS harness unit tests (no install or app launch)
+        run: .\tools\validate\nsis_lifecycle.test.ps1
+      - name: Clipboard backup integrity unit tests (no clipboard access)
+        run: .\tools\clipboard_backup.test.ps1
       - run: python tools/scan_control.py
       - run: npx tsc --noEmit
       - run: npm run check
@@ -66,6 +73,8 @@ jobs:
       RUSTUP_TOOLCHAIN: '1.97.1'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
+      PF_MIN_FREE_GIB: '4'
+      PF_CACHE_MAX_GIB: '32'
       PHOTOFORGE_RAW_FIXTURES: ${{ github.workspace }}\raw-fixtures
       PF_FEATURES: ${{ matrix.features }}
     steps:
@@ -73,7 +82,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Set the runner-local build directory
-        run: Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$env:RUNNER_TEMP\photoforge-target"
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_TARGET_DIR=$env:RUNNER_TEMP\photoforge-target"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "CARGO_BUILD_BUILD_DIR=$env:RUNNER_TEMP\photoforge-target"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: frontend-dist
@@ -92,9 +106,17 @@ jobs:
         run: ./scripts/fetch-raw-fixtures.ps1
       - name: Formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Verify compact profile retains assertions and overflow checks
+        run: cargo test --manifest-path scripts/fixtures/validation-profile/Cargo.toml --config scripts/cargo-compact.toml --locked --offline
+      - name: Storage admission before Clippy
+        run: node scripts/build-cache.mjs check --target-dir "$env:CARGO_TARGET_DIR" --base-dir src-tauri
       - name: Clippy
         shell: bash
         run: bash scripts/cargo-ext.sh clippy --locked --all-targets --no-default-features --features "$PF_FEATURES" -- -D warnings
+      - name: Storage admission before tests
+        run: node scripts/build-cache.mjs check --target-dir "$env:CARGO_TARGET_DIR" --base-dir src-tauri
       - name: Tests, including the real RAW fixtures
         shell: bash
         run: bash scripts/cargo-ext.sh test --locked --all-targets --no-default-features --features "$PF_FEATURES" --no-fail-fast -- --test-threads=2
+      - name: Retained storage after tests
+        run: node scripts/build-cache.mjs check --target-dir "$env:CARGO_TARGET_DIR" --base-dir src-tauri

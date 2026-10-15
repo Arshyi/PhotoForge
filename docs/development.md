@@ -55,6 +55,36 @@ test targets for the four feature sets below are much larger, on the order of te
 `PF_TARGET_DIR` (read by `scripts/cargo-ext.sh`) or `CARGO_TARGET_DIR` to put the build output
 somewhere with room. A running `photoforge.exe` locks the executable: close it before rebuilding.
 
+### Build-storage policy (0.15.2 development)
+
+`scripts/cargo-ext.sh` now defaults to `PF_BUILD_MODE=compact`: line-table debug information
+for both PhotoForge and dependencies, with incremental compilation disabled. This retains
+source/line backtraces but not full debugger variable inspection. `PF_BUILD_MODE=full` uses
+ordinary Cargo profiles and preserves the caller's incremental setting. Neither mode removes
+features or tests, changes optimisation/assertion/overflow settings, or changes release profiles.
+Direct Cargo/Tauri commands do not automatically opt into this helper policy.
+
+The gate runner checks storage before and after every command. Defaults are at least **20 GiB
+free** and at most **64 GiB retained logical output**; `PF_MIN_FREE_GIB` and `PF_CACHE_MAX_GIB`
+accept explicit positive GiB overrides. Hosted CI uses 4/32 GiB on its disposable runners.
+Final and intermediate Cargo output are pinned to the same checked root. Counts include the
+entire target (including release), conservatively count hard links more than once, and are not
+allocated-space measurements. Checks are admission checks, **not a hard disk quota**: one command
+can grow past the budget before its post-check refuses further work. A refusal fails the gate,
+does not qualify skipped tests as passing, and never deletes anything.
+
+```powershell
+$env:PF_TARGET_DIR = 'C:/PFBuild/target-compact'  # one reusable compact cache, not one per run
+node scripts/build-cache.mjs check --target-dir $env:PF_TARGET_DIR --base-dir src-tauri
+bash scripts/gates.sh
+```
+
+Keep full-debug work in a separate, deliberately managed target. Retain one active cache per
+mode, stop/review oversized caches, and retire only explicitly selected generated output after
+preserving release packages and evidence. There is no automatic pruning, age-based deletion,
+global environment change, source/test trimming, or movement of models/projects to another drive.
+The compact profile probe additionally checks that debug assertions and overflow checks still run.
+
 ## The gates: what "green" means
 
 Frontend (from the repository root):
@@ -90,7 +120,8 @@ contained an unhandled command-palette error. It was a synchronous command escap
 handler and is fixed for 0.15.1. Current gates require zero unhandled errors; 1,393 frontend tests
 in 94 files now pass. `npm run test:tools` also checks the Rust gate runner's exit status with
 successful, failed, and missing-output commands. The runner finishes all configurations and exits
-nonzero if any check fails or produces no test results.
+nonzero if any check fails or produces no test results. Tool regressions also cover compact/full
+profile dispatch and fail-closed, read-only storage admission, including post-command growth.
 
 Run the frontend suite on a quiet machine. The heavy `App*.test.ts` files time out under CPU load
 (a cargo build running at the same time is enough), and a timeout is not a defect.
@@ -160,7 +191,10 @@ python -m venv .work\venv; .work\venv\Scripts\pip install -r tools\requirements.
 shell first if the repository is on a small drive.) What to expect:
 
 * the frontend: 0 errors and 0 warnings in `npm run check`; 1,393 tests in 94 files with no
-  unhandled errors; four gate-runner regression tests in `npm run test:tools`;
+  unhandled errors; 30 storage/profile/gate/installer-source regressions in
+  `npm run test:tools`, plus 26 mocked MSI harness guards in
+  `tools/validate/msi_lifecycle.test.ps1` (no real installation or UAC), and nine
+  serialization/integrity checks in `tools/clipboard_backup.test.ps1` (no clipboard access);
 * `close_repro.ps1`: each run opens a RAW region (the harness writes a 512 MiB manual memory budget
   so that the region chooser is offered) and the window exits at once on a close request; `close.log`
   shows `close requested`, `the page decided: close`, `the window was destroyed` for each run. An
@@ -196,8 +230,20 @@ gh release create v0.15.0 <files> --prerelease --title "PhotoForge 0.15.0" --not
 ```
 
 The installers are **not signed** (no code-signing identity exists), and the release notes say so;
-Windows SmartScreen warns. The NSIS installer is per-user. The MSI is registered per machine but
-installs into the installing user's profile; this is documented, not fixed.
+Windows SmartScreen can warn. The NSIS installer is per-user. Published MSI versions through
+0.15.1 are registered per machine but can install into the installing user's profile. The
+0.15.2 candidate isolates machine state and defaults to Program Files, with explicit refusal
+of unsafe legacy MSI migration. Built-table and elevated lifecycle evidence are required
+before treating that candidate policy as validated (see `docs/release-0-15-2.md`).
+
+For study-friendly background work, use source tests, installer guard tests and read-only
+package inspection; keep resource-heavy Rust matrix builds on hosted CI. The NSIS harness
+now defaults to read-only preflight and requires a pinned explicit package plus its exact
+NSIS-marked payload reference. Installation/removal are separate, ordinary-user actions in
+a disposable pristine test account; neither launches PhotoForge. Existing or stale product
+state is protected, not cleaned automatically. Its no-shortcut/update-mode payload test is
+not full native shortcut/uninstall acceptance. See [`tools/validate/README.md`](../tools/validate/README.md)
+before running any window, clipboard or installer scenario.
 
 ## Layout of the repository
 

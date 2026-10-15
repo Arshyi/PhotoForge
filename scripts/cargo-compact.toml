@@ -1,0 +1,15 @@
+# Validation-only storage policy. Features, optimisation levels, assertions,
+# overflow checks, release settings and test selection remain unchanged.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = "line-tables-only"

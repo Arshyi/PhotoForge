@@ -29,24 +29,33 @@ if [ "$sub" = test ] && [ "$step" != "$GATE_EMPTY_STEP" ]; then
   echo 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'
 fi
 if [ "$step" = "$GATE_FAIL_STEP" ]; then exit 42; fi
+if [ "$step" = "$GATE_GROW_STEP" ]; then
+  mkdir -p "$CARGO_TARGET_DIR/debug"
+  printf '%02048d' 0 > "$CARGO_TARGET_DIR/debug/retain-this-generated-file"
+fi
 `;
 
-function runGate(env = {}) {
+function runGate(env = {}, expectedCalls = expectedSteps) {
   const directory = mkdtempSync(path.join(tmpdir(), 'photoforge-gates-'));
   try {
     copyFileSync(gates, path.join(directory, 'gates.sh'));
+    copyFileSync(fileURLToPath(new URL('./build-cache.mjs', import.meta.url)), path.join(directory, 'build-cache.mjs'));
     writeFileSync(path.join(directory, 'cargo-ext.sh'), fakeCargo, { mode: 0o755 });
     const result = spawnSync(bash, ['gates.sh', 'logs'], {
       cwd: directory,
       encoding: 'utf8',
       timeout: 30_000,
-      env: { ...process.env, GATE_FAIL_STEP: '', GATE_EMPTY_STEP: '', ...env }
+      env: { ...process.env, GATE_FAIL_STEP: '', GATE_EMPTY_STEP: '', GATE_GROW_STEP: '',
+        PF_TARGET_DIR: path.join(directory, 'target'), PF_MIN_FREE_GIB: '.000001', PF_CACHE_MAX_GIB: '64', ...env }
     });
     assert.ifError(result.error);
-    assert.ok(existsSync(path.join(directory, 'calls.txt')), `${result.stdout}\n${result.stderr}`);
-    assert.deepEqual(readFileSync(path.join(directory, 'calls.txt'), 'utf8').trim().split(/\r?\n/), expectedSteps);
-    return { ...result, progress: readFileSync(path.join(directory, 'logs', 'progress.txt'), 'utf8') };
+    const calls = existsSync(path.join(directory, 'calls.txt')) ? readFileSync(path.join(directory, 'calls.txt'), 'utf8').trim().split(/\r?\n/) : [];
+    assert.deepEqual(calls, expectedCalls, `${result.stdout}\n${result.stderr}`);
+    return { ...result, progress: readFileSync(path.join(directory, 'logs', 'progress.txt'), 'utf8'),
+      retained: existsSync(path.join(directory, 'target', 'debug', 'retain-this-generated-file')) };
   } finally {
+    assert.equal(path.dirname(path.resolve(directory)), path.resolve(tmpdir()));
+    assert.ok(path.basename(directory).startsWith('photoforge-gates-'));
     rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -74,4 +83,17 @@ test('a successful command without test results cannot qualify a configuration',
   const result = runGate({ GATE_EMPTY_STEP: 'noplugins-test' });
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /0 passed, 0 failed, 0 binaries/);
+});
+
+test('a pre-command storage refusal runs no Cargo command and fails all steps', () => {
+  const result = runGate({ PF_MIN_FREE_GIB: '1000000' }, []);
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal((result.progress.match(/rc=86/g) || []).length, 8);
+});
+
+test('post-command growth fails the gate and retains generated files for explicit cleanup', () => {
+  const result = runGate({ GATE_GROW_STEP: 'all-clippy', PF_CACHE_MAX_GIB: '.000001' }, ['all-clippy']);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.progress, /END all-clippy rc=86/);
+  assert.equal(result.retained, true);
 });

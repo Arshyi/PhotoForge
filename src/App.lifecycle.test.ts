@@ -113,7 +113,6 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     nativeEvents.drop = undefined;
     vi.mocked(open).mockReset();
     vi.mocked(save).mockReset();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({
       createImageData: (width: number, height: number) => ({
         data: new Uint8ClampedArray(width * height * 4), width, height
@@ -265,6 +264,94 @@ describe('App document lifecycle', { timeout: 30_000 }, () => {
     expect(argsFor('render_layer_composite').operations).toEqual([{ type: 'grayscale' }]);
     expect((argsFor('render_layer_composite').document as LayerDocument).precision).toBe('linear_srgb_f32');
     expect(calls('render_preview')).toHaveLength(0);
+  });
+
+  async function makeUnsavedEdit() {
+    await openImage();
+    await fireEvent.click(screen.getByRole('button', { name: '◐ Grayscale' }));
+    await waitFor(() => expect(calls('render_layer_composite').length).toBeGreaterThan(0));
+  }
+
+  async function chooseAnotherFile() {
+    vi.mocked(open).mockResolvedValueOnce('C:\fixtures\second.png');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+  }
+
+  it('cancels the host reload keys and its right-click menu, which would drop the open document', async () => {
+    render(App);
+    await openImage();
+    // F5 and Ctrl+R reload the page in the packaged window (found by pressing F5 there): the
+    // document and everything unsaved in it went, with no question. They must be cancelled.
+    for (const init of [
+      { key: 'F5' },
+      { key: 'F5', ctrlKey: true },
+      { key: 'r', ctrlKey: true },
+      { key: 'R', ctrlKey: true, shiftKey: true }
+    ]) {
+      const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(true);
+    }
+    // an ordinary key is left alone
+    const plain = new KeyboardEvent('keydown', { key: 'F6', bubbles: true, cancelable: true });
+    document.body.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false);
+    // the right-click menu is cancelled on the picture and kept in a text field
+    const onPage = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(onPage);
+    expect(onPage.defaultPrevented).toBe(true);
+    const field = document.createElement('input');
+    field.type = 'text';
+    document.body.appendChild(field);
+    const inField = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    field.dispatchEvent(inField);
+    expect(inField.defaultPrevented).toBe(false);
+    field.remove();
+  });
+
+  it('asks, in the page, before unsaved work is replaced, and keeps it when told to', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    // A question on screen, and nothing replaced behind it. (The page's own confirm is not
+    // usable in the packaged app: Tauri swaps it for a function that returns a Promise.)
+    await screen.findByRole('heading', { name: 'Discard the changes to this document?' });
+    expect(calls('open_image')).toHaveLength(opened);
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep working' }));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull());
+    expect(calls('open_image')).toHaveLength(opened);
+    expect(screen.getByAltText('Edited preview of fixture.png')).toBeTruthy();
+  });
+
+  it('replaces the unsaved work only after "Discard and continue"', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await fireEvent.click(await screen.findByRole('button', { name: 'Discard and continue' }));
+    await waitFor(() => expect(calls('open_image').length).toBe(opened + 1));
+    expect(argsFor('open_image').path).toBe('C:\fixtures\second.png');
+  });
+
+  it('keeps the unsaved work when the question is closed with Escape', async () => {
+    render(App);
+    await makeUnsavedEdit();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await screen.findByRole('heading', { name: 'Discard the changes to this document?' });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull());
+    expect(calls('open_image')).toHaveLength(opened);
+  });
+
+  it('does not ask when there is nothing unsaved', async () => {
+    render(App);
+    await openImage();
+    const opened = calls('open_image').length;
+    await chooseAnotherFile();
+    await waitFor(() => expect(calls('open_image').length).toBe(opened + 1));
+    expect(screen.queryByRole('heading', { name: 'Discard the changes to this document?' })).toBeNull();
   });
 
   it('keeps recovered work until a successful save and deletes only its own snapshot', async () => {

@@ -1,3 +1,11 @@
+# PhotoForge third-party notices
+
+The 0.15.2 MSI template adapts Tauri CLI 2.11.4 under its MIT terms.
+Copyright (c) 2017 - Present Tauri Apps Contributors. The complete upstream
+notice is retained in `src-tauri/installer/Tauri-MIT.txt` in source and
+`licenses/Tauri-MIT.txt` in the installers. This third-party notice does not
+assign an overall project license to PhotoForge.
+
 # Phase 10 color-management dependency notice
 
 PhotoForge enables moxcms 0.8.1 directly for embedded RGB ICC transforms.

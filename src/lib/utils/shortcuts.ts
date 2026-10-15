@@ -86,6 +86,29 @@ export function isTextEntryTarget(target: EventTarget | null | undefined): boole
   return !NON_TEXT_INPUT_TYPES.has(type);
 }
 
+/**
+ * The keys that make WebView2 reload the page: F5, Ctrl+F5, Shift+F5, Ctrl+R and Ctrl+Shift+R.
+ *
+ * Found by pressing F5 in the packaged window: the host's own accelerator keys are on, the page
+ * reloaded, and the open document and everything unsaved in it were gone with no question (the
+ * `beforeunload` handler raised no dialog). The page cancels these before the host sees them.
+ */
+export function isPageReloadKey(
+  event: Pick<ShortcutEvent, 'key' | 'ctrlKey' | 'metaKey'>
+): boolean {
+  const key = event.key.toLowerCase();
+  if (key === 'f5') return true;
+  return Boolean(event.ctrlKey || event.metaKey) && key === 'r';
+}
+
+/**
+ * Whether the host's own right-click menu (Back, Refresh, Save as, Print, ...) may show: only
+ * where the person is editing text, which needs cut, copy and paste.
+ */
+export function allowsNativeContextMenu(target: EventTarget | null | undefined): boolean {
+  return isTextEntryTarget(target);
+}
+
 /** Whether the focused control handles the arrow keys itself. */
 export function ownsArrowKeys(target: EventTarget | null | undefined): boolean {
   const element = target as HTMLElement | null | undefined;

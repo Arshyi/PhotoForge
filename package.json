@@ -1,7 +1,7 @@
 {
   "name": "photoforge",
   "private": true,
-  "version": "0.15.1",
+  "version": "0.15.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
@@ -10,7 +10,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:tools": "node --test scripts/gates.test.mjs",
+    "test:tools": "node --test scripts/gates.test.mjs scripts/cargo-ext.test.mjs scripts/build-cache.test.mjs scripts/installer-policy.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
