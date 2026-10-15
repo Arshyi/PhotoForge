@@ -56,6 +56,7 @@ const TAG_COLOR_MATRIX_1: u16 = 50721;
 const TAG_COLOR_MATRIX_2: u16 = 50722;
 const TAG_AS_SHOT_NEUTRAL: u16 = 50728;
 const TAG_ACTIVE_AREA: u16 = 50829;
+const TAG_MASKED_AREAS: u16 = 50741;
 
 const PHOTOMETRIC_CFA: u32 = 32803;
 const PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
@@ -160,8 +161,15 @@ pub struct SensorImage {
     pub width: u32,
     pub height: u32,
     pub cfa: CfaPattern,
-    /// Black level for each CFA position, in sensor units.
+    /// Black level for each CFA position, in sensor units. The file's own `BlackLevel` when it
+    /// declares one; otherwise the level measured on its masked photosites when it has any,
+    /// otherwise zero.
     pub black_level: [f32; 4],
+    /// The mean of the file's masked (optically black) photosites at each CFA position, when it
+    /// declares masked areas that cover every position. Recorded whether or not the file also
+    /// declares a black level, which stays authoritative; a large disagreement between the two
+    /// is something a person may want to know about.
+    pub masked_black_level: Option<[f32; 4]>,
     pub white_level: f32,
     pub bits_per_sample: u8,
     /// The region of the sensor that holds picture rather than calibration
@@ -580,7 +588,26 @@ fn decode_inner(data: &[u8], window: Option<Rect>) -> Result<SensorImage, RawErr
         .f64(TAG_WHITE_LEVEL)
         .map(|value| value as f32)
         .unwrap_or_else(|| ((1u32 << bits_per_sample) - 1) as f32);
-    let black_level = read_black_level(raw);
+    let mut black_level = read_black_level(raw);
+    // The photosites behind the mask say what black is on this sensor. The declared level is
+    // authoritative and is never replaced; the measurement is used only when there is none.
+    let masked_black_level = if linear {
+        None
+    } else {
+        measure_masked_black_level(
+            data,
+            &layout,
+            &samples,
+            &area,
+            &read_masked_areas(raw, width, height),
+            white_level,
+        )
+    };
+    if raw.f64_vec(TAG_BLACK_LEVEL).is_none() {
+        if let Some(measured) = masked_black_level {
+            black_level = measured;
+        }
+    }
     let active_area = read_active_area(raw, width, height);
     let default_crop = read_default_crop(raw);
 
@@ -596,6 +623,7 @@ fn decode_inner(data: &[u8], window: Option<Rect>) -> Result<SensorImage, RawErr
         height: area.height,
         cfa,
         black_level,
+        masked_black_level,
         white_level,
         bits_per_sample,
         // These describe the whole sensor, so for a window they would point at
@@ -691,6 +719,122 @@ fn read_black_level(ifd: &Ifd) -> [f32; 4] {
         }
     }
     levels
+}
+
+/// The most masked areas read from a file; real sensors declare a few strips.
+const MAX_MASKED_AREAS: usize = 16;
+
+/// The rectangles of masked photosites the file declares, as sensor rectangles.
+///
+/// `MaskedAreas` is a list of `(top, left, bottom, right)`, like `ActiveArea`. An area that is
+/// empty, inverted or off the sensor is dropped rather than believed, and so is a trailing
+/// partial entry.
+fn read_masked_areas(ifd: &Ifd, width: u32, height: u32) -> Vec<Rect> {
+    let Some(values) = ifd.u32_vec(TAG_MASKED_AREAS) else {
+        return Vec::new();
+    };
+    values
+        .chunks_exact(4)
+        .take(MAX_MASKED_AREAS)
+        .filter_map(|area| {
+            let (top, left, bottom, right) = (area[0], area[1], area[2], area[3]);
+            (left < right && top < bottom && right <= width && bottom <= height).then(|| Rect {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            })
+        })
+        .collect()
+}
+
+/// A running mean of sample values for each CFA position.
+#[derive(Default)]
+struct BlackAccumulator {
+    sums: [u64; 4],
+    counts: [u64; 4],
+}
+
+impl BlackAccumulator {
+    fn add(&mut self, x: u32, y: u32, value: u16) {
+        let cell = CfaPattern::cell_index(x, y);
+        self.sums[cell] += u64::from(value);
+        self.counts[cell] += 1;
+    }
+
+    /// The mean at each position; `None` unless every position has at least one sample, since
+    /// a level for three of four positions is not a black level for the sensor.
+    fn means(&self) -> Option<[f32; 4]> {
+        if self.counts.contains(&0) {
+            return None;
+        }
+        let mut means = [0.0f32; 4];
+        for (mean, (sum, count)) in means.iter_mut().zip(self.sums.iter().zip(&self.counts)) {
+            *mean = (*sum as f64 / *count as f64) as f32;
+        }
+        Some(means)
+    }
+}
+
+/// The black level of a sensor, measured on its masked photosites.
+///
+/// `samples` holds the part of the sensor given by `held`; an area inside it is read from there,
+/// and any other is decoded from the file, so a window decode measures exactly what a whole
+/// decode does and the two develop identically. Nothing here fails the decode: whatever cannot
+/// be read or believed is simply not measured. A measurement is believed only when it covers
+/// every CFA position and every mean lies below the white level.
+fn measure_masked_black_level(
+    data: &[u8],
+    layout: &SegmentLayout,
+    samples: &[u16],
+    held: &Rect,
+    areas: &[Rect],
+    white_level: f32,
+) -> Option<[f32; 4]> {
+    let mut accumulator = BlackAccumulator::default();
+    for area in areas {
+        if area.pixels() > raw_max_pixels() {
+            return None;
+        }
+        let inside = area.x >= held.x
+            && area.y >= held.y
+            && u64::from(area.x) + u64::from(area.width)
+                <= u64::from(held.x) + u64::from(held.width)
+            && u64::from(area.y) + u64::from(area.height)
+                <= u64::from(held.y) + u64::from(held.height);
+        if inside {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    let index = (y - held.y) as usize * held.width as usize + (x - held.x) as usize;
+                    if let Some(value) = samples.get(index) {
+                        accumulator.add(x, y, *value);
+                    }
+                }
+            }
+        } else {
+            visit_segments(data, layout, area, None, |segment| {
+                let left = segment.x.max(area.x);
+                let right = (segment.x + segment.width).min(area.x + area.width);
+                let top = segment.y.max(area.y);
+                let bottom = (segment.y + segment.height).min(area.y + area.height);
+                for y in top..bottom {
+                    for x in left..right {
+                        let index = (y - segment.y) as usize * segment.width as usize
+                            + (x - segment.x) as usize;
+                        if let Some(value) = segment.samples.get(index) {
+                            accumulator.add(x, y, *value);
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        }
+    }
+    let means = accumulator.means()?;
+    means
+        .iter()
+        .all(|level| level.is_finite() && *level >= 0.0 && *level < white_level)
+        .then_some(means)
 }
 
 fn read_active_area(ifd: &Ifd, width: u32, height: u32) -> (u32, u32, u32, u32) {
@@ -1247,6 +1391,8 @@ pub mod fixtures {
         pub cfa: [u8; 4],
         pub black: Vec<u32>,
         pub black_repeat: (u32, u32),
+        /// Whether `BlackLevel` is written at all; a file may declare none.
+        pub write_black_level: bool,
         pub white: u32,
         pub samples: Vec<u16>,
         pub compression: u32,
@@ -1312,6 +1458,7 @@ pub mod fixtures {
                 cfa: [0, 1, 1, 2],
                 black: vec![0],
                 black_repeat: (1, 1),
+                write_black_level: true,
                 white: 65535,
                 samples,
                 compression: COMPRESSION_NONE,
@@ -1361,6 +1508,12 @@ pub mod fixtures {
             self.black = black;
             self.black_repeat = repeat;
             self.white = white;
+            self
+        }
+
+        /// A file that declares no `BlackLevel` (and no repeat dimensions for it).
+        pub fn without_black_level(mut self) -> Self {
+            self.write_black_level = false;
             self
         }
 
@@ -1439,23 +1592,25 @@ pub mod fixtures {
                 entries.push((TAG_CFA_REPEAT_DIM, 3, vec![2, 0, 2, 0]));
                 entries.push((TAG_CFA_PATTERN, 1, self.cfa.to_vec()));
             }
-            entries.push((
-                TAG_BLACK_LEVEL_REPEAT_DIM,
-                3,
-                [
-                    (self.black_repeat.0 as u16).to_le_bytes(),
-                    (self.black_repeat.1 as u16).to_le_bytes(),
-                ]
-                .concat(),
-            ));
-            entries.push((
-                TAG_BLACK_LEVEL,
-                4,
-                self.black
-                    .iter()
-                    .flat_map(|value| value.to_le_bytes())
-                    .collect(),
-            ));
+            if self.write_black_level {
+                entries.push((
+                    TAG_BLACK_LEVEL_REPEAT_DIM,
+                    3,
+                    [
+                        (self.black_repeat.0 as u16).to_le_bytes(),
+                        (self.black_repeat.1 as u16).to_le_bytes(),
+                    ]
+                    .concat(),
+                ));
+                entries.push((
+                    TAG_BLACK_LEVEL,
+                    4,
+                    self.black
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect(),
+                ));
+            }
             push_long(&mut entries, TAG_WHITE_LEVEL, self.white);
             if let Some(iso) = self.iso {
                 push_short(&mut entries, TAG_ISO, iso as u16);
@@ -2167,5 +2322,161 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An 8 x 8 sensor whose first `rows` rows are masked: each CFA position there holds a
+    /// distinct level (100, 110, 120, 130), and the picture below holds something else.
+    fn masked_sensor(rows: u32) -> Vec<u16> {
+        let mut samples = Vec::new();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                samples.push(if y < rows {
+                    (100 + 10 * CfaPattern::cell_index(x, y)) as u16
+                } else {
+                    (1000 + x + y * 8) as u16
+                });
+            }
+        }
+        samples
+    }
+
+    /// The bytes of a `MaskedAreas` entry: `(top, left, bottom, right)` per area.
+    fn masked_areas(areas: &[(u32, u32, u32, u32)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (top, left, bottom, right) in areas {
+            for value in [top, left, bottom, right] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn masked_photosites_give_the_black_level_of_a_file_that_declares_none() {
+        let data = DngBuilder::new(8, 8, masked_sensor(2))
+            .without_black_level()
+            .entry(TAG_MASKED_AREAS, 4, masked_areas(&[(0, 0, 2, 8)]))
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(
+            sensor.masked_black_level,
+            Some([100.0, 110.0, 120.0, 130.0])
+        );
+        assert_eq!(sensor.black_level, [100.0, 110.0, 120.0, 130.0]);
+    }
+
+    #[test]
+    fn a_declared_black_level_stays_authoritative_over_the_masked_photosites() {
+        let data = DngBuilder::new(8, 8, masked_sensor(2))
+            .levels(vec![64], (1, 1), 65535)
+            .entry(TAG_MASKED_AREAS, 4, masked_areas(&[(0, 0, 2, 8)]))
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.black_level, [64.0; 4]);
+        // Still recorded, so a disagreement can be shown.
+        assert_eq!(
+            sensor.masked_black_level,
+            Some([100.0, 110.0, 120.0, 130.0])
+        );
+    }
+
+    /// A region and the whole sensor must develop alike, so the window measures what the whole
+    /// decode does, whether or not the masked rows are inside the window.
+    #[test]
+    fn a_window_measures_the_same_black_level_as_the_whole_sensor() {
+        let data = DngBuilder::new(8, 8, masked_sensor(2))
+            .without_black_level()
+            .entry(TAG_MASKED_AREAS, 4, masked_areas(&[(0, 0, 2, 8)]))
+            .build();
+        let whole = decode(&data).unwrap();
+        for window in [
+            Rect {
+                x: 0,
+                y: 2,
+                width: 6,
+                height: 6,
+            },
+            Rect {
+                x: 2,
+                y: 0,
+                width: 6,
+                height: 4,
+            },
+            Rect {
+                x: 4,
+                y: 4,
+                width: 4,
+                height: 4,
+            },
+        ] {
+            let part = decode_window(&data, window).unwrap();
+            assert_eq!(part.black_level, whole.black_level, "{window:?}");
+            assert_eq!(
+                part.masked_black_level, whole.masked_black_level,
+                "{window:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn masked_areas_that_do_not_lie_on_the_sensor_are_not_believed() {
+        let data = DngBuilder::new(8, 8, masked_sensor(2))
+            .without_black_level()
+            .entry(
+                TAG_MASKED_AREAS,
+                4,
+                masked_areas(&[(0, 0, 2, 9), (3, 0, 3, 8), (5, 4, 2, 8), (0, 0, 9, 8)]),
+            )
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.masked_black_level, None);
+        assert_eq!(sensor.black_level, [0.0; 4]);
+        // A trailing partial entry is ignored rather than read past.
+        let mut ragged = masked_areas(&[(0, 0, 2, 8)]);
+        ragged.extend_from_slice(&1u32.to_le_bytes());
+        let data = DngBuilder::new(8, 8, masked_sensor(2))
+            .without_black_level()
+            .entry(TAG_MASKED_AREAS, 4, ragged)
+            .build();
+        assert_eq!(
+            decode(&data).unwrap().masked_black_level,
+            Some([100.0, 110.0, 120.0, 130.0])
+        );
+    }
+
+    /// One row cannot say what black is at the positions of the other row.
+    #[test]
+    fn a_mask_that_misses_a_cfa_position_measures_nothing() {
+        let data = DngBuilder::new(8, 8, masked_sensor(1))
+            .without_black_level()
+            .entry(TAG_MASKED_AREAS, 4, masked_areas(&[(0, 0, 1, 8)]))
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.masked_black_level, None);
+        assert_eq!(sensor.black_level, [0.0; 4]);
+    }
+
+    /// A measurement that is not below white would make the whole file undevelopable, so it is
+    /// not believed instead; the file still opens.
+    #[test]
+    fn a_measured_level_at_or_above_white_is_not_believed() {
+        let data = DngBuilder::new(8, 8, vec![4000; 64])
+            .levels(vec![0], (1, 1), 4000)
+            .without_black_level()
+            .entry(TAG_MASKED_AREAS, 4, masked_areas(&[(0, 0, 2, 8)]))
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.masked_black_level, None);
+        assert_eq!(sensor.black_level, [0.0; 4]);
+    }
+
+    #[test]
+    fn a_file_without_masked_areas_is_unchanged() {
+        let data = DngBuilder::new(8, 8, masked_sensor(0))
+            .levels(vec![512], (1, 1), 16383)
+            .build();
+        let sensor = decode(&data).unwrap();
+        assert_eq!(sensor.masked_black_level, None);
+        assert_eq!(sensor.black_level, [512.0; 4]);
     }
 }
