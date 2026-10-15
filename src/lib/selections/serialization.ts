@@ -20,6 +20,81 @@ const LEGACY_STORAGE_PREFIX = 'photoforge.selection-session.v1:';
 const MAX_SESSION_CHARACTERS = 3_500_000;
 const MAX_CANVAS_PIXELS = 100_000_000;
 const MAX_NAMED_MASKS = 100;
+/** The index of stored sessions, most recently saved first. */
+const SESSION_INDEX_KEY = 'photoforge.selection-session.index.v1';
+/**
+ * How many documents' selection sessions are kept. Each can be 3.5 million characters and the
+ * page's storage is a few megabytes, so with no limit the third large session filled it and every
+ * later save failed (the person was told persistence was off) while sessions of documents never
+ * opened again stayed for ever.
+ */
+export const MAX_STORED_SESSIONS = 12;
+
+type SessionWriter = Pick<Storage, 'setItem'> &
+  Partial<Pick<Storage, 'getItem' | 'removeItem' | 'key' | 'length'>>;
+
+function readIndex(storage: SessionWriter): string[] {
+  const known: string[] = [];
+  try {
+    const parsed = JSON.parse(storage.getItem?.(SESSION_INDEX_KEY) ?? '[]');
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (typeof entry === 'string' && entry.startsWith(STORAGE_PREFIX_V2) && !known.includes(entry)) {
+          known.push(entry);
+        }
+      }
+    }
+  } catch {
+    // an unreadable index is rebuilt from what is there
+  }
+  // Sessions saved before the index existed: adopted after the known ones, oldest unknown.
+  if (typeof storage.key === 'function' && typeof storage.length === 'number') {
+    for (let position = 0; position < storage.length; position += 1) {
+      const name = storage.key(position);
+      if (name && name.startsWith(STORAGE_PREFIX_V2) && !known.includes(name)) known.push(name);
+    }
+  }
+  return known;
+}
+
+/**
+ * Stores one session and keeps no more than `MAX_STORED_SESSIONS`, evicting the least recently
+ * saved first. When the storage itself says no (its quota), the oldest others are given up one
+ * at a time until this one fits: the document being edited is the one that matters.
+ */
+function storeWithRetention(storage: SessionWriter, key: string, json: string) {
+  const order = [key, ...readIndex(storage).filter((entry) => entry !== key)];
+  const evicted = order.splice(MAX_STORED_SESSIONS);
+  const forget = (entry: string) => {
+    try {
+      storage.removeItem?.(entry);
+    } catch {
+      // a session that cannot be removed stays; nothing depends on it
+    }
+  };
+  try {
+    storage.setItem(key, json);
+  } catch (error) {
+    let stored = false;
+    while (!stored && order.length > 1 && storage.removeItem) {
+      const oldest = order.pop() as string;
+      forget(oldest);
+      try {
+        storage.setItem(key, json);
+        stored = true;
+      } catch {
+        // still no room: give up the next oldest
+      }
+    }
+    if (!stored) throw error;
+  }
+  evicted.forEach(forget);
+  try {
+    storage.setItem(SESSION_INDEX_KEY, JSON.stringify(order));
+  } catch {
+    // the index is a convenience; the session itself is stored
+  }
+}
 
 export function documentSelectionKey(sourcePath: string, width: number, height: number): string {
   const value = `${normalizeSourcePath(sourcePath)}\u0000${width}x${height}`;
@@ -46,14 +121,14 @@ export function legacyDocumentSelectionKey(filename: string, width: number, heig
 
 export function saveSelectionSession(
   state: SelectionState,
-  storage: Pick<Storage, 'setItem'> = localStorage
+  storage: SessionWriter = localStorage
 ): boolean {
   try {
     const candidate = parseV2SelectionState(state, state.documentKey);
     if (!candidate) return false;
     const json = JSON.stringify(candidate);
     if (json.length > MAX_SESSION_CHARACTERS) return false;
-    storage.setItem(`${STORAGE_PREFIX_V2}${state.documentKey}`, json);
+    storeWithRetention(storage, `${STORAGE_PREFIX_V2}${state.documentKey}`, json);
     return true;
   } catch {
     return false;
