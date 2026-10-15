@@ -26,6 +26,8 @@ function Reset-Mocks {
     $script:running = @()
     $script:paths = @{ $commonDesktop=$true }
     $script:linked = @{}
+    $script:unreadable = @{}
+    $script:missing = @{}
     $script:userSnapshot = 'absent'
     $script:registeredPath = $machinePath
     $script:fakeHash = 'A' * 64
@@ -42,7 +44,9 @@ function Registered-Products { $script:products }
 function Get-Process { param($Name, $Id, $ErrorAction) $script:running }
 function Test-Path { param($LiteralPath, $PathType) $script:paths.ContainsKey($LiteralPath) -and $script:paths[$LiteralPath] }
 function Get-Item {
-    param($LiteralPath, [switch]$Force)
+    param($LiteralPath, [switch]$Force, $ErrorAction)
+    if ($script:unreadable[$LiteralPath]) { throw [UnauthorizedAccessException]::new('Mock path access denied.') }
+    if ($script:missing[$LiteralPath]) { throw [Management.Automation.ItemNotFoundException]::new('Mock missing entry.') }
     $item = [pscustomobject]@{ Attributes=$(if ($script:linked[$LiteralPath]) { [IO.FileAttributes]::ReparsePoint } else { [IO.FileAttributes]::Directory }) }
     $item | Add-Member ScriptMethod GetValue { param($Name) $script:staleDirectory }
     $item | Add-Member ScriptMethod Close { }
@@ -119,6 +123,18 @@ Test-Guard 'linked path refuses inspection' {
     $script:paths[$machinePath] = $true
     $script:linked[$machinePath] = $true
     Expect-Refusal { Assert-NoLinks $machinePath } 'linked path'
+}
+Test-Guard 'dangling links cannot bypass a false Test-Path result' {
+    $script:linked[$machinePath] = $true
+    Expect-Refusal { Assert-NoLinks $machinePath } 'linked path'
+}
+Test-Guard 'inaccessible path inspection fails closed' {
+    $script:unreadable[$machinePath] = $true
+    Expect-Refusal { Assert-NoLinks $machinePath } 'access denied'
+}
+Test-Guard 'genuinely missing entries do not require creation' {
+    $script:missing[$machinePath] = $true
+    Assert-NoLinks $machinePath
 }
 Test-Guard 'missing shared Desktop refuses preflight' {
     $script:paths.Remove($commonDesktop)

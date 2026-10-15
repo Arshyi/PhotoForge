@@ -236,6 +236,15 @@ Windows SmartScreen can warn. The NSIS installer is per-user. Published MSI vers
 of unsafe legacy MSI migration. Built-table and elevated lifecycle evidence are required
 before treating that candidate policy as validated (see `docs/release-0-15-2.md`).
 
+For study-friendly background work, use source tests, installer guard tests and read-only
+package inspection; keep resource-heavy Rust matrix builds on hosted CI. The NSIS harness
+now defaults to read-only preflight and requires a pinned explicit package plus its exact
+NSIS-marked payload reference. Installation/removal are separate, ordinary-user actions in
+a disposable pristine test account; neither launches PhotoForge. Existing or stale product
+state is protected, not cleaned automatically. Its no-shortcut/update-mode payload test is
+not full native shortcut/uninstall acceptance. See [`tools/validate/README.md`](../tools/validate/README.md)
+before running any window, clipboard or installer scenario.
+
 ## Layout of the repository
 
 | Path | What it holds |

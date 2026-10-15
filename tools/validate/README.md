@@ -5,9 +5,22 @@ list, the real WebView2, the installers, the window closing. This directory hold
 drove the release executable in a real window for Phase 15.9 and found three defects no test had
 (see [`docs/phase-15-9-1-results.md`](../../docs/phase-15-9-1-results.md)).
 
-Everything here is Windows-only, runs as the ordinary user (apart from the MSI's own UAC prompts),
-and leaves the person's own PhotoForge settings alone: each run gets its own `LOCALAPPDATA` and
-WebView2 profile under `<work>\validate`.
+Everything here is Windows-only and runs as the ordinary user (apart from the MSI's own UAC
+prompts). The window scenarios use separate `LOCALAPPDATA` and WebView2 profiles under
+`<work>\validate`. Installer registration is real Windows state, not isolated by those folders;
+the staged installer harnesses refuse existing installations/state rather than replacing them.
+
+## Working without interrupting the desktop
+
+Source checks, unit tests (including both installer guard suites), read-only package inspection
+and documentation can run without opening PhotoForge. These do not require display-scale,
+mouse, keyboard or clipboard changes. Full Rust gates can be resource-heavy; use hosted CI
+while the laptop is in use instead of starting redundant local builds.
+
+Window scenarios below **do** open/resize/use windows; the clipboard scenario replaces the
+clipboard temporarily. Run them in an agreed interactive block, not on a timer or as background
+work during someone else's desktop activity. Neither staged installer harness launches the
+application. Their receipts deliberately cannot establish native GUI acceptance.
 
 ## How it works
 
@@ -16,7 +29,7 @@ WebView2 profile under `<work>\validate`.
 * `cdp.mjs` is a small DevTools-protocol client (Node 22+, no dependencies). It sends pointer
   events into the page through CDP (not native desktop input), takes
   screenshots, reads the page's text, and `install`s a wrapper around `window.fetch` that
-  (a) answers the native file dialogs, which cannot be automated, with a path you give it
+  (a) substitutes the native file-dialog result with a path you give it
   (`window.__pf.nextOpen` / `nextSave`), and (b) logs every other IPC command with its outcome, so a
   permission refusal or an error shows up as data. Everything else (buttons, dialogs, the commands)
   is the application's own.
@@ -48,7 +61,7 @@ amount; `PF_BUDGET_BYTES=0` leaves the profile alone, and the application then p
 | Script | What it does |
 | --- | --- |
 | `drive_formats.ps1` | Opens and exports EXR, SVG and PSD through the real buttons; records each report dialog, the IPC commands and errors. Needs the samples from `tools/fetch_exr_samples.py`, `fetch_svg_samples.py`, `fetch_psd_samples.py`. Then `python tools\validate\check_formats.py` reads the outputs with OpenEXR, resvg and psd-tools. |
-| `nsis_lifecycle.ps1` | Installs the NSIS installer silently, opens a RAW region in the installed app, closes it, uninstalls; reports files, registration, shortcuts and what is left. **Installs to and removes `%LOCALAPPDATA%\PhotoForge`**: do not run it on a machine where you use an installed PhotoForge. |
+| `nsis_lifecycle.ps1` | Guarded, separately requested NSIS payload/registration stages; read-only preflight by default, explicit package/hash and exact NSS-marked payload reference, ordinary-user scope and a fresh owned install path. Refuses existing/stale product state, changed files, links and unexpected contents. No app launch, forced closing, clipboard access, elevation or cleanup deletion. Suppresses shortcuts; normal shortcut/user-uninstall acceptance is separate. |
 | `check_msi.ps1` | Read-only built MSI table inspection: scope, registry view, directory search, migration refusal, payload and shared-Desktop protection. No installation or custom actions. |
 | `msi_lifecycle.ps1` | Guarded, staged all-users validation. Explicit package, read-only preflight by default, refusal of existing installs/shortcuts/processes, exact product/run ownership. Install/removal each need a person's UAC consent. No app launching, forced closing or directory deletion. |
 | `clipboard_window.ps1` | Copies and pastes with real key events (Ctrl+C, Ctrl+Shift+C, Ctrl+V, the palette) and reads and writes the clipboard from outside with `clipboard_probe.py` (Pillow): what a copy puts there, pixel for pixel, and what a paste reads. 14 checks. **Replaces the clipboard**: saves the whole of it first with `tools\clipboard_backup.ps1` and puts it back at the end (refuses if something on it cannot be put back; `-AllowLoss`). Needs `.work\venv` (Pillow) and `node tools\validate\make_pictures.mjs` (run on demand). |
@@ -61,6 +74,48 @@ the scenarios (and you, with `node cdp.mjs evalfile`) use.
 Clipboard runs require a fresh backup directory. The backup helper refuses to overwrite
 an existing nonempty backup and verifies its contents before restoration. Do not use
 `-AllowLoss` for release acceptance. A passing CDP scenario is not a native hands-on pass.
+
+## Guarded NSIS payload/registration checks
+
+Use a disposable, non-elevated 64-bit Windows test account with no PhotoForge installation,
+product registry state (even stale), shortcuts or autostart entry. A stale retained path in the
+current account is a refusal, not permission to delete that state. Do not bypass the guards.
+
+Pin a known candidate hash and retain the **exact NSS-marked executable** from that NSIS
+bundle independently. An MSI-marked or unbundled executable is rejected as a reference, even
+if the only anticipated difference is the Tauri bundle-kind marker. The installed application
+and bundled notices must hash-match their pinned references before removal is permitted.
+
+```powershell
+# Default action: inspect only. Replace both paths and the reviewed 64-character hash.
+$candidate = 'C:\candidate\PhotoForge_0.15.2_x64-setup.exe'
+$candidateHash = '<REVIEWED_SHA256>'
+$payload = 'C:\candidate\nsis-reference-photoforge.exe'
+.\tools\validate\nsis_lifecycle.ps1 -Setup $candidate -SetupSha256 $candidateHash -ReferenceExe $payload
+.\tools\validate\nsis_lifecycle.ps1 -Action Install -Setup $candidate -SetupSha256 $candidateHash -ReferenceExe $payload
+# Use only the printed receipt path; GUI testing, if wanted, is separately scheduled.
+.\tools\validate\nsis_lifecycle.ps1 -Action Verify -RunDirectory C:\repo\.work\nsis-lifecycle\run-PRINTED_ID
+.\tools\validate\nsis_lifecycle.ps1 -Action Uninstall -RunDirectory C:\repo\.work\nsis-lifecycle\run-PRINTED_ID
+```
+
+Installation uses `/S /NS` without `/R`, suppressing shortcuts and automatic app launch.
+Removal executes a hash-checked uninstaller copy retained with the receipt, with `/S /UPDATE`
+and `_?=`. Update mode preserves personal jump lists/autostart/shortcuts; it does **not** qualify
+the normal shortcut or full user-uninstall lifecycle. The final, unquoted `/D=` and `_?=`
+arguments follow the [NSIS command-line rules](https://nsis.sourceforge.io/Docs/Chapter3.html).
+`_?=` prevents the temporary relaunch, so the bounded wait observes the actual uninstaller.
+
+Timeouts are pending, nonzero exits are failures and an exit code lost after a timeout stays
+unknown. No timed-out process is killed or uncertain removal automatically repeated. The
+upstream silent uninstaller retains its install-location registry key; the harness records and
+leaves that residue, and a subsequent pristine-account test refuses it. It never deletes the
+receipt, installer copy, arbitrary registry state, user data or leftover files to manufacture a
+pass. Upstream silent NSIS can kill a running same-name app: the harness checks immediately
+before starting it, but a dedicated test session is still required to avoid a concurrent launch.
+
+Run `.\tools\validate\nsis_lifecycle.test.ps1` for hermetic guard regressions. These mock the
+process/registry/filesystem boundaries and use memory streams for marker-parser probes;
+they do not execute an installer or prove a packaged application's native behaviour.
 
 ## Doing it by hand
 

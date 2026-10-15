@@ -26,8 +26,13 @@ function Full-Path([string]$path) { [IO.Path]::GetFullPath($path).TrimEnd('\') }
 function Assert-NoLinks([string]$path) {
     $cursor = Full-Path $path
     while ($cursor) {
-        if (Test-Path -LiteralPath $cursor) {
-            $item = Get-Item -LiteralPath $cursor -Force
+        # Test-Path alone can hide dangling links and access errors.
+        $item = $null
+        try { $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop }
+        catch {
+            if ($_.Exception -isnot [Management.Automation.ItemNotFoundException]) { throw }
+        }
+        if ($item) {
             Assert-Run (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "Refusing a linked path: $cursor"
         }
         $parent = [IO.Path]::GetDirectoryName($cursor)
