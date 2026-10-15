@@ -80,6 +80,8 @@ an existing nonempty backup and verifies its contents before restoration. Do not
 Use a disposable, non-elevated 64-bit Windows test account with no PhotoForge installation,
 product registry state (even stale), shortcuts or autostart entry. A stale retained path in the
 current account is a refusal, not permission to delete that state. Do not bypass the guards.
+An existing valid WebView2 version registration is required, so this test does not download
+or provision that prerequisite. This check does not prove runtime health or other-account access.
 
 Pin a known candidate hash and retain the **exact NSS-marked executable** from that NSIS
 bundle independently. An MSI-marked or unbundled executable is rejected as a reference, even

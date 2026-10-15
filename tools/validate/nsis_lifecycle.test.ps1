@@ -27,6 +27,8 @@ $script:passed = 0
 
 function Reset-Mocks {
     $script:paths = @{ 'C:\mock\setup.exe'=$true; 'C:\mock\reference.exe'=$true }
+    $script:paths['HKLM:\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}']=$true
+    $script:runtimeVersion='147.0.0.0'
     $script:linked = @{}
     $script:unreadable = @{}
     $script:missing = @{}
@@ -92,6 +94,11 @@ function Get-ChildItem {
     if ($LiteralPath -eq $state.installDirectory) { $script:rootItems }
     elseif ($LiteralPath -eq (Join-Path $state.installDirectory 'licenses')) { $script:licenseItems }
     else { throw "Unexpected directory enumeration: $LiteralPath" }
+}
+function Get-ItemProperty {
+    param($LiteralPath, $Name, $ErrorAction)
+    if ($LiteralPath -notlike '*EdgeUpdate\Clients\*' -or $Name -ne 'pv') { throw 'Unexpected registry value read.' }
+    [pscustomobject]@{ pv=$script:runtimeVersion }
 }
 function Get-FileHash {
     param($LiteralPath, $Algorithm)
@@ -266,6 +273,18 @@ Test-Guard 'installer hash and version are pinned' {
 Test-Guard 'elevated manifest is rejected before process launch' {
     $script:manifestLevel='requireAdministrator'
     Expect-Refusal { Assert-Package $state.setup $state.setupHash $state.version } 'asInvoker'
+}
+Test-Guard 'missing WebView2 refuses provisioning or installer launch' {
+    $script:paths.Remove('HKLM:\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}')
+    Expect-Refusal { Invoke-OwnedProcess $state.setup '/S' 'install' } 'will not download'
+    if ($script:launches.Count) { throw 'Missing prerequisite started provisioning.' }
+}
+Test-Guard 'per-user WebView2 fallback is allowed but invalid versions are refused' {
+    $script:paths.Remove('HKLM:\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}')
+    $script:paths['HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}']=$true
+    Assert-WebView2Present
+    $script:runtimeVersion='invalid'
+    Expect-Refusal { Assert-WebView2Present } 'missing/invalid'
 }
 Test-Guard 'streaming bundle marker survives a read-buffer boundary' {
     $bytes=New-Object byte[] 65600

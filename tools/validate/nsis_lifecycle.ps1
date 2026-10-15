@@ -55,6 +55,19 @@ function Assert-OrdinaryUser {
 function Assert-NoApp {
     Assert-Run (@(Get-Process -Name photoforge -ErrorAction SilentlyContinue).Count -eq 0) 'Close PhotoForge yourself first; no session will be closed by this harness.'
 }
+function Assert-WebView2Present {
+    # Match the pinned x64 NSIS prerequisite lookup. A version registration is only
+    # a prerequisite guard, not proof of runtime health or availability to other users.
+    $guid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    foreach ($key in "HKLM:\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid",
+        "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$guid") {
+        if (-not (Test-Path -LiteralPath $key)) { continue }
+        $version = [version]'0.0.0.0'
+        $value = (Get-ItemProperty -LiteralPath $key -Name pv -ErrorAction Stop).pv
+        if ([version]::TryParse([string]$value, [ref]$version) -and $version -gt [version]'0.0.0.0') { return }
+    }
+    throw 'WebView2 prerequisite registration is missing/invalid; this harness will not download or provision it.'
+}
 function Registered-Products {
     foreach ($hive in $userUninstallHive, 'HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
@@ -279,6 +292,7 @@ function Invoke-OwnedProcess([string]$file, [string]$arguments, [string]$operati
     Assert-Run ($operation -in 'install', 'uninstall' -and $file -ieq $expected) 'Refusing an unowned executable/operation.'
     Assert-OrdinaryUser
     Assert-NoApp # Last check: upstream silent NSIS can kill a running same-name app.
+    if ($operation -eq 'install') { Assert-WebView2Present }
     $state.phase = "$operation-requested"
     $state.lastExitCode = $null
     $state.exitCodeUnobserved = $false
@@ -339,6 +353,7 @@ if ($Action -in 'Verify', 'Uninstall') {
         'licenses\Tauri-MIT.txt'=(Get-FileHash -LiteralPath (Join-Path $repoPath 'src-tauri\installer\Tauri-MIT.txt') -Algorithm SHA256).Hash
     }
     Assert-Pristine
+    Assert-WebView2Present
     Assert-NoLinks $runRoot
     if ($Action -eq 'Preflight') {
         [pscustomobject]@{ status='preflight-pass'; setup=$Setup; setupHash=$SetupSha256.ToLowerInvariant();
